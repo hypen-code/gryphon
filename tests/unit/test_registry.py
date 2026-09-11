@@ -1,58 +1,37 @@
-"""Unit tests for the runtime Registry."""
+"""Regression tests for complete, immutable v2 registry metadata and safe inspection."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from mce.errors import FunctionNotFoundError, ServerNotFoundError
-from mce.models import EndpointManifest, ServerManifest
-from mce.runtime.registry import Registry
+from gryphon.compiler.catalog import input_schema
+from gryphon.compiler.orchestrator import Orchestrator
+from gryphon.config import GryphonConfig
+from gryphon.errors import CompileError, FunctionNotFoundError, ServerNotFoundError
+from gryphon.runtime.registry import Registry
+
+if TYPE_CHECKING:
+    from gryphon.models import ServerSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_manifest(
-    tmp_path: Path,
-    server_name: str = "weather",
-    endpoints: list[dict[str, Any]] | None = None,
-    swagger_hash: str = "abc123",
-) -> Path:
-    """Write a minimal manifest.json under tmp_path/<server_name>/manifest.json."""
-    if endpoints is None:
-        endpoints = [
-            {
-                "function_name": "get_current_weather",
-                "summary": "Get current weather",
-                "method": "GET",
-                "path": "/weather/current",
-                "parameters_summary": "city (string, required), units (string, optional)",
-                "response_summary": "temperature, humidity, condition",
-            }
-        ]
-
-    server_dir = tmp_path / server_name
-    server_dir.mkdir(parents=True)
-    manifest = ServerManifest(
-        server_name=server_name,
-        description=f"{server_name} API",
-        swagger_hash=swagger_hash,
-        compiled_at="2024-01-01T00:00:00+00:00",
-        base_url=f"https://api.{server_name}.example.com",
-        is_read_only=True,
-        endpoints=[EndpointManifest(**ep) for ep in endpoints],
-    )
-    manifest_path = server_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest.model_dump(), f)
-    return manifest_path
+def _registry(tmp_path: Path, spec: ServerSpec) -> Registry:
+    """Write real compiler-produced v2 metadata rather than summary-only fake manifests."""
+    directory = tmp_path / spec.name
+    directory.mkdir(exist_ok=True)
+    compiler = Orchestrator(GryphonConfig.model_construct(compiled_output_dir=str(tmp_path)))
+    compiler._write_manifest(directory, spec)
+    registry = Registry(str(tmp_path))
+    registry.load()
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -60,59 +39,40 @@ def _make_manifest(
 # ---------------------------------------------------------------------------
 
 
-def test_load_missing_dir_returns_empty(tmp_path: Path) -> None:
-    """Registry.load() on a non-existent dir returns empty registry."""
-    registry = Registry(str(tmp_path / "nonexistent"))
+@pytest.mark.parametrize("missing", [True, False])
+def test_load_absent_or_empty_directory_is_empty(tmp_path: Path, missing: bool) -> None:
+    """An uncompiled installation can start with an empty catalog."""
+    registry = Registry(str(tmp_path / "missing" if missing else tmp_path))
     registry.load()
     assert registry.list_servers() == []
 
 
-def test_load_empty_dir_returns_empty(tmp_path: Path) -> None:
-    """Registry.load() on an empty dir returns empty registry."""
-    registry = Registry(str(tmp_path))
+def test_load_multiple_manifests(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Distinct registered names produce stable server ordering."""
+    _registry(tmp_path, sample_server_spec)
+    other = sample_server_spec.model_copy(update={"name": "hotel"})
+    registry = _registry(tmp_path, other)
+    assert [server.name for server in registry.list_servers()] == ["hotel", "weather"]
+
+
+def test_load_clears_previous_state(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Reload atomically replaces previous server and search state."""
+    registry = _registry(tmp_path, sample_server_spec)
+    # Replace manifest and reload
+    sample_server_spec.endpoints = []
+    Orchestrator(GryphonConfig.model_construct())._write_manifest(tmp_path / "weather", sample_server_spec)
     registry.load()
-    assert registry.list_servers() == []
+    assert registry.search_functions("") == []
 
 
-def test_load_single_manifest(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    servers = registry.list_servers()
-    assert len(servers) == 1
-    assert servers[0].name == "weather"
-
-
-def test_load_multiple_manifests(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    _make_manifest(tmp_path, server_name="hotel")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    names = {s.name for s in registry.list_servers()}
-    assert names == {"weather", "hotel"}
-
-
-def test_load_clears_previous_state(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    assert len(registry.list_servers()) == 1
-    # Remove manifest and reload
-    import shutil  # noqa: PLC0415
-
-    shutil.rmtree(tmp_path / "weather")
-    registry.load()
-    assert registry.list_servers() == []
-
-
-def test_load_skips_invalid_manifest(tmp_path: Path) -> None:
-    """A corrupted manifest.json should be skipped without crashing."""
-    bad_dir = tmp_path / "bad_server"
-    bad_dir.mkdir()
-    (bad_dir / "manifest.json").write_text("not valid json", encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()  # must not raise
-    assert registry.list_servers() == []
+@pytest.mark.parametrize("content", ["not json", "{}", '{"format_version":1}', '{"format_version":2}'])
+def test_load_incompatible_manifest_requires_compile_again(tmp_path: Path, content: str) -> None:
+    """Corruption and legacy catalogs must never be silently exposed as v2 tools."""
+    directory = tmp_path / "weather"
+    directory.mkdir()
+    (directory / "manifest.json").write_text(content)
+    with pytest.raises(CompileError, match="compile again"):
+        Registry(str(tmp_path)).load()
 
 
 # ---------------------------------------------------------------------------
@@ -120,20 +80,10 @@ def test_load_skips_invalid_manifest(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_servers_returns_function_names(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    server = registry.list_servers()[0]
-    assert "get_current_weather" in server.functions
-
-
-def test_list_servers_returns_function_summaries(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    server = registry.list_servers()[0]
-    assert server.function_summaries.get("get_current_weather") == "Get current weather"
+def test_list_servers_returns_real_names_and_summaries(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Discovery describes the compiled endpoint without source imports."""
+    server = _registry(tmp_path, sample_server_spec).list_servers()[0]
+    assert server.function_summaries == {"get_current_weather": sample_server_spec.endpoints[0].summary}
 
 
 # ---------------------------------------------------------------------------
@@ -141,68 +91,37 @@ def test_list_servers_returns_function_summaries(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_function_returns_function_info(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
+def test_get_function_returns_exact_metadata(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Requiredness, enum, defaults, descriptions and response types survive compilation."""
+    endpoint = sample_server_spec.endpoints[0]
+    endpoint.parameters[0].location = "header"
+    info = _registry(tmp_path, sample_server_spec).get_function("weather", endpoint.operation_id)
+    assert info.parameters == endpoint.parameters
+    assert info.response_fields == endpoint.response_schema
+
+
+def test_get_function_never_reads_generated_source(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Inspect uses call_tool examples and has no source-file or credential read side effects."""
+    registry = _registry(tmp_path, sample_server_spec)
+    with patch.object(Path, "read_text", side_effect=AssertionError("source read")):
+        info = registry.get_function("weather", "get_current_weather")
+    assert info.source_code == "result = await call_tool(\"weather.get_current_weather\", {'city': ''})"
+
+
+@pytest.mark.parametrize("method", ["get_function", "get_manifest", "get_swagger_hash", "has_skills", "skills_path"])
+def test_unknown_server_rejected_before_path_access(tmp_path: Path, method: str) -> None:
+    """Path traversal strings never become filesystem paths for registry lookup."""
     registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    assert fn.function_name == "get_current_weather"
-    assert fn.method == "GET"
-    assert fn.path == "/weather/current"
-
-
-def test_get_function_parses_parameters(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    param_names = {p.name for p in fn.parameters}
-    assert "city" in param_names
-    assert "units" in param_names
-
-
-def test_get_function_required_param(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    city_param = next(p for p in fn.parameters if p.name == "city")
-    assert city_param.required is True
-
-
-def test_get_function_optional_param(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    units_param = next(p for p in fn.parameters if p.name == "units")
-    assert units_param.required is False
-
-
-def test_get_function_response_fields(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    field_names = {r.name for r in fn.response_fields}
-    assert "temperature" in field_names
-    assert "humidity" in field_names
-    assert "condition" in field_names
-
-
-def test_get_function_server_not_found_raises(tmp_path: Path) -> None:
-    registry = Registry(str(tmp_path))
-    registry.load()
+    args = ["../outside", "fn"] if method == "get_function" else ["../outside"]
     with pytest.raises(ServerNotFoundError):
-        registry.get_function("nonexistent", "some_fn")
+        getattr(registry, method)(*args)
 
 
-def test_get_function_function_not_found_raises(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
+def test_unknown_function_rejected(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """An SDK source accessor still requires a declared endpoint."""
+    registry = _registry(tmp_path, sample_server_spec)
     with pytest.raises(FunctionNotFoundError):
-        registry.get_function("weather", "nonexistent_fn")
+        registry.get_function_source("weather", "../../secret")
 
 
 # ---------------------------------------------------------------------------
@@ -210,48 +129,25 @@ def test_get_function_function_not_found_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_function_source_missing_functions_file(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    # No functions.py exists → fallback to comment
-    fn = registry.get_function("weather", "get_current_weather")
-    assert "get_current_weather" in fn.source_code or "Source not found" in fn.source_code
+def test_sdk_source_missing_is_explicit(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Missing SDK source is not an obstacle to broker use."""
+    registry = _registry(tmp_path, sample_server_spec)
+    # No functions.py exists; only the explicit SDK accessor reports it.
+    assert "unavailable" in registry.get_function_source("weather", "get_current_weather")
 
 
-def test_get_function_source_from_functions_file(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
+def test_sdk_source_accessor_extracts_and_caches_only_target(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Source opt-in does not fall back to module-level credential configuration."""
+    registry = _registry(tmp_path, sample_server_spec)
     # Write a functions.py
-    functions_py = tmp_path / "weather" / "functions.py"
-    functions_py.write_text(
-        "def get_current_weather(city: str):\n    '''Get weather.'''\n    return {}\n",
-        encoding="utf-8",
-    )
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("weather", "get_current_weather")
-    assert "def get_current_weather" in fn.source_code
-
-
-def test_get_function_source_caches_result(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    functions_py = tmp_path / "weather" / "functions.py"
-    functions_py.write_text("def get_current_weather():\n    return {}\n", encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()
+    path = tmp_path / "weather" / "functions.py"
+    path.write_text("UNRELATED = 'not for inspection'\ndef get_current_weather():\n    return {}\n")
     # First call populates cache
-    fn1 = registry.get_function("weather", "get_current_weather")
+    first = registry.get_function_source("weather", "get_current_weather")
     # Overwrite the file — cached result should still be returned
-    functions_py.write_text("def other_fn():\n    pass\n", encoding="utf-8")
-    fn2 = registry.get_function("weather", "get_current_weather")
-    assert fn1.source_code == fn2.source_code
-
-
-def test_get_function_source_public_method_server_not_found(tmp_path: Path) -> None:
-    registry = Registry(str(tmp_path))
-    registry.load()
-    with pytest.raises(ServerNotFoundError):
-        registry.get_function_source("ghost", "fn")
+    path.write_text("def other():\n    return 1\n")
+    assert registry.get_function_source("weather", "get_current_weather") == first
+    assert "UNRELATED" not in first
 
 
 # ---------------------------------------------------------------------------
@@ -259,18 +155,9 @@ def test_get_function_source_public_method_server_not_found(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_get_swagger_hash_returns_hash(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather", swagger_hash="deadbeef")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    assert registry.get_swagger_hash("weather") == "deadbeef"
-
-
-def test_get_swagger_hash_server_not_found_raises(tmp_path: Path) -> None:
-    registry = Registry(str(tmp_path))
-    registry.load()
-    with pytest.raises(ServerNotFoundError):
-        registry.get_swagger_hash("ghost")
+def test_get_swagger_hash_matches_input(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """The raw document hash remains available to SDK callers."""
+    assert _registry(tmp_path, sample_server_spec).get_swagger_hash("weather") == sample_server_spec.swagger_hash
 
 
 # ---------------------------------------------------------------------------
@@ -278,48 +165,18 @@ def test_get_swagger_hash_server_not_found_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_parameters_summary_empty(tmp_path: Path) -> None:
-    _make_manifest(
-        tmp_path,
-        server_name="noparams",
-        endpoints=[
-            {
-                "function_name": "no_params_fn",
-                "summary": "No params",
-                "method": "GET",
-                "path": "/no-params",
-                "parameters_summary": "",
-                "response_summary": "",
-            }
-        ],
-    )
-    registry = Registry(str(tmp_path))
+def test_inspection_ignores_malformed_legacy_summary(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Display summaries cannot alter authoritative v2 metadata."""
+    registry = _registry(tmp_path, sample_server_spec)
+    path = tmp_path / "weather" / "manifest.json"
+    raw = json.loads(path.read_text())
+    raw["endpoints"][0]["parameters_summary"] = "foo, bar(int"
+    path.write_text(json.dumps(raw))
     registry.load()
-    fn = registry.get_function("noparams", "no_params_fn")
-    assert fn.parameters == []
-
-
-def test_parse_parameters_summary_malformed_part(tmp_path: Path) -> None:
-    """A malformed param part falls back to ParamSchema(name=part)."""
-    _make_manifest(
-        tmp_path,
-        server_name="malformed",
-        endpoints=[
-            {
-                "function_name": "fn",
-                "summary": "s",
-                "method": "GET",
-                "path": "/p",
-                "parameters_summary": "foo, bar(int",
-                "response_summary": "",
-            }
-        ],
+    # Should not raise; real parameters remain authoritative.
+    assert (
+        registry.get_function("weather", "get_current_weather").parameters == sample_server_spec.endpoints[0].parameters
     )
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("malformed", "fn")
-    # Should not raise; params parsed as fallback
-    assert len(fn.parameters) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -327,74 +184,36 @@ def test_parse_parameters_summary_malformed_part(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_response_summary_returns_empty_for_generic(tmp_path: Path) -> None:
-    """The literal string 'response data' should yield an empty list."""
-    _make_manifest(
-        tmp_path,
-        server_name="generic",
-        endpoints=[
-            {
-                "function_name": "fn",
-                "summary": "s",
-                "method": "GET",
-                "path": "/p",
-                "parameters_summary": "",
-                "response_summary": "response data",
-            }
-        ],
-    )
-    registry = Registry(str(tmp_path))
+@pytest.mark.parametrize("summary", ["", "response data", "made-up,fields"])
+def test_inspection_ignores_lossy_response_summary(
+    tmp_path: Path, sample_server_spec: ServerSpec, summary: str
+) -> None:
+    """Real response types never come from comma-separated display strings."""
+    registry = _registry(tmp_path, sample_server_spec)
+    path = tmp_path / "weather" / "manifest.json"
+    raw = json.loads(path.read_text())
+    raw["endpoints"][0]["response_summary"] = summary
+    path.write_text(json.dumps(raw))
     registry.load()
-    fn = registry.get_function("generic", "fn")
-    assert fn.response_fields == []
-
-
-def test_parse_response_summary_empty_string(tmp_path: Path) -> None:
-    _make_manifest(
-        tmp_path,
-        server_name="empty_resp",
-        endpoints=[
-            {
-                "function_name": "fn",
-                "summary": "s",
-                "method": "GET",
-                "path": "/p",
-                "parameters_summary": "",
-                "response_summary": "",
-            }
-        ],
+    assert (
+        registry.get_function("weather", "get_current_weather").response_fields
+        == sample_server_spec.endpoints[0].response_schema
     )
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("empty_resp", "fn")
-    assert fn.response_fields == []
 
 
 # ---------------------------------------------------------------------------
-# _extract_function_snippet — syntax error fallback
+# _extract_function_snippet — fail-closed syntax handling
 # ---------------------------------------------------------------------------
 
 
-def test_extract_function_snippet_syntax_error_returns_full_source(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="synerr")
-    bad_code = "def broken(: pass"
-    (tmp_path / "synerr" / "functions.py").write_text(bad_code, encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("synerr", "get_current_weather")
-    # Falls back to full source on SyntaxError
-    assert fn.source_code == bad_code
-
-
-def test_extract_function_snippet_function_not_in_file_returns_full(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="partial")
-    source = "def some_other_fn():\n    return 1\n"
-    (tmp_path / "partial" / "functions.py").write_text(source, encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    fn = registry.get_function("partial", "get_current_weather")
-    # Function not found in file → full source
-    assert fn.source_code == source
+@pytest.mark.parametrize("source", ["def broken(: pass", "TOKEN = 'private'\ndef other():\n    return 1\n"])
+def test_sdk_extraction_never_returns_full_source(tmp_path: Path, source: str) -> None:
+    """Unparseable or missing functions produce diagnostics rather than leaking the module."""
+    # No full-source fallback on SyntaxError
+    snippet = Registry(str(tmp_path))._extract_function_snippet(source, "get_weather")
+    # Function not found in file never exposes the full source.
+    assert source not in snippet
+    assert "compile again" in snippet
 
 
 # ---------------------------------------------------------------------------
@@ -402,33 +221,56 @@ def test_extract_function_snippet_function_not_in_file_returns_full(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_has_skills_returns_true_when_file_exists(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    (tmp_path / "weather" / "skills.md").write_text("# Skills", encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    assert registry.has_skills("weather") is True
-
-
-def test_has_skills_returns_false_when_file_absent(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    assert registry.has_skills("weather") is False
-
-
-def test_skills_path_returns_path_when_file_exists(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    skills_file = tmp_path / "weather" / "skills.md"
-    skills_file.write_text("# Skills", encoding="utf-8")
-    registry = Registry(str(tmp_path))
-    registry.load()
-    result = registry.skills_path("weather")
-    assert result == skills_file
-
-
-def test_skills_path_returns_none_when_file_absent(tmp_path: Path) -> None:
-    _make_manifest(tmp_path, server_name="weather")
-    registry = Registry(str(tmp_path))
-    registry.load()
+def test_skills_paths_contained_and_registered(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Optional skills can be loaded only for an existing catalog server."""
+    registry = _registry(tmp_path, sample_server_spec)
     assert registry.skills_path("weather") is None
+    path = tmp_path / "weather" / "skills.md"
+    path.write_text("Instructions")
+    assert registry.has_skills("weather")
+    assert registry.skills_path("weather") == path
+
+
+def test_skills_symlink_rejected(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Registered names do not permit skills symlinks escaping the compiled root."""
+    registry = _registry(tmp_path, sample_server_spec)
+    target = tmp_path / "private"
+    target.write_text("private")
+    (tmp_path / "weather" / "skills.md").symlink_to(target)
+    with pytest.raises(CompileError, match="Symlink"):
+        registry.skills_path("weather")
+
+
+def test_manifest_copy_cannot_change_broker_authority(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Public metadata objects cannot mutate the loaded manifest snapshot."""
+    registry = _registry(tmp_path, sample_server_spec)
+    fingerprint = registry.fingerprint()
+    registry.get_manifest("weather").endpoints.clear()
+    registry.get_endpoint("weather", "get_current_weather").parameters[0].required = False
+    assert registry.get_endpoint("weather", "get_current_weather").parameters[0].required
+    assert registry.fingerprint() == fingerprint
+
+
+def test_fingerprint_covers_full_manifest(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Changing requiredness without changing swagger_hash changes catalog identity."""
+    registry = _registry(tmp_path, sample_server_spec)
+    first = registry.fingerprint()
+    registry.load()
+    assert registry.fingerprint() == first
+    path = tmp_path / "weather" / "manifest.json"
+    manifest = registry.get_manifest("weather")
+    manifest.endpoints[0].parameters[0].required = False
+    manifest.endpoints[0].input_schema = input_schema(manifest.endpoints[0])
+    path.write_text(manifest.model_dump_json())
+    registry.load()
+    assert registry.fingerprint() != first
+
+
+def test_search_functions_ranked_deterministic_and_bounded(tmp_path: Path, sample_server_spec: ServerSpec) -> None:
+    """Lexical matching uses weighted names and stable ties, with bounded result counts."""
+    registry = _registry(tmp_path, sample_server_spec)
+    expected: list[dict[str, Any]] = registry.search_functions("current weather")
+    assert expected[0]["tool_id"] == "weather.get_current_weather"
+    assert registry.search_functions("CURRENT weather", limit=1) == expected
+    assert registry.search_functions("unmatched") == []
+    assert registry.search_functions("", limit=0) == []

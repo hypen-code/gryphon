@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from mce.models import (
+from gryphon.models import (
+    BasicAuthConfig,
+    ExecutionScope,
     JwtAuthConfig,
     KeycloakAuthConfig,
     OAuth2AuthConfig,
@@ -106,7 +108,7 @@ def test_keycloak_auth_config_parses() -> None:
     auth = KeycloakAuthConfig(
         base_url="https://keycloak.example.com/auth",
         realm="myrealm",
-        client_id="mce",
+        client_id="gryphon",
         client_secret="secret",
         scope="openid",
     )
@@ -121,7 +123,7 @@ def test_keycloak_auth_config_via_swagger_source() -> None:
             "type": "keycloak",
             "base_url": "https://keycloak.example.com/auth",
             "realm": "myrealm",
-            "client_id": "mce",
+            "client_id": "gryphon",
             "client_secret": "sec",
         },
     )
@@ -243,3 +245,20 @@ def test_session_auth_invalid_content_type_raises() -> None:
             password="p",
             content_type="xml",  # type: ignore[arg-type]
         )
+
+
+def test_basic_auth_discriminated_union() -> None:
+    """Basic credentials retain their supported configuration entry point."""
+    source = SwaggerSource.model_validate(
+        {
+            **_BASE_SOURCE,
+            "auth": {"type": "basic", "username": "test-user", "password": "test-password"},
+        }
+    )
+    assert isinstance(source.auth, BasicAuthConfig)
+
+
+def test_execution_scope_defaults_are_host_owned() -> None:
+    """The broker accepts the shared execution authority contract."""
+    scope = ExecutionScope(run_id="run-test", deadline=1234.0)
+    assert (scope.owner, scope.max_calls, scope.calls, scope.cancelled) == ("local", 50, 0, False)

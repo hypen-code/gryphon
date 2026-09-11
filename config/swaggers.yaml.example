@@ -1,12 +1,4 @@
 servers:
   - name: weather
-    swagger_url: "https://api.weather.example.com/v1/openapi.json"
-    base_url: "https://api.weather.example.com/v1"
-    auth_header: "${WEATHER_API_KEY}"
+    swagger_url: ./examples/weather.yaml
     is_read_only: true
-
-  - name: hotel_booking
-    swagger_url: "./swaggers/hotel.yaml"
-    base_url: "https://api.hotel.example.com/v2"
-    auth_header: "Bearer ${HOTEL_API_TOKEN}"
-    is_read_only: false

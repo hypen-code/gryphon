@@ -1,23 +1,29 @@
-"""Shared pytest fixtures for MCE test suite."""
+"""Shared pytest fixtures for Gryphon test suite."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from mce.config import MCEConfig
-from mce.models import EndpointSpec, ParamSchema, ResponseField, ServerSpec, SwaggerSource
+from gryphon.config import GryphonConfig
+from gryphon.models import EndpointSpec, ParamSchema, ResponseField, ServerSpec, SwaggerSource
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
-def mce_config(tmp_path: Path) -> MCEConfig:
-    """Return a test MCEConfig pointing at temp directories."""
-    return MCEConfig(
+def gryphon_config(tmp_path: Path) -> GryphonConfig:
+    """Return a test GryphonConfig pointing at temp directories."""
+    options: dict[str, Any] = {"_env_file": None}
+    return GryphonConfig(
+        **options,
         compiled_output_dir=str(tmp_path / "compiled"),
         cache_db_path=str(tmp_path / "data" / "cache.db"),
+        run_db_path=str(tmp_path / "data" / "runs.db"),
+        artifact_dir=str(tmp_path / "data" / "artifacts"),
+        compile_on_startup=False,
         cache_enabled=True,
         cache_ttl_seconds=3600,
         execution_timeout_seconds=10,

@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.env.*
+config/swaggers.yaml
+compiled
+data
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage*
+htmlcov
+dist
+build
+**/__pycache__
+**/*.pyc

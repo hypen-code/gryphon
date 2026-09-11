@@ -1,748 +1,393 @@
-# MCE — MCP Code Execution
+# Gryphon
 
-> **APIs were designed for developers. MCE recompiles them for AI.**
+> **APIs were designed for developers. Gryphon makes them usable by AI agents.**
 
 [![CI](https://github.com/hypen-code/mcp-code-execution/actions/workflows/ci.yml/badge.svg)](https://github.com/hypen-code/mcp-code-execution/actions)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## The Problem
+Named for the legendary guardian, **Gryphon** sits between an agent's code and
+its API authority. It compiles OpenAPI catalogs, lets agents discover only the
+operations they need, and runs bounded Python through a credential-holding
+broker—not through unrestricted host execution.
 
-1. **Context window bloat** — Naive Swagger-to-MCP tools expose every API endpoint as a separate tool. A 200-endpoint API burns hundreds of tokens per call just describing tools the LLM will never use.
-2. **Tool processing limits** — MCP clients cap tool counts. Large APIs hit the limit and fail silently.
-3. **Insecure execution** — Running LLM-generated code on the host is dangerous. You need isolation.
-4. **Bloated responses** — Raw API responses dump everything: metadata, nulls, pagination envelopes, deprecated fields. The LLM sees 90% noise and wastes context on data it never needed.
-5. **Integration friction** — Every API with a Swagger spec should be instantly usable by an LLM. Instead, developers spend days writing glue code, auth wrappers, and prompt scaffolding just to call a single endpoint.
+The original idea remains: **a small set of meta-tools, not one MCP tool per API
+endpoint**. Discover → inspect → execute → reuse. Compose calls and reduce data
+in code before returning it to the model.
 
-## The Solution
+**Version 2.0.0** · Python **3.13+** · FastMCP **4.0.2** ·
+`pydantic-monty` **0.0.18**. Real-client conformance tests cover MCP
+**2026-07-28** negotiation and legacy initialization. Native MCP Tasks are not
+implemented or advertised; background runs use portable application handles.
 
-MCE exposes **4 core tools + 1 prompt** (plus optional tools) instead of N API-specific tools:
+Gryphon is a **local/operator deployment**, not a completed multi-tenant SaaS.
+The distribution name is `gryphon-runtime`; the import package and CLI are
+`gryphon`. This version is **not published to PyPI**: install from this checkout.
 
-```
-list_servers        → discover available APIs and their functions
-get_functions       → inspect 1–5 function signatures, typed return classes, and response schemas (batch)
-execute_code        → run Python in a sandboxed Docker container; returns a cache_id on success
-run_cached_code     → SIMD: re-run the same cached code with different input data
+## Quick start
 
-reusable_code_guide → prompt: concise rules for writing parameterized, cacheable code
-```
+Prerequisites: Git, [uv](https://docs.astral.sh/uv/), and Python 3.13+.
+Use Linux/macOS, or the container deployment on Windows; persistent-store locks
+require POSIX support. The default restricted profile needs **no Docker, model,
+model API key, or upstream credentials** for the included offline demo.
 
-Optional tools (enabled via `MCE_ENABLE_ADDITIONAL_TOOLS=true`):
-
-```
-list_skills         → list which servers have a skills guide available
-get_server_skills   → fetch a server's full skills guide on demand
-```
-
-The LLM workflow: **discover → inspect → execute → reuse (SIMD)**
-
-```mermaid
-flowchart TB
-    classDef component fill:#1e3a5f,stroke:#4a9eff,stroke-width:2px,color:#e0f0ff
-    classDef core     fill:#1a3a2a,stroke:#4caf82,stroke-width:2px,color:#d0ffe8
-    classDef tools    fill:#3a1a3a,stroke:#c084fc,stroke-width:2px,color:#f3e8ff
-    classDef external fill:#2a2a1a,stroke:#f0c040,stroke-width:2px,color:#fffbe0
-
-    subgraph MCE["MCE MCP Server"]
-        direction TB
-        subgraph Components["Components"]
-            Compiler["Compiler (setup)"]:::component
-            Runtime["Runtime (serve)"]:::component
-            Executor["Code Executor (Docker SDK)"]:::component
-        end
-
-        subgraph Core["Core Services"]
-            CS["SwaggerParser | FunctionRegistry | CacheStore | SecurityGuard | CredentialVault"]:::core
-        end
-
-        subgraph Tools["MCP Tools — exposed to LLM"]
-            T["list_servers | get_functions | execute_code | run_cached_code\n(+ optional: list_skills | get_server_skills)"]:::tools
-        end
-
-        Compiler --> CS
-        Runtime  --> CS
-        Executor --> CS
-    end
-
-    MCE --> Swagger["Swagger Sources"]:::external
-    MCE --> Docker["python:3.13-slim Docker Container"]:::external
-```
-
-## Quick Start
-
-### 1. Clone & Install
+Run these commands from the repository root:
 
 ```bash
 git clone https://github.com/hypen-code/mcp-code-execution.git
 cd mcp-code-execution
-pip install -e ".[dev]"
-
-# Optional: LLM-enhanced compilation (OpenAI, Gemini, Anthropic, OpenRouter)
-pip install -e ".[llm]"
-```
-
-### 2. Configure
-
-```bash
+uv sync --frozen --extra dev
 cp .env.example .env
-# Edit .env with your API credentials
-
 cp config/swaggers.yaml.example config/swaggers.yaml
-# Edit to point at your swagger URLs
+uv run --frozen gryphon compile
+uv run --frozen python examples/demo.py
 ```
 
-### 3. Build the Sandbox
+The config example uses [`examples/weather.yaml`](examples/weather.yaml), a
+local OpenAPI description of the public Open-Meteo forecast API. Compilation
+does not call the forecast endpoint. The demo uses a **real in-process MCP
+client**, computes a sum offline, then reuses the same recipe with new inputs.
+Compilation is optional for that computation; it adds weather discovery.
 
-```bash
-docker build -t mce-sandbox:latest sandbox/
-docker network create mce_network
-```
+### Connect an MCP client over stdio
 
-### 4. Compile Swagger Sources
+`uv run --frozen gryphon compile` prints MCP client JSON to **stdout**, even
+when all sources are already up to date. Logs stay on **stderr**. Copy its
+`mcpServers` entry into your client's configuration; no client settings are
+changed automatically. Dry runs, failed/empty compilations, and compilation
+inside `serve`/`run` do not print client JSON.
 
-```bash
-mce compile
-# ✅ Compiled: weather, hotel_booking (12 endpoints)
-# --- MCP Server Config (add to your MCP client) ---
-# { ... ready-to-use config snippet ... }
-
-# Optional: enhance docstrings and examples with an LLM
-mce compile --llm-enhance
-
-# Validate without writing output
-mce compile --dry-run
-
-# Remove compiled output and recompile
-mce clean compile
-```
-
-### 5. Run the MCP Server
-
-```bash
-# stdio mode (for Claude Desktop, Cursor, etc.)
-mce serve
-
-# HTTP mode
-mce serve --transport http --port 8000
-
-# Compile + serve in one command
-mce run
-
-# Use a custom .env file (works with all subcommands)
-mce serve --env-file /path/to/.env.production
-mce run --env-file /path/to/.env.staging
-```
-
-### 6. Connect to Your MCP Client
-
-Add to your `mcp_servers.json` (Claude Desktop example):
+The generated entry uses absolute storage paths, disables startup recompilation,
+and references the selected env-file path without copying its credentials.
+Keep operator settings/credentials in that private file or the launch environment.
+For this manual equivalent, replace `/absolute/path/to/mcp-code-execution` with
+your actual checkout path; clients may not expand `~`.
 
 ```json
 {
   "mcpServers": {
-    "mcp-code-execution": {
-      "command": "~/mcp-code-execution/.venv/bin/mce",
-      "args": ["serve"],
+    "gryphon": {
+      "command": "/absolute/path/to/mcp-code-execution/.venv/bin/gryphon",
+      "args": ["serve", "--env-file", "/absolute/path/to/mcp-code-execution/.env"],
       "env": {
-        "MCE_COMPILED_OUTPUT_DIR": "~/mcp-code-execution/compiled",
-        "MCE_SWAGGER_CONFIG_FILE": "~/mcp-code-execution/config/swaggers.yaml",
-        "MCE_DOCKER_IMAGE": "mce-sandbox:latest",
-        "MCE_NETWORK_MODE": "mce_network",
-        "MCE_CACHE_DB_PATH": "~/mcp-code-execution/data/cache.db"
+        "GRYPHON_COMPILE_ON_STARTUP": "false",
+        "GRYPHON_COMPILED_OUTPUT_DIR": "/absolute/path/to/mcp-code-execution/compiled",
+        "GRYPHON_SWAGGER_CONFIG_FILE": "/absolute/path/to/mcp-code-execution/config/swaggers.yaml",
+        "GRYPHON_CACHE_DB_PATH": "/absolute/path/to/mcp-code-execution/data/cache.db",
+        "GRYPHON_RUN_DB_PATH": "/absolute/path/to/mcp-code-execution/data/runs.db",
+        "GRYPHON_ARTIFACT_DIR": "/absolute/path/to/mcp-code-execution/data/artifacts"
       }
     }
   }
 }
 ```
 
-> `mce compile` prints a ready-to-use config snippet you can paste directly.
+Stdio trusts the local operator. Run only one Gryphon process per run database:
+stop the demo or existing server before starting another against the same paths.
+Logs go to stderr so stdout remains available for the MCP protocol.
 
-## How It Works
+## The MCP interface
 
-### Tool Workflow Example
+| Core tool | Purpose |
+|---|---|
+| `list_servers` | Compact, paginated API summaries |
+| `search_functions` | Find relevant capabilities without loading the whole catalog |
+| `get_functions` | Inspect schemas and invocation metadata for 1–5 functions |
+| `execute_code` | Execute code with structured `inputs` and optional `input_schema` |
+| `run_cached_code` | Reuse unchanged source with a complete new `params` object |
+| `submit_code` | Submit work and receive a persistent run receipt |
+| `get_run` | Poll a caller-owned run |
+| `cancel_run` | Revoke an active run and wait for its worker to stop |
+| `list_recipes` | Search the caller's cached recipe summaries |
+| `read_artifact` | Read caller-owned JSON output in bounded chunks |
 
-```
-LLM → list_servers()
-← { sandbox_libraries: [...], servers: [{ name: "weather", functions: [...] }] }
+The `reusable_code_guide` prompt explains the execution contract on demand.
+With `GRYPHON_ENABLE_ADDITIONAL_TOOLS=true`, `list_skills` and
+`get_server_skills` expose optional server guides. Guides are **untrusted data**,
+not embedded in initialization instructions and never write approval.
 
-LLM → get_functions([{"server_name": "weather", "function_name": "get_current_weather"}])
-← { functions: [{ parameters: [...], import_statement: "from weather.functions import get_current_weather", ... }] }
+Discovery responses include a registry fingerprint and truncation metadata.
+Follow `next_cursor` where provided; narrow searches when truncated. MCP
+`readOnlyHint` annotations are client hints, **not authorization**.
 
-LLM → execute_code("""
-from weather.functions import get_current_weather
+### Call an API, then reuse the program
 
-city = "London"           # top-level variable — the only thing that changes per request
+First search for weather, then call `get_functions` with:
 
-def main():
-    return get_current_weather(city=city, units="metric")
-
-result = main()
-""", description="get weather by city")
-← { success: true, data: { temperature: 15.2, condition: "Cloudy" }, cache_id: "abc123" }
-```
-
-### SIMD — Single Instruction, Multiple Data
-
-`run_cached_code` is the SIMD pattern: the same code runs unchanged, only the input data varies.
-The `cache_id` from any successful `execute_code` response is reused directly — no rewriting, no re-inspecting functions.
-
-```
-# User asks for Paris weather — city is the only thing that changes
-LLM → run_cached_code("abc123", params={"city": "Paris"})
-← { success: true, data: { temperature: 18.5, condition: "Sunny" }, cache_id: "def456" }
-
-# And again for Tokyo
-LLM → run_cached_code("abc123", params={"city": "Tokyo"})
-← { success: true, data: { temperature: 12.0, condition: "Clear" }, cache_id: "ghi789" }
+```json
+{"functions": [{"server_name": "weather", "function_name": "get_forecast"}]}
 ```
 
-For this to work, all dynamic values in `execute_code` must be **top-level variables** that `main()` reads as globals — never hardcoded inside `main()`.
+Use the inspected schema, not guessed parameter names. This `execute_code`
+payload calls the public API, unlike the offline demo:
 
-> **`get_functions` must be called before writing any `execute_code` payload.** It returns the exact `import_statement`, parameter names, and response schema. Guessing will produce broken code.
+```json
+{
+  "code": "result = await call_tool(\"weather.get_forecast\", {\"latitude\": inputs[\"latitude\"], \"longitude\": inputs[\"longitude\"], \"current\": \"temperature_2m\"})",
+  "description": "current weather by coordinates",
+  "inputs": {"latitude": 51.5074, "longitude": -0.1278},
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+      "longitude": {"type": "number", "minimum": -180, "maximum": 180}
+    },
+    "required": ["latitude", "longitude"],
+    "additionalProperties": false
+  }
+}
+```
 
-> **`execute_code` requires** a `main()` function (no arguments) that reads top-level variables, plus `result = main()` at module level.
-
-### Typed Return Types
-
-At compile time, MCE parses each endpoint's swagger response schema and generates a `TypedDict` class that exactly describes the response fields and their Python types. The `get_functions` tool returns this class definition alongside the function signature in `usage_example`:
+Inside restricted Python, the only external capability has **two arguments**:
 
 ```python
-# Returned by get_functions — ready to copy into execute_code
-class GetTreatmentCaseByIdResponse(TypedDict, total=False):
-    id: int
-    caseType: str
-    status: str
-    participants: list[Any]
-
-def get_treatment_case_by_id(id: int) -> GetTreatmentCaseByIdResponse:
-    ...
+result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"], "longitude": inputs["longitude"], "current": "temperature_2m"})
 ```
 
-This lets LLMs write chained code with confidence — field names and types are explicit, not guessed. Functions without a parseable swagger response schema fall back to `-> Any`.
+Pass the returned `cache_id` to `run_cached_code`:
 
-## Configuration
-
-### Custom `.env` File
-
-By default, MCE loads `.env` from the current working directory. You can override this with the `--env-file` flag on any subcommand:
-
-```bash
-mce compile --env-file /path/to/.env.production
-mce serve   --env-file /path/to/.env.staging
-mce run     --env-file /path/to/.env.local
-mce clean   --env-file /path/to/.env.local
+```json
+{"cache_id": "<returned-cache-id>", "params": {"latitude": 48.8566, "longitude": 2.3522}}
 ```
 
-Explicit environment variables always take precedence over values in the `.env` file.
+- `inputs` and `params` are JSON objects. `params` replaces the **entire** input
+  object; it is not a patch and does not recover previous input values.
+- Assign `result` to a JSON-native value. No `main()` is required; if you define
+  one, call it explicitly. Gryphon never auto-executes it.
+- Restricted Python supports no imports, filesystem, direct network, or host
+  environment access. It is a subset, not a drop-in CPython environment.
+- `input_schema` is bounded. References, regex constraints, and combinators such
+  as `$ref`, `pattern`, `allOf`, `anyOf`, and `oneOf` are rejected.
+- Recipe identity includes owner, exact source, schema, and catalog/policy
+  digest. Replay repeats validation and authorization; catalog or policy drift
+  rejects stale recipes. Reordering or repeating the same exact write permits
+  does not change policy identity; adding or removing a permit does.
+  **Input values are never rewritten into source.**
+- A recipe caches code, not an API response. Reuse can call the API again.
 
-### Environment Variables
+### Results, background runs, and cancellation
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MCE_LOG_LEVEL` | `INFO` | Log verbosity |
-| `MCE_DEBUG` | `false` | Enable debug mode |
-| `MCE_HOST` | `0.0.0.0` | HTTP server bind host |
-| `MCE_PORT` | `8000` | HTTP server port |
-| `MCE_COMPILE_ON_STARTUP` | `true` | Auto-compile swagger sources at startup |
-| `MCE_COMPILED_OUTPUT_DIR` | `./compiled` | Compiled functions directory |
-| `MCE_SWAGGER_CONFIG_FILE` | `./config/swaggers.yaml` | Swagger source definitions |
-| `MCE_LLM_ENHANCE` | `false` | Enable LLM docstring enhancement at compile time |
-| `MCE_LLM_MODEL` | `gemini/gemini-2.0-flash` | LiteLLM model string (`provider/model`) |
-| `MCE_LLM_API_KEY` | — | API key for the LLM provider |
-| `MCE_ENABLE_ADDITIONAL_TOOLS` | `false` | Enable optional `list_skills` and `get_server_skills` tools |
-| `MCE_LINT_ENABLED` | `false` | Enable ruff lint validation before sandbox execution |
-| `MCE_DOCKER_IMAGE` | `mce-sandbox:latest` | Sandbox image name |
-| `MCE_DOCKER_HOST` | — | Docker host socket (e.g. `unix:///var/run/docker.sock`) |
-| `MCE_EXECUTION_TIMEOUT_SECONDS` | `30` | Max code execution time |
-| `MCE_MAX_OUTPUT_SIZE_BYTES` | `1048576` | Max sandbox stdout size (1 MB) |
-| `MCE_NETWORK_MODE` | `mce_network` | Docker network for sandbox containers |
-| `MCE_SANDBOX_MODE` | `warm` | Execution mode: `warm` (persistent container pool) or `cold` (new container per request) |
-| `MCE_WARM_POOL_SIZE` | `2` | Number of persistent containers to pre-create in warm mode |
-| `MCE_CACHE_ENABLED` | `true` | Enable code caching |
-| `MCE_CACHE_TTL_SECONDS` | `3600` | Cache entry lifetime |
-| `MCE_CACHE_MAX_ENTRIES` | `500` | Maximum cached entries before LRU eviction |
-| `MCE_CACHE_DB_PATH` | `./data/cache.db` | SQLite cache database path |
-| `MCE_MAX_CODE_SIZE_BYTES` | `65536` | Maximum allowed code size (64 KB) |
-| `MCE_ALLOWED_DOMAINS` | — | Comma-separated API domain allowlist (empty = allow all) |
-| `MCE_{SERVER}_BASE_URL` | — | API base URL per server |
-| `MCE_{SERVER}_AUTH` | — | Auth header per server — set automatically from `auth:` config; or set directly (e.g. `Bearer <token>`) for servers without a typed auth block |
-| `MCE_{SERVER}_EXTRA_HEADERS` | — | JSON object of custom HTTP headers per server (e.g. `{"X-Version":"v1"}`) |
+Execution returns native structured MCP data with `success`, result `data`,
+handles when available, and stable `error_type` categories on failure. Docker
+backend unavailability retains `sandbox_unavailable` in tool results and saved
+receipts. Raw prints, upstream error bodies, and exception traces are omitted.
+A print-byte summary may be returned; do not use printing to deliver results.
 
-### Sandbox Execution Mode
+Large successful results within the full-result limit become owner-scoped JSON
+artifacts. Use `read_artifact` with the returned `artifact_id`, then follow
+`next_offset` until `eof`. Requested chunks are at most **8192 bytes** and may be
+smaller to fit the context budget. Artifacts do not bypass the full-result cap.
 
-MCE talks to Docker exclusively through **[aiodocker](https://github.com/aio-libs/aiodocker)** — a fully async Python client that never blocks the asyncio event loop. Two execution modes are available, switchable at any time via `MCE_SANDBOX_MODE`.
+`submit_code` accepts the same code/input contract as `execute_code`, returns an
+`id`, and can be polled with `get_run(run_id=...)`. Receipt states are `queued`,
+`running`, `succeeded`, `failed`, `cancelled`, and `interrupted`.
 
-#### Warm mode (default — `MCE_SANDBOX_MODE=warm`)
+Optional `idempotency_key` values deduplicate matching requests within an owner
+while the receipt is retained; conflicting requests fail. This is **not
+exactly-once delivery**. On restart, persisted queued/running receipts become
+`interrupted`; code and writes are **not automatically replayed or resumed**.
+Check upstream state before deliberately retrying an interrupted write.
 
-A pool of `MCE_WARM_POOL_SIZE` containers is created at server startup. Each container idles with `tail -f /dev/null`. Per request, a container is borrowed from the pool, `docker exec` runs the entrypoint inside it, and the container is returned for the next request. Cold-start overhead is paid **once at startup**, not per call.
+Cancellation revokes broker authority and waits for worker cleanup. It cannot
+undo an API action already accepted upstream. Receipt and artifact retention
+are bounded; they are not a permanent audit archive or durable workflow engine.
 
-Code is delivered via the `MCE_EXEC_CODE` environment variable (base64-encoded) so no interactive stdin pipe is required — making `exec` both simple and reliable.
+## Configure APIs and policy
 
-```
-mce serve          ← startup: 2 containers created, pool ready
-                      ~200 ms one-time cost
-
-execute_code(…)    ← borrow container → exec entrypoint → return container
-                      ~5–30 ms (no cold start)
-
-execute_code(…)    ← borrow container → exec entrypoint → return container
-                      ~5–30 ms again
-```
-
-**Pros:**
-- Eliminates per-request container cold-start latency (~100–400 ms per call on a fast machine)
-- Consistent low latency under concurrent load — containers are recycled, not re-created
-- Fewer Docker API calls (no create/delete per request)
-
-**Cons:**
-- Uses more memory: each idle container occupies ~50 MB. With `MCE_WARM_POOL_SIZE=2` that is ~100 MB baseline
-- Filesystem state in `/tmp` (tmpfs) persists across consecutive requests within the same container. User code is executed in a fresh Python namespace each time, so there is no Python-level state leakage — only files deliberately written to `/tmp` could survive between execs
-- If a warm container is killed (e.g., OOM), the in-flight request fails and the container is not automatically replaced until the next server restart
-- Requires Docker to be healthy at startup — if the daemon is unreachable, the server will not start
-
-#### Cold mode (`MCE_SANDBOX_MODE=cold`)
-
-A brand-new container is created for every `execute_code` call, started, waited on, then deleted. Complete filesystem and process isolation between every request.
-
-**Pros:**
-- Perfect per-request isolation — no shared state of any kind between requests
-- Simpler failure model: a crashed container has zero effect on future requests
-- No persistent resource usage between requests
-
-**Cons:**
-- Higher latency per request: container startup adds ~100–400 ms on a fast host and can exceed 1 s if Docker's image cache is cold
-- More Docker churn (create + delete per request) under high load
-
-#### Choosing a mode
-
-| | Warm | Cold |
-|---|---|---|
-| Per-request latency | ~5–30 ms | ~150–500 ms |
-| Memory overhead | ~50 MB × pool size | None at rest |
-| Isolation | Namespace-level | Container-level |
-| Best for | Interactive / latency-sensitive use | Batch / security-critical use |
-
-For most deployments the default warm mode is the right choice. Switch to cold if you need the strongest possible per-request isolation or if memory is constrained.
-
-### Authentication
-
-MCE supports seven auth types, configured per-server in `config/swaggers.yaml`. Tokens for dynamic types (OAuth2, Keycloak, Session) are **fetched automatically** and cached with TTL — no manual rotation required.
-
-| Type | Header set | Use when |
-|---|---|---|
-| `static` | `Authorization` | API key or pre-built `Bearer`/`Basic` header |
-| `jwt` | `Authorization` | You have a raw JWT string (auto-wrapped as `Bearer <token>`) |
-| `basic` | `Authorization` | Username + password — MCE base64-encodes them as `Basic <token>` |
-| `oauth2` | `Authorization` | Any OAuth2 server with a standard `/token` endpoint (client credentials) |
-| `keycloak` | `Authorization` | Keycloak OIDC — token URL built from `base_url` + `realm` |
-| `session` | `Cookie` (or `Authorization`) | Apps that use HTTP cookie sessions (JSESSIONID, PHPSESSID, etc.) |
-| _(none)_ | — | Public API — no auth header injected |
-
-```yaml
-servers:
-  # Static API key or Basic auth (legacy format, still works)
-  - name: grafana
-    swagger_url: "https://grafana.local/openapi.json"
-    base_url: "https://grafana.local/api"
-    auth_header: "Bearer ${GRAFANA_TOKEN}"   # resolved from env at runtime
-
-  # Explicit static header (typed form)
-  - name: my_api
-    swagger_url: "./swagger.yaml"
-    base_url: "https://api.example.com"
-    auth:
-      type: static
-      value: "Bearer ${MY_API_TOKEN}"
-
-  # Raw JWT — MCE prepends "Bearer " automatically
-  - name: ivf_api
-    swagger_url: "./ivf-api.yaml"
-    base_url: "https://ivf.example.com/api"
-    auth:
-      type: jwt
-      token: "${IVF_JWT_TOKEN}"
-
-  # HTTP Basic auth — MCE base64-encodes username:password automatically
-  - name: internal_api
-    swagger_url: "./internal-api.yaml"
-    base_url: "https://internal.example.com/api"
-    auth:
-      type: basic
-      username: "${INTERNAL_API_USER}"
-      password: "${INTERNAL_API_PASS}"
-
-  # Generic OAuth2 client credentials
-  - name: salesforce
-    swagger_url: "./salesforce.yaml"
-    base_url: "https://instance.salesforce.com/services/data/v58.0"
-    auth:
-      type: oauth2
-      token_url: "https://login.salesforce.com/services/oauth2/token"
-      client_id: "3MVG9..."
-      client_secret: "${SALESFORCE_CLIENT_SECRET}"
-      scope: "api"              # optional
-
-  # Keycloak OIDC — token URL is auto-built as:
-  # {base_url}/realms/{realm}/protocol/openid-connect/token
-  - name: hospital_api
-    swagger_url: "./hospital-api.yaml"
-    base_url: "https://hospital.example.com/api"
-    auth:
-      type: keycloak
-      base_url: "https://keycloak.example.com/auth"
-      realm: "myrealm"
-      client_id: "mce-client"
-      client_secret: "${KEYCLOAK_CLIENT_SECRET}"
-      scope: "openid"           # optional
-
-  # Session-cookie auth — POSTs credentials and caches the session cookie
-  # Variant A: collect all cookies (e.g. Java/Spring JSESSIONID)
-  - name: spring_app
-    swagger_url: "./spring-api.yaml"
-    base_url: "https://spring.example.com/api"
-    auth:
-      type: session
-      login_url: "https://spring.example.com/login"
-      username: "${SPRING_USER}"
-      password: "${SPRING_PASS}"
-      # cookie_name: "JSESSIONID"   # optional: extract only this cookie; default = all cookies
-      # content_type: form          # optional: "json" (default) or "form" for the login POST
-      # expires_seconds: 3600       # optional: session TTL for caching (default 3600)
-
-  # Session auth — Variant B: login endpoint returns a token in the JSON body
-  - name: custom_api
-    swagger_url: "./custom-api.yaml"
-    base_url: "https://custom.example.com/api"
-    auth:
-      type: session
-      login_url: "https://custom.example.com/api/auth/login"
-      username: "${CUSTOM_USER}"
-      password: "${CUSTOM_PASS}"
-      token_field: "access_token"   # sets Authorization: Bearer <value> instead of Cookie
-```
-
-#### Session auth — how it works
-
-```
-mce serve startup (or execute_code call)
-  └── vault.py: POST login_url with {username, password}
-        └── Variant A (cookie): response Set-Cookie header → MCE_{SERVER}_COOKIE
-        └── Variant B (token_field): response JSON body   → MCE_{SERVER}_AUTH
-
-Docker container env injection
-  └── MCE_{SERVER}_COOKIE=JSESSIONID=abc123     → Cookie: JSESSIONID=abc123
-  └── MCE_{SERVER}_AUTH=Bearer jwt-token-here   → Authorization: Bearer jwt-token-here
-```
-
-All `password`, `client_secret`, and `token` values support `${VAR}` references resolved from the host environment. Dynamic tokens are cached with a 30-second safety margin:
-- **OAuth2/Keycloak**: cached for `expires_in` seconds returned by the token endpoint
-- **Session**: cached for `expires_seconds` (configurable, default 3600 s)
-
-The login or token endpoint is only called when the cache is empty or expired.
-
-### Swagger Config (`config/swaggers.yaml`)
+The public example is deliberately small:
 
 ```yaml
 servers:
   - name: weather
-    swagger_url: "https://api.weather.example.com/v1/openapi.json"
-    base_url: "https://api.weather.example.com/v1"
-    auth_header: "Bearer ${WEATHER_API_KEY}"  # or use typed auth: block above
-    is_read_only: true                         # Omit POST/PUT/PATCH/DELETE at compile time
-    skills_url: "./docs/weather_skills.md"     # Optional: server skills guide (see below)
-    extra_headers:                             # Optional: custom headers injected on every request
-      X-API-Version: "v1"
-      X-Custom-Header: "value"
-
-  - name: hotel_booking
-    swagger_url: "./swaggers/hotel.yaml"       # Local file paths are supported
-    base_url: "https://api.hotel.example.com/v2"
-    auth_header: "Bearer ${HOTEL_API_TOKEN}"
-    is_read_only: false
-    top_level_functions:                       # Optional: expose selected functions as direct MCP tools
-      - getAvailableRooms
-```
-
-> If `auth_header` and `auth` are both omitted, the server is treated as a public API — no `Authorization` header is injected.
-
-> `extra_headers` are serialized to `MCE_{SERVER}_EXTRA_HEADERS` (JSON string) at compile time and injected into every generated function call.
-
-### Server Skills
-
-Skills documents are optional Markdown files that teach the LLM how to use a specific server effectively — preferred parameter combinations, known quirks, worked examples, and domain-specific best practices that the Swagger spec alone cannot express.
-
-**How to add a skills guide:**
-
-1. Write a Markdown file for the server (any name, any location):
-
-   ```markdown
-   # Weather API — Skills Guide
-
-   ## Preferred Usage
-   Always request `temperature_2m` and `windspeed_10m` together for a complete
-   surface weather snapshot. The `forecast_days` parameter defaults to 7 — set it
-   to 1 for current-conditions queries to minimise response size.
-
-   ## Common Pitfalls
-   - `latitude`/`longitude` are required; the API returns HTTP 400 without them.
-   - Hourly and daily variables cannot be mixed in the same request.
-   ```
-
-2. Point `skills_url` at it in `config/swaggers.yaml` — local paths and HTTP(S) URLs are both supported:
-
-   ```yaml
-   servers:
-     - name: weather
-       swagger_url: "https://api.weather.example.com/v1/openapi.json"
-       base_url: "https://api.weather.example.com/v1"
-       skills_url: "./docs/weather_skills.md"        # local file
-       # skills_url: "https://example.com/skills.md" # or remote URL
-   ```
-
-3. Run `mce compile`. MCE copies the content to `compiled/<server>/skills.md`.
-
-**How skills are delivered to the LLM:**
-
-Skills content is embedded directly into the MCP server's `instructions` field, which is part of the `initialize` handshake. This means the LLM receives the guide as system context **at connection time** — no explicit resource fetch is needed.
-
-```
-MCE initialize response
-└── instructions
-    ├── MCE workflow rules (always present)
-    └── ## Server Skills          ← injected only when skills.md exists
-        └── ### `weather`
-            └── <content of skills.md>
-```
-
-If no server has a `skills_url`, the section is omitted entirely — no extra tokens are spent.
-
-**Optional on-demand tools (`MCE_ENABLE_ADDITIONAL_TOOLS=true`):**
-
-When enabled, two extra MCP tools are registered:
-
-- **`list_skills`** — returns each server name and whether it has a skills guide, letting the LLM discover guides before diving into a new API.
-- **`get_server_skills`** — fetches the full Markdown guide for a named server on demand (useful when the LLM wants to re-read a guide mid-session without relying solely on the `initialize` instructions).
-
-These tools are disabled by default to keep the tool list lean. Enable them when your workflow benefits from the LLM proactively consulting skills guides during a session.
-
-**Skills as an MCP resource:**
-
-Each server with a `skills.md` also exposes the content as a static MCP resource discoverable via `resources/list`:
-
-```
-URI:  skills://weather
-Type: text/markdown
-```
-
-This lets clients and tools fetch an up-to-date copy on demand (e.g. after `mce compile` refreshed the file without restarting the server).
-
-**Incremental refresh:**
-
-`mce compile` re-fetches and overwrites `skills.md` on every run, even when the Swagger spec and generated code are unchanged. Edit the source file, run `mce compile`, restart the server — the updated guide is live.
-
-### Top-Level Functions
-
-> **Use sparingly — reserve for your single highest-priority tool per server.**
-
-`top_level_functions` lets you promote a small number of carefully chosen API functions into **direct MCP tools**. Promoted tools are callable immediately, without the usual `list_servers → get_functions → execute_code` workflow.
-
-**When to use:**
-
-A top-level function makes sense when one tool answers the vast majority of user requests for that server on its own — a weather forecast endpoint, a search endpoint, or a lookup that needs no chaining. If the LLM would run `execute_code` for it on every single request, making it top-level saves two round-trips and the code-generation step entirely.
-
-**How to configure:**
-
-Each entry in `top_level_functions` must be the **`operationId`** of the endpoint as defined in the Swagger/OpenAPI spec. Both the original camelCase form and the compiled snake_case form are accepted — MCE normalises them automatically.
-
-```yaml
-servers:
-  - name: weather
-    swagger_url: "https://api.weather.example.com/v1/openapi.json"
-    base_url: "https://api.weather.example.com/v1"
+    swagger_url: ./examples/weather.yaml
     is_read_only: true
-    top_level_functions:
-      - getForecast       # operationId from the Swagger spec (camelCase or snake_case)
-      - geocodingSearch   # compiles to get_forecast and geocoding_search respectively
 ```
 
-To find the right value, open your Swagger YAML/JSON and look for the `operationId` field on each path operation:
+`swagger_url` accepts local files or policy-approved HTTP(S) documents. Relative
+paths use the compilation working directory. `base_url` overrides the spec's URL.
+OpenAPI **3.0/3.1** and Swagger **2.0** produce v2 manifests with native parameter,
+JSON-body, and supported response schemas; OpenAPI 3.2 is not yet supported.
+Unsupported request semantics fail closed. Unsupported response schemas are
+reported and omitted, never presented as a validation guarantee. Supported
+output schemas are validated by the broker before results enter the sandbox.
+Optional query/header `null` means omission. Required/path null values and null
+query-array elements are rejected; JSON-body null is supported when declared.
+
+Generated Python is documentation/SDK output, **never imported or executed by
+the MCP host**. Legacy `top_level_functions` selections do not promote direct
+MCP tools. `--llm-enhance` and `GRYPHON_LLM_ENHANCE=true` are explicitly rejected
+in v2: compilation is deterministic and needs no model key.
+
+### Credentials and writes
+
+Public APIs need no auth block. For authenticated APIs, put environment
+references in trusted configuration, for example:
 
 ```yaml
-# In your swagger file:
-paths:
-  /forecast:
-    get:
-      operationId: getForecast   # ← use this value
+auth:
+  type: static
+  value: "Bearer ${UPSTREAM_API_TOKEN}"
 ```
 
-If a name in the list does not match any compiled `operationId`, a warning is logged and the entry is skipped — no error is raised, and the server starts normally with the remaining tools.
+Supported host-side auth types are `static`, `jwt`, `basic`, OAuth2 client
+credentials (`oauth2`), `keycloak`, and `session`. Dynamic tokens are fetched and
+cached by the broker. Set secrets in the operator environment or a private env
+file—not in code, tool inputs, committed YAML, or client configuration snippets.
+`GRYPHON_{SERVER}_AUTH` and JSON `GRYPHON_{SERVER}_EXTRA_HEADERS` are host-side
+options. Credentials are **never injected into either execution sandbox**.
 
-Run `mce compile`. MCE generates `compiled/weather/top_level_functions.py` containing an async wrapper for each listed function. When the server starts, these wrappers are registered with FastMCP as first-class tools alongside `list_servers`, `get_functions`, and `execute_code`.
+`is_read_only: true` excludes write methods during compilation and is checked
+again by the broker. To permit a write, its source must allow writes, and the
+administrator must set **both** of these settings with exact inspected names
+(the operation below is illustrative):
 
-**What the LLM sees:**
-
+```dotenv
+GRYPHON_ALLOW_WRITES=true
+GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]
 ```
-list_servers        → discover available APIs
-get_functions       → inspect signatures and schemas
-execute_code        → run arbitrary Python in a sandbox
-run_cached_code     → re-run cached code with new params
-get_forecast        → direct call, no code generation needed  ← new
-```
 
-The server instructions also gain a **Direct API Tools** section listing each promoted function so the LLM knows to call it without going through the full workflow.
+These are administrator permits, not an LLM approval flag. There is no
+interactive approval UI. API descriptions, guides, user code, and tool hints
+cannot change policy.
 
-> Promoted functions are registered alongside any optional tools (`list_skills`, `get_server_skills`) when `MCE_ENABLE_ADDITIONAL_TOOLS=true`.
+### Important settings
 
-**The token-cost trade-off — read before adding functions:**
+See [`.env.example`](.env.example) and [`GryphonConfig`](src/gryphon/config.py)
+for the complete settings. Explicit environment variables override the env file.
+The default env file is `.env` in the working directory, with checkout-root
+fallback; use `--env-file` for an unambiguous location.
 
-Every top-level tool adds its full signature and docstring to the MCP `tools/list` response, which is loaded into the LLM's context on every session. The standard workflow avoids this: `get_functions` is called only when a function is actually needed, and only for the 1–5 functions requested.
-
-| | Top-level tool | Standard workflow |
+| Variable | Default | Meaning |
 |---|---|---|
-| Tokens per session | Always loaded | Only when called |
-| Round-trips per call | 1 (direct) | 3 (list → inspect → execute) |
-| Best for | One dominant use-case | Many varied endpoints |
+| `GRYPHON_HOST` / `GRYPHON_PORT` | `127.0.0.1` / `8000` | HTTP listener |
+| `GRYPHON_HTTP_AUTH_TOKEN` | unset | Required for HTTP; at least 32 characters |
+| `GRYPHON_COMPILE_ON_STARTUP` | `true` | `serve` compiles before startup |
+| `GRYPHON_SANDBOX_MODE` | `restricted` | Restricted API execution or offline `docker` |
+| `GRYPHON_CONTEXT_BUDGET_BYTES` | `16384` | Discovery response budget |
+| `GRYPHON_DISCOVERY_LIMIT` | `10` | Maximum items returned per discovery page |
+| `GRYPHON_MAX_CODE_SIZE_BYTES` | `65536` | Source byte limit |
+| `GRYPHON_MAX_OUTPUT_SIZE_BYTES` | `65536` | Inline output/print budget |
+| `GRYPHON_MAX_RESPONSE_SIZE_BYTES` | `2097152` | Full JSON/upstream response limit |
+| `GRYPHON_EXECUTION_TIMEOUT_SECONDS` | `30` | Deadline; restricted VM has a 30-second hard ceiling |
+| `GRYPHON_MAX_CONCURRENT_EXECUTIONS` | `4` | Active execution limit |
+| `GRYPHON_QUEUE_TIMEOUT_SECONDS` | `5` | Bounded admission wait |
+| `GRYPHON_MAX_TOOL_CALLS` | `50` | Per-run capability budget |
+| `GRYPHON_SANDBOX_MEMORY_BYTES` | `64000000` | Restricted VM memory budget |
+| `GRYPHON_ALLOWED_DOMAINS` | `[]` | Additional exact-host restriction; JSON array |
+| `GRYPHON_ALLOW_PRIVATE_NETWORKS` | `false` | Explicit private/loopback API opt-in |
+| `GRYPHON_ALLOW_WRITES` / `GRYPHON_ALLOWED_WRITE_OPERATIONS` | `false` / `[]` | Two-part write policy |
+| `GRYPHON_CACHE_TTL_SECONDS` / `GRYPHON_CACHE_MAX_ENTRIES` | `3600` / `500` | Recipe retention |
+| `GRYPHON_RUN_TTL_SECONDS` / `GRYPHON_RUN_MAX_ENTRIES` | `86400` / `1000` | Receipt retention |
+| `GRYPHON_ARTIFACT_MAX_ENTRIES` | `100` | Retained artifacts per owner |
 
-Adding too many top-level functions cancels out the context-window savings that MCE was designed to deliver. As a rule of thumb: **one top-level function per server is ideal; more than three is rarely justified.** If you find yourself promoting five or more, the standard `execute_code` workflow is almost certainly the better choice.
+Public API, authentication, and document destinations **require HTTPS**.
+`GRYPHON_ALLOWED_DOMAINS` additionally restricts exact hostnames; use a JSON array,
+not wildcards or CSV. HTTP is allowed only with private-network opt-in and solely
+approved private/loopback DNS answers. Metadata, link-local, reserved, and mixed
+public/private destinations remain denied. Clients use DNS pinning, origin-scoped
+pools, verified TLS, no environment proxies, and no redirects. See [SECURITY.md](SECURITY.md).
 
-**Incremental refresh:**
-
-Like `skills.md`, `top_level_functions.py` is regenerated on every `mce compile` run — even when the Swagger spec is unchanged. Add or remove a function name in `swaggers.yaml`, run `mce compile`, restart the server, and the change is live.
-
-### LLM Enhancement (Optional)
-
-When `MCE_LLM_ENHANCE=true`, the compiler sends each generated function through an LLM to improve docstrings and add usage examples. Requires the `[llm]` extra and a valid `MCE_LLM_API_KEY`.
+## Operate Gryphon
 
 ```bash
-pip install -e ".[llm]"
-
-# Supports any LiteLLM-compatible provider:
-MCE_LLM_MODEL=openai/gpt-4o           # OpenAI
-MCE_LLM_MODEL=anthropic/claude-3-5-sonnet-20241022  # Anthropic
-MCE_LLM_MODEL=gemini/gemini-2.0-flash # Google Gemini (default)
-MCE_LLM_MODEL=openrouter/mistralai/mistral-7b-instruct  # OpenRouter
+uv run --frozen gryphon --version
+uv run --frozen gryphon doctor
+uv run --frozen gryphon compile --dry-run
+uv run --frozen gryphon serve
+uv run --frozen gryphon run
+uv run --frozen gryphon --env-file /absolute/path/to/operator.env doctor
+uv run --frozen gryphon doctor --env-file /absolute/path/to/operator.env
 ```
 
-## Security
+`serve` respects `GRYPHON_COMPILE_ON_STARTUP`; `run` compiles **once**, then serves.
+`doctor` reports read-only JSON diagnostics: it does not compile, open runtime
+stores, call APIs, or probe/start Docker. `--env-file` works before or after the
+subcommand.
 
-MCE uses a **defense-in-depth** approach:
+**Stop the server before cleaning.** `gryphon clean --yes` reversibly renames
+only recognized compiled output and a closed recipe cache to adjacent
+`.gryphon-archive-...` paths. `clean --yes --dry-run` validates without moving;
+`clean compile --yes` archives then compiles. Unknown files, unsafe paths, links,
+and active SQLite sidecars are refused. Runs, artifacts, and config are retained.
+Restore manually while stopped by renaming an archive to its original path,
+without overwriting newer data. This is not an arbitrary-directory delete tool.
 
-1. **Code Size Limit** — Code exceeding `MCE_MAX_CODE_SIZE_BYTES` (default 64 KB) is rejected before any analysis begins.
-
-2. **AST Security Guard** — Statically analyzes LLM-generated code before execution. Uses a two-layer approach: an explicit allowlist of safe modules (`json`, `datetime`, `re`, `math`, `pandas`, `numpy`, `openpyxl`, etc.) and a blocklist of dangerous ones (`os`, `sys`, `subprocess`, `socket`, `urllib`, …). Calls to `eval`, `exec`, `open`, and `__import__` are also blocked.
-
-3. **Ruff Lint Gate** — When `MCE_LINT_ENABLED=true`, generated code is linted before entering the sandbox. Syntactically invalid or style-violating code is rejected with actionable feedback.
-
-4. **Docker Sandbox** — Code runs in an isolated `python:3.13-slim` container:
-   - Non-root user (`executor`)
-   - Memory limit: 256 MB
-   - CPU quota: 50% of one core
-   - No host volume mounts
-   - Read-only filesystem (except `/tmp`)
-   - Execution timeout
-   - Pre-installed libraries: `httpx`, `pydantic`, `orjson`, `pandas`, `numpy`, `openpyxl`
-
-5. **Credential Injection** — API credentials are injected as Docker environment variables. They never appear in generated code, logs, or tool responses.
-
-6. **Read-Only Enforcement** — Servers marked `is_read_only: true` have POST/PUT/PATCH/DELETE endpoints excluded at compile time.
-
-7. **Domain Allowlist** — When `MCE_ALLOWED_DOMAINS` is set, requests to any hostname outside the list are rejected.
-
-### Credential Isolation from LLMs
-
-Your API keys, bearer tokens, and custom headers are **never exposed to any LLM** — not during compilation, not during execution. Here is exactly how credentials flow through the system:
-
-```mermaid
-flowchart TD
-    classDef envNode    fill:#1e3a5f,stroke:#4a9eff,stroke-width:2px,color:#e0f0ff
-    classDef vaultNode  fill:#3a1a1a,stroke:#ff6b6b,stroke-width:2px,color:#ffe8e8
-    classDef dockerNode fill:#1a2a3a,stroke:#f0a040,stroke-width:2px,color:#fff4e0
-    classDef sandboxNode fill:#1a3a2a,stroke:#4caf82,stroke-width:2px,color:#d0ffe8
-
-    ENV[".env / host environment\nMCE_WEATHER_AUTH=Authorization: Bearer sk-secret MCE_WEATHER_BASE_URL=https://api.weather.example.com/v1"]:::envNode
-    VAULT["CodeExecutor._run_warm() / _run_cold()\nbuild_all_server_env_vars([&quot;weather&quot;])"]:::vaultNode
-    DOCKER["aiodocker exec/create -e MCE_WEATHER_AUTH=...\n-e MCE_WEATHER_BASE_URL=..."]:::dockerNode
-    SANDBOX["compiled/weather/functions.py (inside sandbox)\n_AUTH_HEADER = os.environ.get(&quot;MCE_WEATHER_AUTH&quot;, &quot;&quot;) _EXTRA_HEADERS = json.loads(os.environ.get(&quot;MCE_WEATHER_EXTRA_HEADERS&quot;, &quot;{}&quot;))"]:::sandboxNode
-
-    ENV    -->|"1: vault.py reads credentials at execution time"| VAULT
-    VAULT  -->|"2: passed as Docker -e flags, never written to code"| DOCKER
-    DOCKER -->|"3: read from container environment at import time"| SANDBOX
-```
-
-**What the LLM sees vs. what it never sees:**
-
-| Stage | LLM sees | LLM never sees |
-|---|---|---|
-| `execute_code` call | User code with `from weather.functions import ...` | Your API keys, base URLs, or any header values |
-| `--llm-enhance` compile step | Generated code with `os.environ["MCE_WEATHER_AUTH"]` placeholder strings | The actual resolved values of those variables |
-| `get_functions` response | Function signatures, parameter names, return schemas | Credentials, base URLs, or server internals |
-
-**The `--llm-enhance` flag specifically:**
-
-When `MCE_LLM_ENHANCE=true`, the compiler sends the generated `functions.py` source to an LLM to improve docstrings. The code it sends contains only `os.environ[...]` references — the real values are never loaded during compilation. The LLM prompt also explicitly instructs the model not to change any HTTP calls, URLs, or functional logic.
-
-**Practical checklist to keep credentials safe:**
-
-- Store secrets in `.env` or your system's environment — never in `config/swaggers.yaml` as literal values. Use `${VAR_NAME}` references instead:
-  ```yaml
-  auth_header: "Bearer ${MY_API_TOKEN}"      # safe — resolved at runtime
-  # auth_header: "Bearer sk-actual-secret"   # unsafe — literal value
-
-  auth:
-    type: basic
-    username: "${API_USER}"                  # safe — resolved from env
-    password: "${API_PASS}"                  # safe — resolved from env
-
-  auth:
-    type: keycloak
-    client_secret: "${KEYCLOAK_SECRET}"      # safe — resolved from env
-    # client_secret: "my-actual-secret"      # unsafe — literal value
-  ```
-- For OAuth2/Keycloak servers, the token is fetched and cached host-side in vault.py — the LLM-generated sandbox code never sees the `client_secret` or the fetched access token directly.
-- Never pass credentials as arguments to `execute_code`. The LLM-generated code should only call the pre-built functions (e.g. `get_current_weather(city="London")`), which handle auth internally.
-- The generated `functions.py` files in `compiled/` contain only env var name references, not values — they are safe to inspect or commit.
-
-## Development
+### Authenticated HTTP
 
 ```bash
-# Install all dev dependencies
-pip install -e ".[dev]"
-
-# Run all tests with coverage
-pytest
-
-# Run unit tests only (fast, no Docker)
-pytest tests/unit/ --no-cov -v
-
-# Run integration tests
-pytest tests/integration/ --no-cov -v
-
-# Lint
-ruff check src/ tests/
-
-# Format check
-ruff format --check src/ tests/
-
-# Type check
-mypy src/
-
-# Pre-commit hooks (runs ruff + mypy + pytest ≥90% coverage)
-pre-commit install
-pre-commit run --all-files
+export GRYPHON_HTTP_AUTH_TOKEN="$(uv run --frozen python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+uv run --frozen gryphon serve --transport http
 ```
 
-Coverage gate: **≥ 90%** (`--cov-fail-under=90`) — enforced by the pre-commit hook on every commit.
+Connect to `http://127.0.0.1:8000/mcp` with an MCP client using
+`Authorization: Bearer <your-token>`. HTTP startup refuses missing/short tokens;
+settings use `SecretStr` and the verified token maps to a fixed `operator`
+identity, distinct from stdio's `local` owner. Sharing a token shares that
+identity. Use a **TLS reverse proxy before public exposure**; bearer auth alone
+does not encrypt traffic or provide multi-tenant identity management.
 
-## Examples
+### Container service
 
-See [`examples/`](examples/) for demo scripts and swagger configs.
+After the quick-start config copies, set the random token above, then:
 
-## Contributing
+```bash
+docker compose up --build -d
+```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide (setup, workflow, PR checklist, coding standards).
+The root image uses the lockfile and runs as UID 1000. Compose uses restricted
+execution, read-only configuration, named volumes for compiled/data storage,
+resource limits, loopback port publishing, and **no Docker socket mount**. It
+requires `.env` and the auth token. Its health check is TCP connectivity only,
+not authenticated MCP readiness; there is no `/health` endpoint.
 
-For the AI agent development guide and internal coding conventions, see [AGENTS.md](AGENTS.md).
+### Optional offline full Python
 
-## License
+Use Docker only when computation needs CPython and the libraries in
+[`sandbox/requirements.txt`](sandbox/requirements.txt). Provision the Docker
+daemon and **gVisor `runsc`** yourself, then build the tagged image:
 
-MIT — see [LICENSE](LICENSE).
+```bash
+docker build -t gryphon-sandbox:2.0.0 sandbox/
+GRYPHON_SANDBOX_MODE=docker uv run --frozen gryphon serve
+```
+
+Missing daemon, image, or configured runtime fails closed—no automatic startup
+or weaker-runtime fallback. Each execution gets a fresh container: UID 1000,
+all capabilities dropped, 64-PID limit, 256 MiB RAM/swap cap, half-core CPU quota,
+read-only root, bounded `/tmp` tmpfs, and no host mounts or network. Docker gets
+only code and explicit inputs, **no credentials and no `call_tool`/API access**.
+AST restrictions still apply; full Python does not mean unrestricted host access.
+This profile is separate from the default Compose service.
+
+## Measure local execution
+
+```bash
+uv run --frozen python examples/benchmark.py --iterations 25 --concurrency 1
+uv run --frozen python examples/benchmark.py --iterations 100 --concurrency 4
+```
+
+This repeatable offline benchmark verifies each result and reports startup,
+median/p95 latency, and throughput including durable receipts. It performs no
+model or upstream API calls; these timings are not end-to-end agent benchmarks.
+
+## Development and support
+
+```bash
+uv run --frozen ruff check src/ tests/
+uv run --frozen ruff format --check src/ tests/
+uv run --frozen mypy --strict src/ tests/
+uv run --frozen pytest --cov-fail-under=90
+uv run --frozen pre-commit install
+uv run --frozen pre-commit run --all-files
+```
+
+The **90% coverage floor** remains mandatory; the target is **100%**. The normal
+suite needs no live upstream API or Docker. Optional Docker checks and developer
+rules are in [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+
+See [CHANGELOG.md](CHANGELOG.md) for v2 changes and [ROADMAP.md](ROADMAP.md) for
+work that is not implemented. Report bugs through the
+[issue tracker](https://github.com/hypen-code/mcp-code-execution/issues);
+report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+MIT licensed; see [LICENSE](LICENSE).

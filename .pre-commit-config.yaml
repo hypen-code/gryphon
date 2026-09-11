@@ -1,34 +1,29 @@
 repos:
   # --- Ruff: lint + format --------------------------------------------------
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.2
+  - repo: local
     hooks:
       - id: ruff
+        name: ruff
+        language: system
+        entry: uv run --frozen ruff check
         args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
       - id: ruff-format
+        name: ruff format
+        language: system
+        entry: uv run --frozen ruff format
+        types_or: [python, pyi]
 
   # --- Mypy: strict type checking -------------------------------------------
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.10.0
+  - repo: local
     hooks:
       - id: mypy
-        args:
-          - --strict
-          - --config-file=pyproject.toml
-          - src
-          - tests
+        name: mypy strict
+        language: system
+        entry: uv run --frozen mypy
+        args: [--strict, --config-file=pyproject.toml, src, tests]
         pass_filenames: false
         always_run: true
-        additional_dependencies:
-          - pydantic>=2.0
-          - pydantic-settings>=2.0
-          - httpx>=0.28.0
-          - aiosqlite>=0.20.0
-          - anyio>=4.0.0
-          - structlog>=24.0.0
-          - types-PyYAML>=6.0
-          - pytest>=7.2
-          - respx>=0.21.0
 
   # --- Pytest with mandatory coverage >= 90% --------------------------------
   - repo: local
@@ -36,14 +31,14 @@ repos:
       - id: pytest-coverage
         name: pytest (coverage >= 90%)
         language: system
-        entry: bash -c 'pytest --cov=mce --cov-report=term-missing --cov-fail-under=90 -q'
+        entry: uv run --frozen pytest --cov=gryphon --cov-report=term-missing --cov-fail-under=90 -q
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
       - id: ruff-tc006
         name: ruff (TC006 – quote cast() type expressions)
         language: system
-        entry: bash -c 'ruff check --select TC006 src/'
+        entry: uv run --frozen ruff check --select TC006 src/
         pass_filenames: false
         always_run: true
         stages: [pre-commit]

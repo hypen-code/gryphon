@@ -1,618 +1,272 @@
-# AGENTS.md — MCE Development Guide for AI Agents
+# AGENTS.md — Gryphon Development Guide
 
-> This file governs how AI agents develop, maintain, and extend the MCE
-> (MCP Code Execution) codebase. Read it in full before making any change.
+Read this entire file before changing the repository. It governs development,
+maintenance, and review of **Gryphon 2.0.0**. Read each existing file in full
+before editing it, and inspect the implementation before documenting behavior.
 
----
+## 1. Purpose and scope
 
-## 1. Project Overview
+Gryphon is the legendary guardian between agent-generated programs and API
+capabilities. Preserve the original API-agent-backend design: compile OpenAPI,
+discover a small amount of metadata, inspect needed operations, execute bounded
+code, and reuse recipes. Do not replace the meta-tool interface with one tool
+per endpoint.
 
-**MCE** is a production-grade MCP server built with Python 3.13 and FastMCP.
-It exposes **4 meta-tools + 1 prompt** to LLMs instead of bloating the context
-with N per-endpoint tools:
+The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings
+use `GRYPHON_`. Installation is from the checkout, not a claimed PyPI release.
+Keep the actual repository URL:
+`https://github.com/hypen-code/mcp-code-execution`.
 
-| Tool / Prompt | Purpose |
-|---------------|---------|
-| `list_servers` | Discover compiled API servers and their functions |
-| `get_functions` | Inspect 1–5 function signatures and return schemas (batch) |
-| `execute_code` | Run LLM-generated Python code in an isolated Docker sandbox |
-| `run_cached_code` | Re-execute a cached snippet with optional parameter overrides |
-| `reusable_code_guide` *(prompt)* | Concise rules for writing parameterized, cacheable code |
+The implemented deployment is **single-process, local/operator managed**.
+Owner-scoped storage is not a completed multi-tenant SaaS. Persistent receipts
+are not exactly-once external effects or a resumable workflow engine.
 
-**Key invariant**: credentials are **never** embedded in generated code or logs.
-They are injected exclusively as Docker environment variables at runtime.
+## 2. Locked technology and reproducibility
 
----
+| Concern | Decision |
+|---|---|
+| Python | 3.13+; `from __future__ import annotations` |
+| MCP | FastMCP exactly 4.0.2; SDK-managed protocol negotiation |
+| Protocol | MCP 2026-07-28 plus tested legacy initialization |
+| Default execution | `pydantic-monty` exactly 0.0.18, restricted Python |
+| Optional execution | Offline per-run Docker via `aiodocker`; `runsc` default |
+| Configuration | `GryphonConfig`, pydantic-settings, `SecretStr` for HTTP token |
+| HTTP | Broker-owned `httpx`, DNS pinning, verified origin-specific pools |
+| State | SQLite/`aiosqlite` recipes and receipts; private JSON artifacts |
+| Compiler | Deterministic manifests and Jinja2 SDK documentation |
+| Logging | `structlog`, structured safe metadata to stderr |
+| Quality | Ruff, strict mypy, pytest/pytest-asyncio, mandatory coverage gate |
 
-## 2. Repository Layout
+`pyproject.toml` and `uv.lock` define the environment. Update both deliberately
+when dependencies change; never resolve opportunistically in CI or hooks.
+Do not introduce dependencies without declaring and reviewing them.
+The retained LLM-enhancement compatibility surface is retired: enabling it
+must fail explicitly, not call a provider or silently change compilation.
 
-```
-/home/ob1/aai/mcp-code-execution/      ← project root
-├── pyproject.toml                      ← single source of truth for deps & tools
-├── .env.example                        ← template; never commit .env
-├── config/swaggers.yaml                ← swagger source definitions
-├── sandbox/
-│   ├── Dockerfile                      ← python:3.13-slim sandbox image
-│   ├── entrypoint.py                   ← code receiver inside sandbox
-│   └── requirements.txt                ← httpx, pydantic, orjson only
-├── src/mce/
-│   ├── __init__.py                     ← version only
-│   ├── __main__.py                     ← CLI: clean | compile | serve | run
-│   ├── server.py                       ← FastMCP tool registration (4 tools + 1 prompt)
-│   ├── config.py                       ← MCEConfig (pydantic-settings)
-│   ├── errors.py                       ← full exception hierarchy
-│   ├── models/__init__.py              ← ALL pydantic models (single file)
-│   ├── compiler/
-│   │   ├── swagger_parser.py           ← OpenAPI 3.x / Swagger 2.0 parser
-│   │   ├── codegen.py                  ← Jinja2 Python function generator
-│   │   ├── orchestrator.py             ← compile pipeline coordinator
-│   │   ├── llm_enhancer.py             ← optional Claude improvement pass
-│   │   └── templates/function.py.j2   ← Jinja2 template for functions.py
-│   ├── runtime/
-│   │   ├── registry.py                 ← loads manifests, provides lookups
-│   │   ├── executor.py                 ← Docker sandbox execution pipeline
-│   │   └── cache.py                    ← async SQLite cache (aiosqlite)
-│   ├── security/
-│   │   ├── ast_guard.py                ← AST static analysis (runs before exec)
-│   │   ├── policies.py                 ← read-only + domain allowlist enforcement
-│   │   └── vault.py                    ← credential → Docker env var injection
-│   └── utils/
-│       ├── logging.py                  ← structlog setup
-│       └── hashing.py                  ← SHA256 helpers for cache keys
-├── tests/
-│   ├── conftest.py                     ← shared fixtures (mce_config, specs, sources)
-│   ├── fixtures/                       ← YAML swagger test fixtures
-│   │   ├── weather_api.yaml            ← read-only, simple GET endpoints
-│   │   ├── hotel_api.yaml              ← read-write, path + body params
-│   │   └── petstore.yaml               ← standard petstore with $ref schemas
-│   ├── unit/                           ← isolated, no Docker, no network
-│   │   ├── test_swagger_parser.py
-│   │   ├── test_codegen.py
-│   │   ├── test_ast_guard.py
-│   │   └── test_cache.py
-│   └── integration/                    ← requires compiled output on disk
-│       └── test_compiler.py
-```
+## 3. Repository map and authority
 
-**Rules:**
-- **Do not create files outside this structure** without explicit instruction.
-- **One model file**: all Pydantic models live in `src/mce/models/__init__.py`.
-- **One error file**: all exceptions live in `src/mce/errors.py`.
-- Max file length: **400 lines**. Split if exceeded.
-- Max function length: **50 lines**. Decompose if exceeded.
+| Location | Responsibility |
+|---|---|
+| `src/gryphon/__main__.py` | CLI parsing, env selection, transport preflight, lifecycle |
+| `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
+| `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
+| `src/gryphon/config.py` | Validated operator settings |
+| `src/gryphon/models/__init__.py` | Shared Pydantic domain models |
+| `src/gryphon/errors.py` | Domain exception hierarchy |
+| `src/gryphon/server.py` | Thin MCP adapters, tool schemas, one reusable-code prompt |
+| `src/gryphon/runtime/context.py` | Ownership, bounded responses, dependency lifespan |
+| `src/gryphon/compiler/` | Source parsing, bounded schema normalization, deterministic catalogs |
+| `src/gryphon/runtime/registry.py` | Manifest-only catalog loading and inspection |
+| `src/gryphon/runtime/executor.py` | Admission, execution, replay, cancellation, receipts |
+| `src/gryphon/runtime/execution_validation.py` | Bounded JSON inputs and source preparation |
+| `src/gryphon/runtime/execution_results.py` | Static error envelopes, policy digest, artifact handoff |
+| `src/gryphon/runtime/sandboxes.py` | Fresh restricted VM and sole external capability |
+| `src/gryphon/runtime/docker_sandbox.py` | Optional networkless CPython transport and cleanup |
+| `src/gryphon/runtime/cache.py` | Owner-scoped recipes, exact-source identity, TTL/LRU |
+| `src/gryphon/runtime/runs.py`, `recovery_lease.py` | Durable receipts/idempotency and exclusive recovery ownership |
+| `src/gryphon/runtime/artifacts.py` | Owner-scoped, bounded, integrity-checked artifact storage |
+| `src/gryphon/security/broker.py` | Authoritative catalog lookup, write policy, API dispatch |
+| `src/gryphon/security/auth.py`, `vault.py` | Host-only credential resolution and refresh |
+| `src/gryphon/security/network.py`, `policies.py` | Egress enforcement, DNS/TLS, budgets |
+| `src/gryphon/security/encoding.py`, `schema.py` | Closed request objects and bounded validation |
+| `src/gryphon/security/ast_guard.py` | Mandatory static defense before execution |
+| `config/swaggers.yaml.example`, `.env.example` | Public templates, never real credentials |
+| `examples/demo.py`, `examples/weather.yaml` | Offline real-MCP demo and public weather catalog |
+| `Dockerfile`, `docker-compose.yml` | Non-root restricted-profile service deployment |
+| `sandbox/` | Optional offline compute image and entrypoint |
+| `tests/unit/`, `tests/integration/` | Isolated unit, protocol, compiler, runtime, opt-in Docker tests |
 
----
+Keep shared domain models in `models/__init__.py` and custom exceptions in
+`errors.py`; do not duplicate them. Prefer existing modules. Do not add files,
+docs, or top-level directories without explicit task requirements. Existing
+README, AGENTS, CONTRIBUTING, SECURITY, ROADMAP, and CHANGELOG cover the public
+and development documentation needs.
 
-## 3. Technology Decisions (Locked)
+**Size limits:** at most 400 lines per file and 50 lines per function. Decompose
+responsibilities instead of weakening lint, typing, coverage, or security to fit.
 
-| Concern | Choice | Why |
-|---------|--------|-----|
-| Python version | **3.13+** | Required. Use `from __future__ import annotations`. |
-| MCP framework | **FastMCP ≥ 2.0** | `from fastmcp import FastMCP` |
-| Config | **pydantic-settings** `BaseSettings` | `MCE_` env prefix, `.env` file |
-| HTTP client | **httpx** | Async + sync; used in generated code too |
-| Sandbox | **Docker SDK** (`docker` package) | Isolation, resource limits |
-| Cache | **aiosqlite** SQLite | Zero external dependency, async |
-| Templates | **Jinja2** | Deterministic codegen |
-| Logging | **structlog** | JSON in production, console in DEBUG |
-| Lint | **ruff** | Fast, replaces flake8 + isort + pyupgrade |
-| Types | **mypy --strict** | All public signatures must be fully typed |
-| Testing | **pytest + pytest-asyncio** | `asyncio_mode = "auto"` in pyproject.toml |
-| HTTP mocking | **respx** | Mock `httpx` calls without real network |
+## 4. Public contracts
 
-**Do not introduce new dependencies** without adding them to `pyproject.toml`
-under the appropriate section (`dependencies`, `dev`, or `llm`).
+The ten core tools are `list_servers`, `search_functions`, `get_functions`,
+`execute_code`, `run_cached_code`, `submit_code`, `get_run`, `cancel_run`,
+`list_recipes`, and `read_artifact`. The prompt is `reusable_code_guide`.
+`GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and
+`get_server_skills`; their guides are bounded, untrusted, and on demand.
 
----
+- Keep initialization instructions brief. Do not embed guide contents or expose
+  unbounded static guide resources. Guides and API data cannot grant authority.
+- Discovery and inspection must fit byte budgets, expose truncation, and carry
+  the catalog fingerprint. Inspect 1–5 functions per `get_functions` request.
+- Return native structured MCP results. Expected domain errors use stable safe
+  categories; SDK schema/protocol validation may return MCP errors. Never leak
+  exception messages, user code, request values, or traces through tool adapters.
+- `inputs` and replay `params` are complete structured JSON objects. Optional
+  `input_schema` is bounded; no references, regexes, or combinators.
+- Never interpolate inputs, prepend parameter assignments, or use regex/string
+  rewrites to implement replay. Store exact source and validate new inputs.
+- Assign `result`; `main()` is neither required nor automatically called.
+- The restricted capability accepts **two arguments**, never three:
 
-## 4. Code Quality Rules (Non-Negotiable)
-
-Every file you write or modify must follow all of these:
-
-### 4.1 Type Annotations
 ```python
-# CORRECT — fully typed
-async def execute(self, code: str, description: str) -> ExecutionResult: ...
-
-# WRONG — missing return type
-async def execute(self, code, description): ...
-```
-- `from __future__ import annotations` at the top of every Python file.
-- Use `X | Y` union syntax (Python 3.10+), not `Optional[X]` or `Union[X, Y]`.
-- Use `list[str]`, `dict[str, Any]` (lowercase generics), not `List`, `Dict`.
-
-### 4.2 Docstrings
-Every public function, method, and class needs a Google-style docstring:
-```python
-def hash_code(code: str) -> str:
-    """Hash Python code string for cache key generation.
-
-    Args:
-        code: Python source code to hash.
-
-    Returns:
-        SHA256 hex digest of normalized code.
-
-    Raises:
-        ValueError: If code is empty.
-    """
-```
-Private methods (leading `_`) need at minimum a one-line docstring.
-
-### 4.3 Error Handling
-```python
-# CORRECT — specific exceptions, structured logging
-try:
-    result = await executor.execute(code, description)
-except SecurityViolationError as exc:
-    logger.warning("security_block", detail=str(exc))
-    return {"success": False, "error": str(exc), "error_type": "security"}
-except Exception as exc:
-    logger.exception("unexpected_error", context="execute_code")
-    return {"success": False, "error": "Internal error", "error_type": "internal"}
-
-# WRONG — bare except, print, unhandled
-try:
-    ...
-except:
-    print("error")
-```
-- **No bare `except:`** — always name the exception type.
-- **No `print()`** — use `logger = get_logger(__name__)` from `mce.utils.logging`.
-- MCP tool functions must **never raise** — always return a dict with `error` key.
-
-### 4.4 Logging
-```python
-from mce.utils.logging import get_logger
-logger = get_logger(__name__)
-
-# CORRECT — structured key=value pairs
-logger.info("cache_stored", id=entry_id[:12], description=description[:50])
-
-# WRONG — f-string message with embedded data
-logger.info(f"stored cache entry {entry_id}")
-```
-Events to always log:
-- Server startup and config summary (mask credentials — never log auth values)
-- Each compile phase: server parsed, endpoints found/skipped
-- Tool invocations: which tool, input size
-- Security violations: violation type and pattern (NOT the full code)
-- Cache: hits, misses, evictions, invalidations
-- Docker: container create, timeout, remove
-
-### 4.5 Constants Over Magic Values
-```python
-# CORRECT
-_MAX_SCHEMA_DEPTH = 2
-_MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-
-# WRONG
-if depth > 2: ...
-if method in {"post", "put", "patch", "delete"}: ...
+result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"], "longitude": inputs["longitude"], "current": "temperature_2m"})
 ```
 
-### 4.6 Pydantic at All Boundaries
-- Every tool input/output uses a Pydantic model or `dict` derived from `.model_dump()`.
-- Every config field uses `MCEConfig` (never raw `os.environ` in business logic).
-- Every cross-module data structure is a Pydantic model in `models/__init__.py`.
+- No generated module imports, `sys.path` changes to compiled directories, or
+  host `exec` of generated code. `top_level_functions` is not an active tool
+  promotion mechanism.
+- `submit_code`/`get_run`/`cancel_run` are application handles. Keep native MCP
+  Tasks disabled and unadvertised until a real protocol implementation exists.
+- `readOnlyHint` is metadata, never an authorization decision.
+- Successful standalone `compile` (including unchanged catalogs) prints non-secret
+  MCP client JSON to stdout; logs stay on stderr. Dry runs, failures, and startup
+  compilation inside `serve`/`run` must not emit client JSON on MCP stdout.
 
-### 4.7 No Mutable Defaults
-```python
-# CORRECT
-servers_used: list[str] = Field(default_factory=list)
+## 5. Security invariants — never weaken
 
-# WRONG
-servers_used: list[str] = []
-```
+### Execution
 
----
+1. Enforce source byte limits before analysis. Run AST validation on every
+   execution and replay, before backend execution; never treat AST checks alone
+   as the isolation boundary.
+2. Restricted execution uses a fresh bounded Monty VM. No imports, host
+   filesystem, host environment, or direct network; only the revocable broker
+   capability is external. Bound time, memory, recursion, calls, and admission.
+3. Optional Docker is **offline computation**: no broker, credentials, network,
+   host mounts, or shared warm-container state. Use UID 1000, drop all
+   capabilities, no-new-privileges, read-only root, bounded tmpfs, PID/RAM/swap/CPU
+   limits, and the configured isolation runtime. `runsc` is the default. Missing
+   daemon/image/runtime must fail closed; never autostart or silently downgrade.
+4. Cancellation revokes broker scope before cancelling work and awaits workers
+   and owned-container cleanup. It does not undo accepted upstream effects.
+5. Bound output at production and serialization boundaries. Omit raw prints,
+   stderr, upstream failure bodies, and traces. Artifacts must remain bounded
+   and owner-scoped; chunks cannot exceed 8192 bytes.
 
-## 5. Security Rules (Never Violate)
+### Broker and credentials
 
-These rules protect against malicious LLM-generated code and credential leaks:
+1. Credentials live only in the trusted host broker/vault. Do not put them in
+   generated code, either sandbox's environment, logs, tool inputs, recipes,
+   test assertions, or public client snippets. Never read real env files or
+   secret material during development unless explicitly authorized and needed.
+2. Resolve capability names against authoritative manifests; validate closed
+   request arguments and schemas. Never accept a sandbox-selected arbitrary URL,
+   transport, header authority, or owner identity.
+3. Enforce read-only source policy at compile time **and** dispatch time.
+   Writes require both `GRYPHON_ALLOW_WRITES=true` and exact
+   `GRYPHON_ALLOWED_WRITE_OPERATIONS` administrator permits. No model-provided
+   approval parameter, guide text, or idempotency key can authorize a write.
+4. Enforce exact-domain policy and validate all DNS answers before connecting to
+   a pinned address. Public destinations are default; private/loopback needs
+   explicit opt-in. Metadata and prohibited address classes remain denied.
+5. Preserve TLS verification, original Host/SNI, origin-isolated pools, no
+   environment proxies, no redirects, and bounded auth/API responses. Recheck
+   scope around asynchronous credential resolution and request dispatch.
+6. HTTP startup requires a token of at least 32 characters. Derive owner from
+   verified auth, not arguments/headers containing unverified identity. Current
+   static auth maps to `operator`; stdio uses trusted `local`. Public deployment
+   needs TLS termination and additional operator controls.
 
-1. **AST guard runs before every execution** — `ASTGuard().validate(code)` is
-   called in `executor.py` *before* any Docker container is started. Never bypass it.
+### Persistence and cleanup
 
-2. **Credentials are never in code** — The vault (`security/vault.py`) builds
-   `MCE_{SERVER}_BASE_URL` and `MCE_{SERVER}_AUTH` env vars. These are passed
-   to Docker via `environment=`. They must **never** appear in:
-   - Generated `functions.py` files
-   - Log messages
-   - Tool responses (success or error)
-   - Cache entries
+1. Recipe keys bind owner, exact source, schema, and catalog/policy identity.
+   Reject replay on drift; run the complete guard/broker pipeline again.
+2. Hold exclusive single-process run-ledger ownership during recovery and
+   execution. Never let a second process mark a live process's jobs interrupted.
+3. Persist admission/idempotency transactionally. Matching keys deduplicate only
+   while their receipt exists; conflicting requests fail. Interrupted work is
+   marked `interrupted`, never automatically replayed, especially writes.
+4. Storage must enforce ownership, quotas, safe paths, and sanitized failures.
+   Artifact cleanup touches only indexed owned files; never arbitrary neighbors.
+5. `clean --yes` requires the operator to stop the server, validates all targets,
+   and archives recognized compiled/cache output. Retain runs, artifacts, and
+   config; reject links, unknown content, overlapping paths, and DB sidecars.
+6. Close all partially initialized dependencies. Do not use process-global
+   mutable state for credentials or execution authority.
 
-3. **Read-only enforcement is at parse time** — When `is_read_only: true`,
-   `swagger_parser.py` drops POST/PUT/PATCH/DELETE endpoints entirely; they
-   never reach codegen. Enforce this in `_parse_operation()`.
+## 6. Code quality
 
-4. **Sandbox constraints are non-negotiable** — Docker containers must run with:
-   - `mem_limit="256m"`, `memswap_limit="256m"`
-   - `cpu_quota=50_000` (50% of one core)
-   - `security_opt=["no-new-privileges:true"]`
-   - `read_only=True` (plus `tmpfs={"/tmp": "size=64m,mode=1777"}`)
-   - Non-root user (`executor` UID 1000) — enforced in `sandbox/Dockerfile`
-   - No host volume mounts
+- Fully annotate signatures; use modern `X | None`, `list[str]`, and `dict` types.
+  Strict mypy covers **src and tests**. Avoid unreviewed `Any` or suppression.
+- Use Google-style docstrings for public classes/functions/methods; private
+  helpers need at least a concise docstring. Document invariants and failure
+  behavior, not just syntax.
+- Keep named constants instead of magic values. Use `Field(default_factory=...)`
+  for mutable Pydantic defaults and validate trust-boundary data explicitly.
+- Pass `GryphonConfig` and dependencies instead of consulting environment state
+  throughout business logic. Credential environment access belongs in the vault
+  and CLI/config loading boundary.
+- No bare `except:`. Catch domain failures specifically; translate unexpected
+  failures to safe envelopes and log a static event/category, not raw traces or
+  `str(exc)` that could contain secrets. Never silently swallow cleanup failure.
+- Use `get_logger(__name__)` and structured key/value events. Log lifecycle,
+  compiler phases, safe sizes, policy categories, cache activity, and owned
+  container lifecycle without code, input values, credential-bearing URLs, or
+  headers. Do not log whole settings/models.
+- No `print()` in server/runtime code. CLI diagnostics/demo output must be
+  deliberately separated from MCP stdio. Do not add decorative output or emojis.
+- Keep the event loop responsive: no `time.sleep()` or blocking network/DB work
+  inside async execution. Offload necessary filesystem/worker operations and
+  wait for them on cancellation. Use `httpx` through the approved network layer
+  for I/O; do not add `requests` or bypass policy with another client.
 
-5. **Domain allowlist** — When `MCE_ALLOWED_DOMAINS` is set, `policies.py`
-   rejects any URL whose hostname is not in the list.
+## 7. Testing and coverage
 
-6. **Code size limit** — Reject any code > `MCE_MAX_CODE_SIZE_BYTES` (default
-   64 KB) before AST parsing even begins.
-
----
-
-## 6. Testing Rules (100% Coverage Target)
-
-### 6.1 Coverage Requirements
-```
-tests/unit/        → no Docker, no network, no filesystem side effects
-tests/integration/ → may write to tmp_path, no live Docker required
-```
-
-- **100% line coverage** is the target. Every branch must be tested.
-- Run `pytest --cov=mce --cov-report=term-missing` to see gaps.
-- A PR that reduces coverage is **rejected**.
-
-### 6.2 Fixture Usage
-All shared fixtures live in `tests/conftest.py`. Use them instead of
-re-declaring inline. Key fixtures:
-
-| Fixture | Type | Purpose |
-|---------|------|---------|
-| `mce_config` | `MCEConfig` | Points at `tmp_path`; safe for all tests |
-| `sample_endpoint` | `EndpointSpec` | GET /weather/current with 2 params |
-| `sample_server_spec` | `ServerSpec` | weather server with 1 endpoint |
-| `weather_swagger_source` | `SwaggerSource` | Points at `tests/fixtures/weather_api.yaml` |
-| `hotel_swagger_source` | `SwaggerSource` | Points at `tests/fixtures/hotel_api.yaml` |
-| `petstore_swagger_source` | `SwaggerSource` | Points at `tests/fixtures/petstore.yaml` |
-
-### 6.3 Test Naming Convention
-```python
-# Pattern: test_{unit_under_test}_{condition}_{expected_outcome}
-
-def test_parse_weather_api_returns_server_spec(...)        # ✅
-def test_import_os_blocked(...)                            # ✅
-def test_expired_entry_not_returned(...)                   # ✅
-
-def test_parser(...)                                       # ❌ too vague
-def test_1(...)                                            # ❌ meaningless
-```
-
-### 6.4 One Assertion Concept Per Test
-Each test should verify exactly **one behaviour**. Long tests that check 10
-things must be split.
-
-### 6.5 Async Tests
-Use `async def test_...` — `asyncio_mode = "auto"` is set in `pyproject.toml`
-so no `@pytest.mark.asyncio` decorator is needed.
-
-### 6.6 Mocking Network and Docker
-- **httpx network calls**: use `respx` to mock `httpx` requests.
-- **Docker**: mock `docker.from_env()` and `DockerClient` with `unittest.mock.MagicMock`.
-- **Time**: use `unittest.mock.patch("time.time", return_value=...)` to freeze time.
-- **Environment variables**: use `monkeypatch.setenv("MCE_WEATHER_AUTH", "Bearer test")`.
-
-### 6.7 Swagger Parser Tests
-The parser reads from `tests/fixtures/*.yaml` files — these are the single
-source of truth for expected behaviour. Do **not** inline YAML strings in
-test files. Add a new fixture file if you need a new scenario.
-
-### 6.8 Security Tests (AST Guard)
-Every **blocked** pattern must have its own test:
-```python
-def test_{dangerous_pattern}_blocked(guard: ASTGuard) -> None:
-    with pytest.raises(SecurityViolationError, match="..."):
-        guard.validate("...")
-```
-Every **allowed** pattern must also have a test confirming no exception.
-
-### 6.9 Cache Tests
-Cache tests use `tmp_path` for the SQLite database. Never use a shared
-database path across tests — isolation is mandatory.
-
----
-
-## 7. Module-by-Module Responsibilities
-
-### `errors.py`
-- All custom exceptions live here and **only** here.
-- Hierarchy: `MCEError` → domain-specific errors.
-- `LintError` carries `.lint_output`; `ExecutionError` carries `.stderr` and `.exit_code`.
-- Never raise `MCEError` directly — use a specific subclass.
-
-### `config.py`
-- `MCEConfig` is the single config object. Instantiate once in `__main__.py`.
-- Pass it as a constructor argument — never read `os.environ` outside `vault.py` and `config.py`.
-- `load_config()` is the only factory function.
-
-### `models/__init__.py`
-- **All** Pydantic models in one place. Do not split into separate files.
-- Group by domain with section comments: `# Swagger models`, `# Execution models`, etc.
-- `ResponseField` uses `nested: list[ResponseField] | None` for 1-level nesting only.
-
-### `compiler/swagger_parser.py`
-- Parses OpenAPI 3.x and Swagger 2.0.
-- Resolves `$ref` **one level deep only** — skip anything deeper.
-- Skips `oneOf`, `anyOf`, `allOf`, `discriminator` schemas (logs warning, does not fail).
-- Auto-generates `operationId` when missing: `{method}_{sanitized_path}`.
-- Parse each path+method via `_parse_operation()`. Path-level params merge with operation-level.
-- Hash the raw document bytes with `hash_content()` for cache invalidation.
-
-### `compiler/codegen.py`
-- Pure function: `ServerSpec → str` (Python source code).
-- Uses Jinja2 template `compiler/templates/function.py.j2`.
-- Required params come before optional params in function signatures.
-- Never hardcode auth values — env vars only.
-- `_safe_name()` sanitizes parameter names to valid Python identifiers.
-
-### `compiler/templates/function.py.j2`
-- Generated file header: `# GENERATED BY MCE COMPILER — DO NOT EDIT`.
-- Every generated function has a Google-style docstring listing parameters.
-- Helper `_request()` function handles the actual `httpx.request()` call.
-- `_headers()` injects auth from `os.environ`.
-
-### `compiler/orchestrator.py`
-- Loads swagger sources from `config/swaggers.yaml` via `load_swagger_sources()`.
-- Checks `manifest.json` swagger hash before recompiling (skip if up-to-date).
-- Writes `compiled/{server_name}/functions.py` + `manifest.json` + `__init__.py`.
-- Runs `ruff check` on all generated files after compile.
-- `--dry-run` mode parses only, writes nothing.
-
-### `runtime/registry.py`
-- Loads `compiled/*/manifest.json` at startup. Call `.load()` once.
-- `list_servers()` → compact `list[ServerInfo]` (names + one-line summaries only).
-- `get_function()` → full `FunctionInfo` with source code extracted via AST.
-- `_extract_function_snippet()` uses `ast.parse()` to pull one function out of
-  `functions.py` — falls back to full file on `SyntaxError`.
-
-### `runtime/executor.py`
-- **Full pipeline**: size check → AST guard → ruff lint → Docker → parse output → cache.
-- `_detect_servers_used()` finds `from {name}.functions import` patterns via regex.
-- `_build_execution_code()` prepends `sys.path.insert(0, compiled_dir)`.
-- Docker container uses `container.attach_socket()` to write code via stdin.
-- Output parsing: expects `{"success": bool, "data": ...}` JSON. Falls back to raw text.
-- On timeout: `container.kill()` then raise `ExecutionTimeoutError`.
-- Container is **always** removed in the `finally` block.
-
-### `runtime/cache.py`
-- Async SQLite via `aiosqlite`. Initialize with `await cache.initialize()`.
-- Cache key = SHA256 of **normalized** code (strip trailing whitespace, skip blank lines).
-- On duplicate key: increment `use_count`, update `last_used_at` (upsert).
-- TTL check on `get()`: delete expired entries immediately on access.
-- LRU eviction: delete oldest `last_used_at` entries when count > `max_entries`.
-- `search()` filters by `description LIKE ?` and `ttl_seconds` validity in SQL.
-
-### `security/ast_guard.py`
-- `ASTGuard.validate(code, context)` raises `SecurityViolationError` on first violation.
-- Maintains two sets: `_BLOCKED_MODULES` (frozenset) and `_ALLOWED_MODULES` (frozenset).
-- Visitor pattern: `_SecurityVisitor` extends `ast.NodeVisitor`.
-- Checks: `Import`, `ImportFrom`, `Call`, `Attribute`, `Global`, `Nonlocal` nodes.
-- Logs the **violation type** only — never log the full user code.
-
-### `security/vault.py`
-- `build_server_env_vars(server_name)` reads `MCE_{SERVER}_BASE_URL` and `MCE_{SERVER}_AUTH`.
-- `resolve_env_references(value)` expands `${VAR_NAME}` placeholders.
-- Returns a plain `dict[str, str]` for Docker's `environment=` parameter.
-
-### `runtime/executor.py`
-- Uses **`aiodocker`** (async) — never `subprocess` for Docker operations.
-- Two modes controlled by `MCEConfig.sandbox_mode`:
-  - `"warm"` (default): pool of persistent containers (`_WarmPool`); exec per request via `MCE_EXEC_CODE` env var.
-  - `"cold"`: new container per request; create → start → wait → log → delete.
-- **Lifecycle**: always call `await executor.startup()` before the first `execute()`, and `await executor.shutdown()` on exit. `_cmd_serve` in `__main__.py` owns this.
-- Code is base64-encoded into `MCE_EXEC_CODE`; entrypoint reads it on the container side — no stdin pipe needed.
-- `MCE_EXEC_TIMEOUT` env var carries the timeout into the container; `signal.alarm` enforces it from inside.
-
-### `server.py`
-- `create_server(config, registry, cache, executor)` returns a `FastMCP` instance.
-- Pass a pre-started `CodeExecutor` via the `executor` parameter so `_cmd_serve` owns startup/shutdown.
-- All 4 tools registered via `@mcp.tool()`; 1 prompt via `@mcp.prompt()`.
-- Tool functions: always `async def`, always return `dict`, never raise.
-- Error returns always include `"error_type"` key for programmatic handling.
-- `instructions=` on `FastMCP(...)` is a single-line workflow hint only — keep it under 2 sentences.
-
-### `__main__.py`
-- CLI entry point: `mce clean [compile] [--llm-enhance] [--dry-run]`
-- CLI entry point: `mce compile [--llm-enhance] [--dry-run]`
-- CLI entry point: `mce serve [--transport stdio|http] [--host] [--port]`
-- CLI entry point: `mce run` (compile + serve)
-- `argparse` only — no click, no typer.
-- `asyncio.run()` wraps all async commands.
-- `_cmd_serve` owns executor lifecycle: `await executor.startup()` before `create_server()`, `await executor.shutdown()` in `finally`.
-
----
-
-## 8. Making Changes
-
-### 8.1 Adding a New MCP Tool or Prompt
-1. Define the tool with `@mcp.tool()` or the prompt with `@mcp.prompt()` in `server.py`.
-2. Add error handling covering every exception the tool can raise.
-3. Add a unit test in `tests/unit/test_server.py` (create if absent).
-4. Update `README.md` — tools/prompt table, workflow example, and diagram if needed.
-
-### 8.2 Adding a New Model
-1. Add to `src/mce/models/__init__.py` under the correct section.
-2. Write tests for model validation (optional fields, defaults, enum constraints).
-3. Never duplicate a model — check existing ones first.
-
-### 8.3 Extending the AST Guard
-1. Add the new blocked pattern to the appropriate frozenset in `ast_guard.py`.
-2. Add a test in `tests/unit/test_ast_guard.py` that confirms it raises.
-3. If it is allowlisted, add a passing test too.
-
-### 8.4 Adding a New Swagger Fixture
-1. Create `tests/fixtures/{name}.yaml` (valid OpenAPI 3.x/Swagger 2.0).
-2. Add a `SwaggerSource` fixture in `tests/conftest.py`.
-3. Test it in `tests/unit/test_swagger_parser.py`.
-
-### 8.5 Modifying Generated Code Template
-1. Edit `src/mce/compiler/templates/function.py.j2`.
-2. Run `mce compile` on a fixture swagger and confirm valid Python output.
-3. Update `test_codegen.py` to assert the new structure.
-
-### 8.6 Changing Cache Schema
-1. Modify `_CREATE_TABLE_SQL` in `cache.py`.
-2. Add a schema migration step (simple `ALTER TABLE` or recreate) detected
-   by catching `aiosqlite.OperationalError` on startup.
-3. Update `test_cache.py` to cover the new columns/indexes.
-
-### 8.7 Updating `README.md` (Mandatory After Every Change)
-
-`README.md` is the canonical public-facing reference. **It must be updated in
-the same commit as the code change — no exceptions.** A PR with stale docs is
-rejected at review, the same as a PR with failing tests.
-
-**Default rule: if you changed code, check README.md.**
-
-| README section | Update when … |
-|---------------|---------------|
-| **Tools / prompt table** | A tool or prompt is added, removed, or renamed in `server.py` |
-| **Quick Start** | Any CLI command in `__main__.py` changes, or setup steps change |
-| **Environment Variables table** | Any `MCEConfig` field is added, removed, or renamed |
-| **Swagger Config schema** | `SwaggerSource` model or `swaggers.yaml` format changes |
-| **Security section** | `ast_guard.py`, `policies.py`, or Docker sandbox constraints change |
-| **Architecture diagram** | New modules, layers, or data-flow paths are introduced |
-| **How It Works / workflow** | Tool signatures, calling conventions, or response shapes change |
-
-Additional rules:
-- Do **not** create new markdown files — README, ROADMAP, AGENTS, and
-  CONTRIBUTING are the only permitted top-level docs (see Section 10).
-- Keep README examples in sync with actual tool/function signatures.
-- When in doubt, update `README.md`. A stale README is a bug, not a minor issue.
-
----
-
-## 9. Commands Reference
+**90% is the mandatory coverage floor; 100% is the target.** Do not lower the
+floor, omit security modules, delete tests, broaden suppressions, skip failing
+checks, or weaken controls to make a run pass. Regressions need fixes and tests.
+Report actual command results, not invented test counts or performance numbers.
 
 ```bash
-# Install project (editable, all dev deps)
-pip install -e ".[dev]"
-
-# Run all tests with coverage
-pytest
-
-# Run unit tests only (fast, no Docker)
-pytest tests/unit/ --no-cov -v
-
-# Run integration tests
-pytest tests/integration/ --no-cov -v
-
-# Lint
-ruff check src/ tests/
-
-# Format check
-ruff format --check src/ tests/
-
-# Type check
-mypy src/
-
-# Compile swagger sources
-mce compile
-
-# Compile without writing output (validation)
-mce compile --dry-run
-
-# Start MCP server (stdio transport — for Claude Desktop)
-mce serve
-
-# Start MCP server (HTTP transport)
-mce serve --transport http --port 8000
-
-# Build sandbox Docker image (required before execute_code works)
-docker build -t mce-sandbox:latest sandbox/
-
-# Create Docker network (required for sandbox networking)
-docker network create mce_network
+uv sync --frozen --extra dev
+uv run --frozen ruff check src/ tests/
+uv run --frozen ruff format --check src/ tests/
+uv run --frozen mypy --strict src/ tests/
+uv run --frozen pytest --cov-fail-under=90
+uv run --frozen pre-commit install
+uv run --frozen pre-commit run --all-files
 ```
 
----
+Local pre-commit hooks invoke `uv run --frozen`; mypy covers `src` and `tests`,
+and `pytest-coverage` enforces `--cov=gryphon --cov-fail-under=90`. Do not bypass
+hooks with `--no-verify` or disable the coverage gate.
 
-## 10. What Agents Must Never Do
+- Normal tests need no live Docker or upstream service. Use `tmp_path` for all
+  files/databases and isolated settings with `_env_file=None`; never touch an
+  operator's compiled catalog, cache, receipts, artifacts, or secrets.
+- Reuse fixtures from `tests/conftest.py` and specs in `tests/fixtures/`.
+  Name tests `test_{unit}_{condition}_{expected_outcome}` and keep one behavior
+  per test. Use async tests with the configured `asyncio_mode = "auto"`.
+- Mock network/DNS and async Docker clients; use `respx` or injected transports
+  as appropriate. Conformance tests may use real loopback HTTP, not live APIs.
+- Every blocked security pattern needs a rejection test; every supported case
+  needs a positive test. Cover traversal, schema abuse, DNS rebinding, identity
+  isolation, request encoding, write denial, timeout/cancellation, drift,
+  idempotency conflicts, interrupted recovery, ownership locks, and cleanup.
+- Preserve `tests/integration/test_protocol.py` real modern/legacy MCP coverage,
+  including HTTP authentication, structured results, and no Tasks advertising.
+- `tests/unit/test_cli_lifecycle.py` also runs real CLI compilation, stdio, and
+  the shipped demo using temporary configuration/stores and no upstream calls.
+  Run it with `uv run --frozen pytest tests/unit/test_cli_lifecycle.py`.
+- Live offline Docker smoke tests are opt-in with `GRYPHON_TEST_DOCKER=1` after
+  building `gryphon-sandbox:2.0.0`. They explicitly choose `runc` for benign
+  transport checks, **not proof of gVisor isolation**. Never change deployment
+  defaults or weaken security because those opt-in checks lack infrastructure.
 
-| Action | Why |
-|--------|-----|
-| Create new top-level directories | Breaks monorepo structure |
-| Add `print()` statements | Use `structlog`; prints break stdio MCP transport |
-| Hardcode credentials or tokens | Vault pattern must be used exclusively |
-| Use `requests` or `urllib` | `httpx` only |
-| Bypass the AST guard | The entire security model depends on it |
-| Use `Optional[X]` or `Union[X, Y]` | Use `X | None` and `X | Y` (Python 3.10+) |
-| Add models outside `models/__init__.py` | Single source of truth |
-| Add exceptions outside `errors.py` | Single source of truth |
-| Commit `.env` files | Use `.env.example` only |
-| Run tests without `tmp_path` for DB | Tests must be fully isolated |
-| Create markdown files not in spec | README, ROADMAP, AGENTS, CONTRIBUTING only |
-| Use `time.sleep()` in async code | Use `await asyncio.sleep()` |
-| Catch `Exception` without re-logging | Always `logger.exception(...)` first |
+## 8. Change and completion checklist
 
----
-
-## 11. Definition of Done
-
-A task is complete only when all of these are true:
-
-- [ ] **`README.md` updated** — every section that documents changed behaviour is current (see Section 8.7). Check this first, not last.
-- [ ] All new/modified functions have full type annotations
-- [ ] All public functions have Google-style docstrings
-- [ ] `ruff check src/ tests/` exits 0
-- [ ] `mypy src/` exits 0
-- [ ] `pytest --cov=mce --cov-fail-under=90` exits 0 (≥ 90% coverage is the **mandatory** gate)
-- [ ] Pre-commit hook passes in full (`pre-commit run --all-files` exits 0)
-- [ ] No credentials appear in code, logs, or test assertions
-- [ ] No `print()` statements added
-- [ ] No new files created outside the defined structure (Section 2)
-- [ ] `mce compile --dry-run` succeeds if compiler was touched
-- [ ] Security guard tests pass if `ast_guard.py` was touched
-
----
-
-## 12. Pre-Commit Hook
-
-The repository uses the [`pre-commit`](https://pre-commit.com) framework.
-The hook configuration lives in `.pre-commit-config.yaml` and runs
-automatically on every `git commit`.
-
-### 12.1 Hooks That Run
-
-| Hook | Tool | What it enforces |
-|------|------|------------------|
-| `ruff` | ruff | Lint violations — auto-fixes where possible |
-| `ruff-format` | ruff | Code formatting |
-| `mypy` | mypy --strict | Full static type checking |
-| `pytest-coverage` | pytest | **Coverage ≥ 90% — commit is blocked if below threshold** |
-
-### 12.2 Coverage Gate
-
-The pytest hook runs:
-```bash
-pytest --cov=mce --cov-report=term-missing --cov-fail-under=90 -q
-```
-- **90% is the hard floor** — the commit is rejected if overall coverage drops below it.
-- Coverage is measured against the `mce` package (`src/mce/`).
-- `--cov-report=term-missing` prints uncovered lines so you know exactly what to fix.
-
-### 12.3 Installing the Hook
-
-```bash
-# One-time setup after cloning
-pip install pre-commit
-pre-commit install
-```
-
-### 12.4 Running Manually
-
-```bash
-# Run all hooks against every file
-pre-commit run --all-files
-
-# Run only the coverage gate
-pre-commit run pytest-coverage --all-files
-
-# Skip hooks for an emergency commit (use sparingly)
-git commit --no-verify -m "chore: emergency fix"
-```
-
-> **Never use `--no-verify` for feature work.** It is reserved for
-> critical hotfixes and must be followed immediately by a full
-> `pre-commit run --all-files` pass in the next commit.
+1. Read affected files and check `git status`; respect concurrent agents' owned
+   files. Do not revert unrelated work. Use `git`, not `gh`, for Git operations.
+2. Keep changes focused; do not commit, publish, or create extra files unless
+   requested. Never commit `.env`, credentials, private configs, or runtime data.
+3. Add tests for changed behavior, including negative and cleanup paths. Compiler
+   changes need fixture coverage and a safe configured `compile --dry-run` check.
+4. Review README for **every** code change and update affected public contracts
+   in the same change. Update SECURITY for boundary changes and CHANGELOG for
+   release changes. ROADMAP is only work that is not implemented.
+5. Verify examples against current signatures and default config. Distinguish
+   offline demo, public API calls, optional Docker, and authenticated HTTP.
+6. Run lint, format check, strict types, full tests with the 90% floor, and hooks.
+   Report blockers truthfully with reproduction steps; a failing gate is not done.
+7. Summarize files changed, validation actually run, and remaining risks. Do not
+   claim multi-tenant readiness, exactly-once behavior, automatic crash resume,
+   published distributions, isolation certification, or unmeasured speedups.

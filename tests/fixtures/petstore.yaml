@@ -2,7 +2,7 @@ openapi: "3.0.3"
 info:
   title: Petstore API
   version: "1.0.0"
-  description: A sample pet store API for testing MCE swagger parsing
+  description: A sample pet store API for testing Gryphon swagger parsing
 servers:
   - url: https://petstore.example.com/v1
 

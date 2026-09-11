@@ -1,11 +1,11 @@
-"""Unit tests for mce/utils/hashing.py and mce/utils/logging.py."""
+"""Unit tests for gryphon/utils/hashing.py and gryphon/utils/logging.py."""
 
 from __future__ import annotations
 
 import logging
 
-from mce.utils.hashing import combine_hashes, hash_code, hash_content
-from mce.utils.logging import get_logger, setup_logging
+from gryphon.utils.hashing import combine_hashes, hash_code, hash_content
+from gryphon.utils.logging import get_logger, setup_logging
 
 # ---------------------------------------------------------------------------
 # hash_content
@@ -51,18 +51,29 @@ def test_hash_code_returns_64_chars() -> None:
     assert len(result) == 64
 
 
-def test_hash_code_normalizes_trailing_whitespace() -> None:
-    """Trailing whitespace should not affect the hash."""
-    code_clean = "a = 1\nb = 2"
-    code_trailing = "a = 1   \nb = 2  "
-    assert hash_code(code_clean) == hash_code(code_trailing)
+def test_hash_code_preserves_trailing_whitespace() -> None:
+    """Trailing whitespace is significant inside multiline literals."""
+    code_clean = "result = '''a\nb'''"
+    code_trailing = "result = '''a   \nb  '''"
+    assert hash_code(code_clean) != hash_code(code_trailing)
 
 
-def test_hash_code_normalizes_blank_lines() -> None:
-    """Blank lines should not affect the hash."""
-    code_no_blanks = "a = 1\nb = 2"
-    code_with_blanks = "a = 1\n\n\nb = 2\n"
-    assert hash_code(code_no_blanks) == hash_code(code_with_blanks)
+def test_hash_code_preserves_blank_lines() -> None:
+    """Blank lines are significant inside multiline literals."""
+    code_no_blanks = "result = '''a\nb'''"
+    code_with_blanks = "result = '''a\n\n\nb'''"
+    assert hash_code(code_no_blanks) != hash_code(code_with_blanks)
+
+
+def test_hash_code_normalizes_only_line_endings() -> None:
+    """Python line-ending normalization does not discard source whitespace."""
+    assert hash_code("result = 1\r\n") == hash_code("result = 1\n")
+    assert hash_code("result = 1\r") == hash_code("result = 1\n")
+
+
+def test_hash_code_preserves_unicode_line_separators() -> None:
+    """Unicode separators inside literals are not treated as Python newlines."""
+    assert hash_code("result = 'a\u2028b'") != hash_code("result = 'a\nb'")
 
 
 def test_hash_code_different_logic_differs() -> None:
@@ -145,7 +156,7 @@ def test_setup_logging_invalid_level_defaults_to_info() -> None:
 
 
 def test_get_logger_returns_bound_logger() -> None:
-    logger = get_logger("mce.test_module")
+    logger = get_logger("gryphon.test_module")
     assert logger is not None
     # structlog BoundLogger doesn't implement isinstance easily,
     # but we can verify it has standard logging methods

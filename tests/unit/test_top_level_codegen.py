@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import ast
 
-from mce.compiler.top_level_codegen import TopLevelFunctionGenerator, _normalize_function_name
-from mce.models import EndpointSpec, ParamSchema, ResponseField, ServerSpec
+from gryphon.compiler.top_level_codegen import TopLevelFunctionGenerator, _normalize_function_name
+from gryphon.models import EndpointSpec, ParamSchema, ResponseField, ServerSpec
 
 # ---------------------------------------------------------------------------
 # Helpers

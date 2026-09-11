@@ -1,269 +1,197 @@
-# Contributing to MCE
+# Contributing to Gryphon
 
-Thank you for your interest in contributing to **MCE — MCP Code Execution**!
-This document covers everything you need to open a high-quality pull request.
+Gryphon helps AI agents discover APIs, compose bounded programs, and reuse them
+without exposing credentials to their execution environment. Contributions
+should preserve that purpose and the small meta-tool interface.
 
----
+Read [AGENTS.md](AGENTS.md) for architecture and coding rules,
+[SECURITY.md](SECURITY.md) for trust boundaries, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before participating.
 
-## Table of Contents
+## Set up a checkout
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Workflow](#development-workflow)
-- [Branch & Commit Conventions](#branch--commit-conventions)
-- [Pull Request Process](#pull-request-process)
-- [Coding Standards](#coding-standards)
-- [Testing Requirements](#testing-requirements)
-- [Security Policy](#security-policy)
-- [Reporting Bugs](#reporting-bugs)
-- [Requesting Features](#requesting-features)
-
----
-
-## Code of Conduct
-
-This project follows the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
-By participating you agree to uphold it. Please report unacceptable behaviour to the maintainers via a private GitHub issue.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-| Tool | Minimum version |
-|------|----------------|
-| Python | 3.13 |
-| Docker | 24.0 |
-| Git | 2.40 |
-| pre-commit | 3.x |
-
-### Local Setup
+You need Git, [uv](https://docs.astral.sh/uv/), and Python **3.13+**. Use
+Linux/macOS for native development; persistent-store locking uses POSIX APIs.
+Windows users can run the container deployment. Docker is optional for the
+normal test suite and default restricted execution profile.
 
 ```bash
-# 1. Fork the repo on GitHub, then clone your fork
-git clone https://github.com/<your-username>/mcp-code-execution.git
+git clone https://github.com/hypen-code/mcp-code-execution.git
 cd mcp-code-execution
+uv sync --frozen --extra dev
+uv run --frozen pre-commit install
+```
 
-# 2. Install in editable mode with all dev dependencies
-pip install -e ".[dev]"
+This installs the checkout's `gryphon-runtime` distribution and `gryphon` CLI.
+Version 2.0.0 is not published to PyPI. `uv.lock` and `pyproject.toml` pin the
+environment, including FastMCP **4.0.2** and `pydantic-monty` **0.0.18**.
+Do not install an LLM provider extra for compilation: LLM enhancement is retired
+and explicitly rejected in v2.
 
-# 3. (Optional) Install LLM enhancement support
-pip install -e ".[llm]"
+Tests need no API keys or real `.env`. To try the example from the checkout root:
 
-# 4. Install pre-commit hooks
-pre-commit install
-
-# 5. Copy and configure environment
+```bash
 cp .env.example .env
-# Edit .env — you don't need real API keys for unit tests
-
-# 6. Build the sandbox image (required for executor integration tests)
-docker build -t mce-sandbox:latest sandbox/
-docker network create mce_network
-
-# 7. Verify everything works
-pytest
+cp config/swaggers.yaml.example config/swaggers.yaml
+uv run --frozen gryphon compile
+uv run --frozen python examples/demo.py
 ```
 
----
+The demo uses a real in-process MCP client, sums explicit inputs, and reuses its
+recipe offline. Compilation only adds discovery from the local weather spec;
+the demo does not call Open-Meteo or a model. Stop other processes using the same
+run database before running it.
 
-## Development Workflow
+## Development workflow
 
-```
-main           ← protected; release-ready at all times
-  └── feat/your-feature
-  └── fix/the-bug-description
-  └── chore/housekeeping-task
-  └── docs/update-readme
-```
+1. Create a focused branch from the target branch; use `feat/`, `fix/`, `docs/`,
+   `test/`, `refactor/`, or `chore/` prefixes.
+2. Read affected files in full, then make the smallest complete change. Respect
+   existing local changes and other contributors' work.
+3. Add positive, negative, and cleanup-path tests. Do not weaken policy to make
+   fixtures pass.
+4. Update relevant documentation in the same change. Review README for every
+   code change, even when no public wording ultimately needs editing.
+5. Run the complete quality suite and include actual results in your PR.
 
-1. **Create a branch** from `main` (see naming below).
-2. **Make atomic commits** — one logical change per commit.
-3. **Run the full quality suite** before pushing (all steps below must exit 0):
-
-   ```bash
-   ruff check src/ tests/          # lint
-   ruff format --check src/ tests/ # format
-   mypy src/                       # type check
-   pytest                          # tests + coverage ≥ 90%
-   pre-commit run --all-files      # full hook suite
-   ```
-
-4. **Open a pull request** against `main`.
-
----
-
-## Branch & Commit Conventions
-
-### Branch Names
-
-```
-feat/<short-description>      # new feature
-fix/<short-description>       # bug fix
-chore/<short-description>     # tooling, deps, CI
-docs/<short-description>      # documentation only
-refactor/<short-description>  # no behaviour change
-test/<short-description>      # adding or fixing tests
+```bash
+uv run --frozen ruff check src/ tests/
+uv run --frozen ruff format --check src/ tests/
+uv run --frozen mypy --strict src/ tests/
+uv run --frozen pytest --cov-fail-under=90
+uv run --frozen pre-commit run --all-files
 ```
 
-### Commit Messages
+**90% coverage is the hard floor; 100% is the target.** The local
+`pytest-coverage` hook invokes locked uv commands and enforces the same floor.
+Mypy checks both `src` and `tests`. Hooks may apply Ruff fixes; review those
+changes and rerun checks. Do not bypass hooks, lower coverage, exclude difficult
+modules, delete tests, or suppress errors to get a green result.
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+For focused iteration, run the relevant test file. Focused checks do not replace
+the full gate:
 
-```
-<type>(<scope>): <imperative summary>
-
-[optional body — explain the *why*, not the *what*]
-
-[optional footer — e.g. Closes #123]
-```
-
-**Types:** `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`, `ci`
-
-**Examples:**
-
-```
-feat(server): add run_cached_code tool with parameter injection
-fix(executor): handle container timeout when Docker daemon is slow
-docs(readme): update env var table to include MCE_DOCKER_HOST
-test(ast_guard): add tests for nonlocal statement blocking
-chore(deps): bump fastmcp to 2.1.0
+```bash
+uv run --frozen pytest tests/unit/test_server.py
+uv run --frozen pytest tests/integration/test_protocol.py
 ```
 
-Rules:
-- Summary line ≤ 72 characters, imperative mood, no trailing period.
-- Reference issues with `Closes #N` or `Refs #N` in the footer.
-- **Never use `git commit --no-verify`** for feature work — only emergency hotfixes.
+Compiler changes also need a dry run against safe fixture/example configuration:
 
----
-
-## Pull Request Process
-
-1. **Fill in the PR template** completely. Reviewers will not merge PRs with empty sections.
-2. **Keep PRs focused** — one feature or fix per PR. Bundled unrelated changes will be asked to split.
-3. **All CI checks must be green** before review begins.
-4. **Update `README.md`** in the same PR if the change affects any documented behaviour (see the table in [AGENTS.md § 8.7](AGENTS.md)).
-5. **One approving review** from a maintainer is required to merge.
-6. PRs are merged with **squash merge** to keep `main` history linear.
-
-### PR Checklist
-
-Before marking your PR ready for review, confirm every item:
-
-- [ ] New/modified functions have full type annotations (`from __future__ import annotations` at top)
-- [ ] All public functions have Google-style docstrings
-- [ ] `ruff check src/ tests/` exits 0
-- [ ] `ruff format --check src/ tests/` exits 0
-- [ ] `mypy src/` exits 0
-- [ ] `pytest --cov=mce --cov-fail-under=90` exits 0
-- [ ] `pre-commit run --all-files` exits 0
-- [ ] `README.md` updated if documented behaviour changed
-- [ ] No credentials, tokens, or secrets in code, tests, or assertions
-- [ ] No `print()` statements (use `structlog` via `get_logger(__name__)`)
-- [ ] No new files created outside the defined project structure
-- [ ] `mce compile --dry-run` succeeds if compiler was touched
-- [ ] Security guard tests updated if `ast_guard.py` was touched
-
----
-
-## Coding Standards
-
-MCE enforces strict coding standards. The full specification lives in [AGENTS.md](AGENTS.md). Key rules:
-
-### Language & Typing
-
-- **Python 3.13+** only. Use `from __future__ import annotations` in every file.
-- Use `X | Y` union syntax — not `Optional[X]` or `Union[X, Y]`.
-- Use lowercase generics: `list[str]`, `dict[str, Any]` — not `List`, `Dict`.
-- All public signatures must be fully typed; `mypy --strict` must pass.
-
-### Logging
-
-```python
-from mce.utils.logging import get_logger
-logger = get_logger(__name__)
-
-# ✅ Structured key=value pairs
-logger.info("cache_stored", id=entry_id[:12], description=description[:50])
-
-# ❌ No f-strings in log messages, no print()
-logger.info(f"stored cache entry {entry_id}")
+```bash
+uv run --frozen gryphon compile --dry-run
 ```
 
-### Error Handling
+`--dry-run` does not write output but can fetch a configured remote spec. Use
+local fixtures when an offline check is required.
 
-- No bare `except:` — always name the exception type.
-- MCP tool functions must **never raise** — always return a `dict` with an `"error"` key.
-- Always `logger.exception(...)` before swallowing unexpected errors.
+## Test boundaries
 
-### Architecture Rules
+- **Normal suite:** no live upstream API, credentials, model, or Docker daemon.
+  Use `_env_file=None`, `tmp_path`, isolated databases, and fake credentials.
+- **Unit tests:** mock outbound HTTP/DNS and Docker; use `respx` or an injected
+  transport where appropriate. Async Docker calls need async-aware mocks.
+- **Integration tests:** exercise real compilation, the restricted VM, storage,
+  and MCP sessions. Protocol tests use real modern and legacy clients and a
+  loopback HTTP server, including authentication failures and structured output.
+- **Fixtures:** prefer shared setup in `tests/conftest.py` and OpenAPI examples in
+  `tests/fixtures/`. Never depend on an operator's configured APIs or stores.
+- **Security:** every changed guard needs both denial and allowed-case coverage.
+  Exercise malformed schemas, owner isolation, DNS rebinding, write permits,
+  cancellation, drift, bounded output, crash receipts, and safe cleanup.
 
-- **One model file**: all Pydantic models in `src/mce/models/__init__.py`.
-- **One error file**: all exceptions in `src/mce/errors.py`.
-- **No new top-level directories** without explicit maintainer approval.
-- Max file length: **400 lines**. Max function length: **50 lines**.
-- Never call `os.environ` directly in business logic — use `MCEConfig`.
-- Never use `requests` or `urllib` — use `httpx`.
+### Optional live Docker smoke tests
 
----
+Build the image and opt in explicitly:
 
-## Testing Requirements
+```bash
+docker build -t gryphon-sandbox:2.0.0 sandbox/
+GRYPHON_TEST_DOCKER=1 uv run --frozen pytest tests/integration/test_execution_docker.py
+```
 
-- Coverage gate: **≥ 90%** (hard floor enforced by pre-commit hook).
-- Unit tests (`tests/unit/`) must have **no Docker, no network, no real filesystem** side effects.
-- Use `tmp_path` for any SQLite or file I/O in tests — never share state across tests.
-- Mock `httpx` calls with `respx`; mock Docker with `unittest.mock.MagicMock`.
-- One assertion concept per test — split long tests.
-- Test naming: `test_{unit}_{condition}_{expected_outcome}`.
+Read [`test_execution_docker.py`](tests/integration/test_execution_docker.py)
+before running it. The fixture deliberately selects `runc` for benign offline
+transport/library tests. This is **not** a production runtime recommendation or
+a verification of gVisor isolation. The deployed Docker profile defaults to
+`runsc` and refuses missing runtimes without falling back. Do not change that
+security default to accommodate a development machine.
 
-New blocked AST patterns **must** have a test that confirms `SecurityViolationError` is raised.
-New allowed patterns **must** have a test confirming no exception is raised.
+The tests use temporary stores, invoke no external API, and clean only their own
+containers. Provision/start Docker yourself; Gryphon never starts the daemon.
+The optional compute profile is different from the restricted Compose service,
+which deliberately has no Docker socket mount.
 
----
+## Coding and design standards
 
-## Security Policy
+- Python 3.13+, future annotations, fully typed signatures, modern union and
+  built-in collection types. Strict typing applies to tests too.
+- Google-style public docstrings; concise docstrings for private helpers.
+  Use named constants, immutable defaults, and validated boundary models.
+- Keep files within 400 lines and functions within 50 lines. Shared domain
+  models belong in `src/gryphon/models/__init__.py`; custom exceptions belong in
+  `src/gryphon/errors.py`. Prefer existing files; new files need a task rationale.
+- Use injected `GryphonConfig`/dependencies instead of scattered environment
+  access. HTTP goes through the broker network layer, not a bypass client.
+- Use structured safe logging to stderr; no `print()` in server/runtime code,
+  no raw traces or input/credential values in errors. MCP adapters return stable
+  domain-error envelopes while the SDK handles invalid protocol/schema input.
+- Keep async code responsive and cleanup cancellation-safe. Never orphan workers
+  or delete containers/files not owned by the current operation.
+- Preserve the two-argument restricted capability contract:
+  `call_tool("server.function", arguments)`. Inputs and replay parameters are JSON
+  objects, never source substitutions. `main()` is never auto-called.
+- Credentials stay in the host broker. Generated modules must not execute on
+  the host; optional Docker remains offline and credential-free.
+- Writes require exact administrator permits in addition to the global switch
+  and source policy. Tool hints, guides, idempotency keys, and model claims do not
+  authorize actions. Keep native MCP Tasks disabled until actually implemented.
 
-**Do not open public GitHub issues for security vulnerabilities.**
+## Pull requests and commits
 
-If you discover a security issue (e.g. AST guard bypass, credential leak, sandbox escape):
+Use [Conventional Commits](https://www.conventionalcommits.org/) with an
+imperative summary of at most 72 characters, for example:
 
-1. Email the maintainers privately or use [GitHub's private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability).
-2. Include a minimal reproducible example and the impact assessment.
-3. Allow up to **72 hours** for an initial response before any public disclosure.
+```text
+fix(broker): reject cross-origin credential delegation
+test(runtime): cover interrupted run ownership
+docs(readme): clarify structured recipe inputs
+```
 
-We follow responsible disclosure and will credit reporters in the changelog.
+Keep one logical change per commit and one focused purpose per PR. Use `git`
+commands for repository operations. Explain the problem, solution, security
+impact, compatibility changes, and validation results; avoid invented test
+counts, speedups, release promises, or unverified deployment claims.
 
----
+Before requesting review:
 
-## Reporting Bugs
+- [ ] Public behavior, examples, CLI flags, and env names match the implementation.
+- [ ] Full Ruff checks, formatting check, strict mypy, tests, and hooks pass.
+- [ ] Coverage is at least 90%; new behavior and failure paths are tested.
+- [ ] README is reviewed; SECURITY and CHANGELOG are updated when relevant.
+- [ ] No real credentials, private config, `.env`, runtime data, or unrelated files.
+- [ ] Default isolation, write policy, output limits, and owner checks are preserved.
+- [ ] Resource lifecycle, restart behavior, and cancellation consequences are documented.
+- [ ] Any omitted optional infrastructure check is named explicitly, not called a pass.
 
-Open a [GitHub Issue](https://github.com/hypen-code/mcp-code-execution/issues/new?template=bug_report.md) with:
+## Bugs, features, and security reports
 
-- **MCE version** (`pip show mce`)
-- **Python version** and OS
-- **Docker version** (`docker --version`)
-- **Minimal reproducible example** — smallest code/config that triggers the bug
-- **Expected vs actual behaviour**
-- **Relevant log output** (sanitize credentials before pasting)
+For ordinary bugs, open an
+[issue](https://github.com/hypen-code/mcp-code-execution/issues) with:
 
----
+- `uv run --frozen gryphon --version`, Python/OS, and relevant installed versions;
+- execution profile, transport, and Docker/runtime details if applicable;
+- a minimal sanitized reproduction and expected versus actual behavior;
+- relevant safe diagnostics from `gryphon doctor` and the exact failing command.
 
-## Requesting Features
+`doctor` is read-only and does not verify daemon health or upstream access.
+Review diagnostics before sharing: paths and local setup can still be private.
+Never post `.env`, real tokens, API payloads containing personal data, or raw
+credential-bearing logs.
 
-Open a [GitHub Issue](https://github.com/hypen-code/mcp-code-execution/issues/new?template=feature_request.md) with:
+For feature proposals, explain the user problem, alternatives, proposed scope,
+and trust-boundary changes. Check [ROADMAP.md](ROADMAP.md) first; it records
+unimplemented directions, not scheduled commitments.
 
-- **Problem statement** — what limitation or friction inspired this?
-- **Proposed solution** — how should MCE behave differently?
-- **Alternatives considered** — what else did you evaluate?
-- **Scope estimate** — is this a small addition or a new subsystem?
-
-Check the [ROADMAP.md](ROADMAP.md) first — your idea may already be planned.
-
----
-
-## Getting Help
-
-- **Questions about usage**: open a [GitHub Discussion](https://github.com/hypen-code/mcp-code-execution/discussions).
-- **Questions about the codebase**: read [AGENTS.md](AGENTS.md) — it is the canonical development reference.
-- **Stuck on a PR?** Leave a comment and tag a maintainer.
+**Report vulnerabilities privately**, following [SECURITY.md](SECURITY.md), not
+through public issues. Include a minimal proof of concept using fake credentials
+and synthetic data. Do not probe a deployment you are not authorized to test.

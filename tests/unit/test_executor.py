@@ -1,739 +1,392 @@
-"""Unit tests for CodeExecutor — mocks aiodocker so no real Docker daemon is needed."""
+"""Gryphon v2 executor contract tests: no Docker, network, or shared storage."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
-from typing import TYPE_CHECKING
+import time
+import uuid
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from gryphon.config import GryphonConfig
+from gryphon.errors import CacheError, CapacityError, ConflictError, InputValidationError, SecurityViolationError
+from gryphon.models import ExecutionResult, RunRecord
+from gryphon.runtime.executor import CodeExecutor
+from gryphon.runtime.recovery_lease import RecoveryLease
+
 if TYPE_CHECKING:
     from pathlib import Path
-
-from mce.config import MCEConfig
-from mce.errors import ExecutionError, ExecutionTimeoutError, LintError, SecurityViolationError
-from mce.runtime.executor import CodeExecutor, _detect_servers_used, _WarmPool
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_config(tmp_path: Path, *, sandbox_mode: str = "cold") -> MCEConfig:
-    return MCEConfig(
-        compiled_output_dir=str(tmp_path / "compiled"),
-        cache_db_path=str(tmp_path / "data" / "cache.db"),
-        cache_enabled=True,
-        cache_ttl_seconds=3600,
-        execution_timeout_seconds=10,
-        log_level="DEBUG",
-        debug=True,
-        docker_image="mce-sandbox:latest",
-        max_code_size_bytes=65_536,
-        sandbox_mode=sandbox_mode,
-        warm_pool_size=1,
-    )
+def _make_executor(tmp_path: Path, **options: Any) -> CodeExecutor:
+    """Construct detached mocked services with real owner-scoped receipt semantics."""
+    options = {
+        "_env_file": None,
+        "run_db_path": str(tmp_path / "runs.db"),
+        "cache_db_path": str(tmp_path / "cache.db"),
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "compiled_output_dir": str(tmp_path / "compiled"),
+        **options,
+    }
+    config = GryphonConfig(**options)
+    cache, broker, registry = AsyncMock(), AsyncMock(), MagicMock()
+    cache.store.return_value = "cache-id"
+    registry.fingerprint.return_value = "catalog-v2"
+    registry.list_servers.return_value = []
+    return CodeExecutor(config, cache, registry, broker, _mock_runs())
 
 
-def _make_mock_cache() -> AsyncMock:
-    cache = AsyncMock()
-    cache.store = AsyncMock(return_value="fake-cache-id-abc123")
-    return cache
+def _mock_runs() -> AsyncMock:
+    """Preserve detached receipt and idempotency semantics in a mocked ledger."""
+    runs = AsyncMock()
+    records: dict[str, RunRecord] = {}
+    keys: dict[tuple[str, str], str] = {}
 
+    async def create(owner: str, digest: str, key: str | None) -> tuple[RunRecord, bool]:
+        """Model immutable namespace-scoped durable idempotency."""
+        if key is not None and (owner, key) in keys:
+            record = records[keys[owner, key]]
+            if record.request_hash != digest:
+                raise ConflictError("different request")
+            return record.model_copy(deep=True), False
+        now = time.time()
+        record = RunRecord(id=uuid.uuid4().hex, owner=owner, request_hash=digest, created_at=now, updated_at=now)
+        records[record.id] = record
+        if key is not None:
+            keys[owner, key] = record.id
+        return record.model_copy(deep=True), True
 
-def _make_docker_mock() -> MagicMock:
-    """Return a MagicMock that mimics an aiodocker.Docker client."""
-    docker = MagicMock()
-    docker.close = AsyncMock()
-    docker.version = AsyncMock(return_value={"Version": "24.0.0"})
-    return docker
+    async def get(run_id: str, owner: str) -> RunRecord | None:
+        """Return detached, owner-filtered state."""
+        record = records.get(run_id)
+        return record.model_copy(deep=True) if record is not None and record.owner == owner else None
 
+    async def start(run_id: str, owner: str) -> None:
+        """Mark an admitted run running."""
+        records[run_id].status = "running"
 
-# ---------------------------------------------------------------------------
-# _detect_servers_used
-# ---------------------------------------------------------------------------
+    async def finish(run_id: str, owner: str, result: ExecutionResult, status: str | None = None) -> None:
+        """Capture an immutable public terminal receipt."""
+        if records[run_id].status not in ("queued", "running"):
+            raise ConflictError("already terminal")
+        updated = records[run_id].model_dump()
+        updated.update(status=status or ("succeeded" if result.success else "failed"), result=result.model_dump())
+        records[run_id] = RunRecord.model_validate(updated)
 
-
-def test_detect_servers_used_from_import() -> None:
-    code = "from weather.functions import get_current_weather"
-    assert _detect_servers_used(code) == ["weather"]
-
-
-def test_detect_servers_used_import_style() -> None:
-    code = "import hotel.functions"
-    assert _detect_servers_used(code) == ["hotel"]
-
-
-def test_detect_servers_used_multiple_servers() -> None:
-    code = "from weather.functions import fn\nfrom hotel.functions import book"
-    assert sorted(_detect_servers_used(code)) == ["hotel", "weather"]
-
-
-def test_detect_servers_used_no_server_imports() -> None:
-    code = "import os\nimport json\nresult = 42"
-    assert _detect_servers_used(code) == []
-
-
-def test_detect_servers_used_deduplicates() -> None:
-    code = "from weather.functions import fn1\nfrom weather.functions import fn2"
-    assert _detect_servers_used(code) == ["weather"]
-
-
-# ---------------------------------------------------------------------------
-# CodeExecutor.__init__
-# ---------------------------------------------------------------------------
-
-
-def test_executor_init(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    cache = _make_mock_cache()
-    executor = CodeExecutor(config, cache)
-    assert executor._config is config
-    assert executor._cache is cache
-    assert executor._docker is None
+    runs.create.side_effect, runs.get.side_effect = create, get
+    runs.start.side_effect, runs.finish.side_effect = start, finish
+    return runs
 
 
 # ---------------------------------------------------------------------------
-# startup / shutdown
+# CodeExecutor.__init__ and startup / shutdown
 # ---------------------------------------------------------------------------
 
 
-async def test_startup_cold_mode_opens_docker(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    with patch("aiodocker.Docker") as mock_docker_cls:
-        mock_client = _make_docker_mock()
-        mock_docker_cls.return_value = mock_client
+async def test_startup_restricted_never_opens_docker(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    with patch("aiodocker.Docker") as docker:
         await executor.startup()
-
-    assert executor._docker is mock_client
-    assert executor._warm_pool is None
-
-
-async def test_startup_warm_mode_creates_pool(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_container = AsyncMock()
-    mock_container.id = "abc123def456"
-    mock_container.start = AsyncMock()
-
-    mock_containers_api = AsyncMock()
-    mock_containers_api.create = AsyncMock(return_value=mock_container)
-    mock_containers_api.list = AsyncMock(return_value=[])  # no stale containers
-
-    mock_client = _make_docker_mock()
-    mock_client.containers = mock_containers_api
-
-    with patch("aiodocker.Docker", return_value=mock_client):
-        await executor.startup()
-
-    assert executor._warm_pool is not None
-    mock_containers_api.create.assert_awaited_once()
-
-
-async def test_startup_warm_mode_removes_stale_containers(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    stale = AsyncMock()
-    stale.id = "stale000dead"
-    stale.delete = AsyncMock()
-
-    fresh = AsyncMock()
-    fresh.id = "fresh111alive"
-    fresh.start = AsyncMock()
-
-    mock_containers_api = AsyncMock()
-    mock_containers_api.list = AsyncMock(return_value=[stale])
-    mock_containers_api.create = AsyncMock(return_value=fresh)
-
-    mock_client = _make_docker_mock()
-    mock_client.containers = mock_containers_api
-
-    with patch("aiodocker.Docker", return_value=mock_client):
-        await executor.startup()
-
-    stale.delete.assert_awaited_once_with(force=True)
-
-
-async def test_shutdown_closes_docker_client(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_client = _make_docker_mock()
-    executor._docker = mock_client
-
-    await executor.shutdown()
-
-    mock_client.close.assert_awaited_once()
-    assert executor._docker is None
-
-
-async def test_shutdown_stops_warm_containers(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_container = AsyncMock()
-    mock_container.id = "abc123def456"
-    mock_container.delete = AsyncMock()
-
-    # shutdown() iterates _warm_containers (all created), not _warm_pool (idle only)
-    executor._warm_containers = [mock_container]
-    executor._docker = _make_docker_mock()
-
-    await executor.shutdown()
-
-    mock_container.delete.assert_awaited_once_with(force=True)
-    assert executor._warm_containers == []
+        await executor.shutdown()
+    docker.assert_not_called()
+    cast("AsyncMock", executor._runs.recover_interrupted).assert_awaited_once()
 
 
 async def test_shutdown_safe_when_startup_not_called(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    await executor.shutdown()  # must not raise
+    executor = _make_executor(tmp_path)
+    await executor.shutdown()
+    cast("AsyncMock", executor._broker.close).assert_awaited_once()
+
+
+async def test_execute_before_startup_returns_typed_failure(tmp_path: Path) -> None:
+    result = await _make_executor(tmp_path).execute("result = 1", "test")
+    assert not result.success and result.error_type == "execution"
 
 
 # ---------------------------------------------------------------------------
-# _lint_code
+# Validation and source preparation (replaces unsafe lint/import rewrites)
 # ---------------------------------------------------------------------------
 
 
-def test_lint_code_skips_when_ruff_not_found(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    with patch("subprocess.run", side_effect=FileNotFoundError("ruff not found")):
-        executor._lint_code("result = 42")  # must not raise
-
-
-def test_lint_code_timeout_is_skipped(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["ruff"], timeout=10)):
-        executor._lint_code("result = 42")  # must not raise
-
-
-def test_lint_code_raises_lint_error_on_failure(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    mock_result = MagicMock()
-    mock_result.returncode = 1
-    mock_result.stdout = "E501 line too long"
-    with patch("subprocess.run", return_value=mock_result):
-        with pytest.raises(LintError) as exc_info:
-            executor._lint_code("x = 1")
-        assert exc_info.value.lint_output == "E501 line too long"
-
-
-def test_lint_code_passes_on_zero_returncode(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    with patch("subprocess.run", return_value=mock_result):
-        executor._lint_code("result = 42")  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# _build_execution_code
-# ---------------------------------------------------------------------------
-
-
-def test_build_execution_code_injects_sys_path(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    code = executor._build_execution_code("result = 1", ["weather"])
-    assert "sys.path.insert" in code
-    assert "/mce_compiled" in code
-    assert "result = 1" in code
-
-
-# ---------------------------------------------------------------------------
-# _parse_output
-# ---------------------------------------------------------------------------
-
-
-def test_parse_output_empty_returns_error_result(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    result = executor._parse_output("", 100)
-    assert result.success is False
-    assert "No output" in (result.error or "")
-
-
-def test_parse_output_valid_success_json(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    payload = json.dumps({"success": True, "data": {"temp": 22}})
-    result = executor._parse_output(payload, 50)
-    assert result.success is True
-    assert result.data == {"temp": 22}
-    assert result.execution_time_ms == 50
-
-
-def test_parse_output_valid_failure_json(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    payload = json.dumps({"success": False, "error": "something went wrong"})
-    result = executor._parse_output(payload, 75)
-    assert result.success is False
-    assert result.error is not None
-    assert "something went wrong" in result.error
-
-
-def test_parse_output_non_json_returns_raw_as_data(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    result = executor._parse_output("raw text output", 10)
-    assert result.success is True
-    assert isinstance(result.data, str) and "raw text output" in result.data
-
-
-def test_parse_output_traceback_only_in_debug_mode(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    config.debug = True
-    executor = CodeExecutor(config, _make_mock_cache())
-    payload = json.dumps({"success": False, "error": "err", "traceback": "Traceback..."})
-    result = executor._parse_output(payload, 10)
-    assert result.traceback == "Traceback..."
-
-
-def test_parse_output_traceback_hidden_in_non_debug_mode(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    config.debug = False
-    executor = CodeExecutor(config, _make_mock_cache())
-    payload = json.dumps({"success": False, "error": "err", "traceback": "Traceback..."})
-    result = executor._parse_output(payload, 10)
-    assert result.traceback is None
-
-
-# ---------------------------------------------------------------------------
-# _run_cold — mocked aiodocker
-# ---------------------------------------------------------------------------
-
-
-def _make_cold_container_mock(stdout_output: str, exit_code: int = 0) -> AsyncMock:
-    """Build a mock aiodocker container for cold-mode tests."""
-    container = AsyncMock()
-    container.start = AsyncMock()
-    container.wait = AsyncMock(return_value={"StatusCode": exit_code})
-    container.log = AsyncMock(side_effect=lambda stdout, stderr: [stdout_output] if stdout else [])
-    container.delete = AsyncMock()
-    return container
-
-
-async def test_run_cold_success(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    payload = json.dumps({"success": True, "data": "ok"})
-    mock_container = _make_cold_container_mock(payload)
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    output = await executor._run_cold("result = 'ok'", [])
-    assert "ok" in output
-
-
-async def test_run_cold_timeout_raises(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_container = AsyncMock()
-    mock_container.start = AsyncMock()
-    mock_container.wait = AsyncMock(side_effect=TimeoutError())
-    mock_container.delete = AsyncMock()
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    with pytest.raises(ExecutionTimeoutError):
-        await executor._run_cold("import time; time.sleep(999)", [])
-
-
-async def test_run_cold_docker_create_error_raises(tmp_path: Path) -> None:
-    import aiodocker.exceptions  # noqa: PLC0415
-
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(
-        side_effect=aiodocker.exceptions.DockerError(status=500, message="server error")
-    )
-    executor._docker = mock_docker
-
-    with pytest.raises(ExecutionError):
-        await executor._run_cold("result = 1", [])
-
-
-async def test_run_cold_nonzero_exit_raises_execution_error(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_container = AsyncMock()
-    mock_container.start = AsyncMock()
-    mock_container.wait = AsyncMock(return_value={"StatusCode": 137})
-    mock_container.log = AsyncMock(side_effect=lambda stdout, stderr: ["OOM killed"] if stderr else [])
-    mock_container.delete = AsyncMock()
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    with pytest.raises(ExecutionError):
-        await executor._run_cold("result = 1", [])
-
-
-async def test_run_cold_container_deleted_on_success(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    payload = json.dumps({"success": True, "data": None})
-    mock_container = _make_cold_container_mock(payload)
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    await executor._run_cold("result = None", [])
-    mock_container.delete.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# _run_warm — mocked aiodocker exec
-# ---------------------------------------------------------------------------
-
-
-def _make_exec_stream_mock(stdout_bytes: bytes) -> AsyncMock:
-    """Return a mock async context manager that yields one stdout frame then EOF."""
-
-    class _Msg:
-        def __init__(self, data: bytes) -> None:
-            self.stream = 1  # stdout
-            self.data = data
-
-    stream = AsyncMock()
-    stream.read_out = AsyncMock(side_effect=[_Msg(stdout_bytes), None])
-    stream.__aenter__ = AsyncMock(return_value=stream)
-    stream.__aexit__ = AsyncMock(return_value=None)
-    return stream
-
-
-async def test_run_warm_success(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    payload = json.dumps({"success": True, "data": {"result": 42}})
-    stream = _make_exec_stream_mock(payload.encode())
-
-    exec_obj = AsyncMock()
-    exec_obj.start = MagicMock(return_value=stream)
-
-    mock_container = AsyncMock()
-    mock_container.id = "warmcontainerid"
-    mock_container.exec = AsyncMock(return_value=exec_obj)
-
-    warm_pool = _WarmPool()
-    await warm_pool.push(mock_container)
-    executor._warm_pool = warm_pool
-    executor._docker = _make_docker_mock()
-
-    output = await executor._run_warm("result = 42", [])
-    assert "42" in output
-
-
-async def test_run_warm_container_returned_to_pool_after_exec(tmp_path: Path) -> None:
-    """Container must be returned to the pool even on success."""
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    payload = json.dumps({"success": True, "data": None})
-    stream = _make_exec_stream_mock(payload.encode())
-    exec_obj = AsyncMock()
-    exec_obj.start = MagicMock(return_value=stream)
-
-    mock_container = AsyncMock()
-    mock_container.id = "warmid"
-    mock_container.exec = AsyncMock(return_value=exec_obj)
-
-    warm_pool = _WarmPool()
-    await warm_pool.push(mock_container)
-    executor._warm_pool = warm_pool
-    executor._docker = _make_docker_mock()
-
-    await executor._run_warm("result = None", [])
-
-    assert warm_pool._queue.qsize() == 1
-
-
-async def test_run_warm_all_busy_raises(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    executor._warm_pool = _WarmPool()  # empty pool
-    executor._docker = _make_docker_mock()
-
-    with pytest.raises(ExecutionError, match="busy"), patch("asyncio.wait_for", side_effect=TimeoutError()):
-        await executor._run_warm("result = 1", [])
-
-
-# ---------------------------------------------------------------------------
-# execute() — full pipeline mocked
-# ---------------------------------------------------------------------------
-
-
-async def test_execute_raises_if_startup_not_called(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    with pytest.raises(ExecutionError, match="startup"):
-        await executor.execute("result = 1", "test")
-
-
-async def test_execute_raises_security_error_for_oversized_code(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    config.max_code_size_bytes = 10
-    executor = CodeExecutor(config, _make_mock_cache())
-    executor._docker = _make_docker_mock()
-    with pytest.raises(SecurityViolationError, match="exceeds limit"):
-        await executor.execute("x = 1" * 100, "big code")
-
-
-async def test_execute_raises_security_error_for_dangerous_imports(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    executor._docker = _make_docker_mock()
-    dangerous = "import subprocess\nresult = subprocess.run(['rm', '-rf', '/'])"
+async def test_oversized_code_rejected_before_ast_or_admission(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path, max_code_size_bytes=8)
+    await executor.startup()
+    with patch.object(executor._ast_guard, "validate") as guard, pytest.raises(InputValidationError):
+        await executor.submit("result = 12345", "large")
+    guard.assert_not_called()
+    cast("AsyncMock", executor._runs.create).assert_not_awaited()
+    await executor.shutdown()
+
+
+@pytest.mark.parametrize("inputs", [{"x": float("nan")}, {1: "key"}, {"x": object()}, {"x": (1, 2)}])
+async def test_non_json_inputs_rejected_before_vm(tmp_path: Path, inputs: Any) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    with pytest.raises(InputValidationError):
+        await executor.submit("result = inputs", "invalid", inputs)
+    cast("AsyncMock", executor._runs.create).assert_not_awaited()
+    await executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "https://example.invalid/schema"},
+        {"pattern": "(a+)+$"},
+        {"type": "object", "required": ["city"]},
+    ],
+)
+async def test_invalid_input_schema_fails_before_admission(tmp_path: Path, schema: dict[str, Any]) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    with pytest.raises(InputValidationError):
+        await executor.submit("result = 1", "invalid", {}, schema)
+    cast("AsyncMock", executor._runs.create).assert_not_awaited()
+    await executor.shutdown()
+
+
+@pytest.mark.parametrize("code", ["import os\nresult = 1", "import json\nresult = 1", "result = open('x')"])
+async def test_guard_always_blocks_unsafe_or_unavailable_capabilities(tmp_path: Path, code: str) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
     with pytest.raises(SecurityViolationError):
-        await executor.execute(dangerous, "dangerous code")
+        await executor.submit(code, "guard")
+    cast("AsyncMock", executor._runs.create).assert_not_awaited()
+    await executor.shutdown()
 
 
-async def test_execute_cold_happy_path(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    config.lint_enabled = True
-    cache = _make_mock_cache()
-    executor = CodeExecutor(config, cache)
-
-    docker_output = json.dumps({"success": True, "data": {"result": 42}})
-    mock_container = _make_cold_container_mock(docker_output)
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    ruff_result = MagicMock()
-    ruff_result.returncode = 0
-
-    with patch("subprocess.run", return_value=ruff_result):
-        result = await executor.execute("result = 42", "compute 42")
-
-    assert result.success is True
-    assert result.data == {"result": 42}
-    assert result.cache_id is not None
-    cache.store.assert_awaited_once()
+@pytest.mark.parametrize("code", ["result = inputs['n'] + 2", "inputs['n'] + 2", "return inputs['n'] + 2"])
+async def test_real_monty_supports_explicit_result_contracts(tmp_path: Path, code: str) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    result = await executor.execute(code, "arithmetic", {"n": 40})
+    assert result.success and result.data == 42
+    await executor.shutdown()
 
 
-async def test_execute_cold_cache_disabled_no_store(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    config.cache_enabled = False
-    cache = _make_mock_cache()
-    executor = CodeExecutor(config, cache)
+async def test_main_is_not_automatically_invoked_twice(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    cast("AsyncMock", executor._broker.invoke).return_value = {"ok": True}
+    await executor.startup()
+    code = 'async def main():\n    return await call_tool("weather.get", {})\nresult = await main()'
+    result = await executor.execute(code, "once")
+    assert result.success
+    cast("AsyncMock", executor._broker.invoke).assert_awaited_once()
+    await executor.shutdown()
 
-    payload = json.dumps({"success": True, "data": "ok"})
-    mock_container = _make_cold_container_mock(payload)
 
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    result = await executor.execute("result = 'ok'", "ok code")
-
-    cache.store.assert_not_awaited()
-    assert result.cache_id is None
+async def test_main_definition_without_explicit_call_rejected(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    with pytest.raises(InputValidationError, match="call main explicitly"):
+        await executor.submit("def main():\n    return 42", "no implicit call")
+    await executor.shutdown()
 
 
 # ---------------------------------------------------------------------------
-# _compute_swagger_hash
+# Output parsing — strict JSON, safe diagnostics, success-only caching
 # ---------------------------------------------------------------------------
 
 
+async def test_exception_values_and_tracebacks_never_escape(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path, debug=True)
+    await executor.startup()
+    result = await executor.execute("result = 1 / 0", "private-description")
+    assert not result.success and result.error_type == "execution" and result.traceback is None
+    cast("AsyncMock", executor._cache.store).assert_not_awaited()
+    await executor.shutdown()
+
+
+async def test_printed_values_are_not_returned_as_diagnostics(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    result = await executor.execute("print(inputs['private'])\nresult = 42", "private", {"private": "never-echo-this"})
+    assert result.success and "never-echo-this" not in result.model_dump_json()
+    await executor.shutdown()
+
+
+async def test_cache_disabled_never_stores_recipe(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path, cache_enabled=False)
+    await executor.startup()
+    result = await executor.execute("result = 42", "no cache")
+    assert result.success and result.cache_id is None
+    cast("AsyncMock", executor._cache.store).assert_not_awaited()
+    await executor.shutdown()
+
+
 # ---------------------------------------------------------------------------
-# _WarmPool.drain
+# Immutable owner-scoped idempotency, bounded admission, and cancellation
 # ---------------------------------------------------------------------------
 
 
-async def test_warm_pool_drain_returns_all_containers() -> None:
-    pool = _WarmPool()
-    c1, c2 = AsyncMock(), AsyncMock()
-    await pool.push(c1)
-    await pool.push(c2)
-    containers = await pool.drain()
-    assert len(containers) == 2
-    assert pool._queue.empty()
+async def test_same_idempotency_key_returns_one_execution(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    first = await executor.execute("result = inputs", "same", {"n": 1}, idempotency_key="one")
+    second = await executor.execute("result = inputs", "same", {"n": 1}, idempotency_key="one")
+    assert first.run_id == second.run_id
+    cast("AsyncMock", executor._cache.store).assert_awaited_once()
+    await executor.shutdown()
 
 
-async def test_warm_pool_drain_empty_pool() -> None:
-    pool = _WarmPool()
-    assert await pool.drain() == []
+async def test_changed_idempotency_inputs_conflict(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    await executor.execute("result = inputs", "same", {"n": 1}, idempotency_key="one")
+    result = await executor.execute("result = inputs", "same", {"n": 2}, idempotency_key="one")
+    assert result.error_type == "conflict"
+    await executor.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# shutdown — CancelledError handling
-# ---------------------------------------------------------------------------
+async def test_capacity_rejects_without_spawning_unbounded_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(tmp_path, max_concurrent_executions=1)
+    await executor.startup()
+    blocked = asyncio.Event()
+
+    async def wait(*args: Any) -> ExecutionResult:
+        """Keep the single execution slot occupied until shutdown."""
+        await blocked.wait()
+        return ExecutionResult(success=True, data=1)
+
+    monkeypatch.setattr(executor._sandbox, "run", AsyncMock(side_effect=wait))
+    await executor.submit("result = 1", "running")
+    await executor.submit("result = 1", "queued")
+    with pytest.raises(CapacityError):
+        await executor.submit("result = 1", "rejected")
+    assert len(executor._jobs) == 2
+    await executor.shutdown()
 
 
-async def test_shutdown_reraises_cancelled_error_after_cleanup(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
+async def test_foreign_owner_cannot_cancel_or_read_run(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    result = await executor.execute("result = 1", "owned", owner="alice")
+    assert result.run_id is not None
+    assert await executor.get_run(result.run_id, "bob") is None
+    assert not await executor.cancel(result.run_id, "bob")
+    await executor.shutdown()
 
-    mock_container = AsyncMock()
-    mock_container.id = "abc123def456"
-    mock_container.delete = AsyncMock(side_effect=asyncio.CancelledError())
 
-    executor._warm_containers = [mock_container]
-    executor._docker = _make_docker_mock()
+async def test_replay_stale_fingerprint_fails_closed(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    cast("AsyncMock", executor._cache.get).return_value = MagicMock(swagger_hash="old")
+    result = await executor.replay("old")
+    assert not result.success and result.error_type == "conflict"
+    cast("AsyncMock", executor._runs.create).assert_not_awaited()
+    await executor.shutdown()
 
+
+async def test_shutdown_caller_cancellation_still_closes_all_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def close() -> None:
+        """Hold backend cleanup open long enough to repeatedly cancel its caller."""
+        entered.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(executor._sandbox, "close", AsyncMock(side_effect=close))
+    shutdown = asyncio.create_task(executor.shutdown())
+    await entered.wait()
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not finished.is_set() and not shutdown.done()
+    release.set()
     with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    assert finished.is_set()
+    await executor.shutdown()
+    cast("AsyncMock", executor._broker.close).assert_awaited_once()
+    cast("AsyncMock", executor._runs.close).assert_awaited_once()
+
+
+async def test_shutdown_backend_failure_still_closes_broker_and_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(tmp_path)
+    await executor.startup()
+    monkeypatch.setattr(executor._sandbox, "close", AsyncMock(side_effect=RuntimeError("private cleanup error")))
+    with pytest.raises(RuntimeError):
         await executor.shutdown()
-
-    # Containers list is still cleared despite the error
-    assert executor._warm_containers == []
-
-
-# ---------------------------------------------------------------------------
-# execute() — warm mode path
-# ---------------------------------------------------------------------------
+    cast("AsyncMock", executor._broker.close).assert_awaited_once()
+    cast("AsyncMock", executor._runs.close).assert_awaited_once()
 
 
-async def test_execute_warm_happy_path(tmp_path: Path) -> None:
-    import json as _json  # noqa: PLC0415
+async def test_queue_timeout_has_durable_capacity_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executor = _make_executor(tmp_path, max_concurrent_executions=1, queue_timeout_seconds=1)
+    await executor.startup()
+    entered = asyncio.Event()
 
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    cache = _make_mock_cache()
-    executor = CodeExecutor(config, cache)
+    async def wait(*args: Any) -> ExecutionResult:
+        """Hold the only active slot until shutdown cancels it."""
+        entered.set()
+        await asyncio.Event().wait()
+        return ExecutionResult(success=True, data=1)
 
-    payload = _json.dumps({"success": True, "data": {"value": 7}})
-    stream = _make_exec_stream_mock(payload.encode())
-    exec_obj = AsyncMock()
-    exec_obj.start = MagicMock(return_value=stream)
-
-    mock_container = AsyncMock()
-    mock_container.id = "warmexecid123"
-    mock_container.exec = AsyncMock(return_value=exec_obj)
-
-    warm_pool = _WarmPool()
-    await warm_pool.push(mock_container)
-    executor._warm_pool = warm_pool
-    executor._docker = _make_docker_mock()
-
-    result = await executor.execute("result = 7", "compute 7")
-    assert result.success is True
+    monkeypatch.setattr(executor._sandbox, "run", AsyncMock(side_effect=wait))
+    await executor.submit("result = 1", "running")
+    await entered.wait()
+    queued = await executor.execute("result = 2", "queued")
+    assert queued.run_id is not None
+    receipt = await executor.get_run(queued.run_id)
+    assert receipt is not None
+    assert queued.error_type == "capacity" and receipt.status == "failed"
+    await executor.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# _run_cold — container delete failure is swallowed
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("kind", ["symlink", "directory", "public", "hardlink"])
+def test_lease_rejects_unsafe_files_without_modifying_them(tmp_path: Path, kind: str) -> None:
+    """Fail closed before storage recovery without altering somebody else's files."""
+    lock, target = tmp_path / "runs.db.lock", tmp_path / "target"
+    target.write_text("untouched")
+    target.chmod(0o600)
+    if kind == "symlink":
+        lock.symlink_to(target)
+    elif kind == "directory":
+        lock.mkdir()
+    elif kind == "hardlink":
+        lock.hardlink_to(target)
+    else:
+        lock.write_text("public")
+        lock.chmod(0o644)
+    lease = RecoveryLease(str(tmp_path / "runs.db"))
+    with pytest.raises(CacheError):
+        lease.acquire()
+    lease.close()
+    assert target.read_text() == "untouched" and lock.exists()
 
 
-async def test_run_cold_container_delete_failure_is_swallowed(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="cold")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    payload = json.dumps({"success": True, "data": None})
-    mock_container = _make_cold_container_mock(payload)
-    mock_container.delete = AsyncMock(side_effect=Exception("delete failed"))
-
-    mock_docker = _make_docker_mock()
-    mock_docker.containers = AsyncMock()
-    mock_docker.containers.create = AsyncMock(return_value=mock_container)
-    executor._docker = mock_docker
-
-    # Should not raise despite delete failure
-    output = await executor._run_cold("result = None", [])
-    assert output
-
-
-# ---------------------------------------------------------------------------
-# _run_warm — Docker exec create failure
-# ---------------------------------------------------------------------------
-
-
-async def test_run_warm_exec_create_docker_error_raises(tmp_path: Path) -> None:
-    import aiodocker.exceptions  # noqa: PLC0415
-
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    mock_container = AsyncMock()
-    mock_container.id = "warmcontainerid"
-    mock_container.exec = AsyncMock(side_effect=aiodocker.exceptions.DockerError(status=500, message="exec failed"))
-
-    warm_pool = _WarmPool()
-    await warm_pool.push(mock_container)
-    executor._warm_pool = warm_pool
-    executor._docker = _make_docker_mock()
-
-    with pytest.raises(ExecutionError, match="docker exec create failed"):
-        await executor._run_warm("result = 1", [])
-
-
-# ---------------------------------------------------------------------------
-# _run_warm — stream timeout
-# ---------------------------------------------------------------------------
-
-
-async def test_run_warm_stream_timeout_raises(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, sandbox_mode="warm")
-    executor = CodeExecutor(config, _make_mock_cache())
-
-    stream = AsyncMock()
-    stream.read_out = AsyncMock(side_effect=TimeoutError())
-    stream.__aenter__ = AsyncMock(return_value=stream)
-    stream.__aexit__ = AsyncMock(return_value=None)
-
-    exec_obj = AsyncMock()
-    exec_obj.start = MagicMock(return_value=stream)
-
-    mock_container = AsyncMock()
-    mock_container.id = "warmtimeoutid"
-    mock_container.exec = AsyncMock(return_value=exec_obj)
-
-    warm_pool = _WarmPool()
-    await warm_pool.push(mock_container)
-    executor._warm_pool = warm_pool
-    executor._docker = _make_docker_mock()
-
-    with pytest.raises(ExecutionTimeoutError):
-        await executor._run_warm("import time; time.sleep(999)", [])
-
-
-# ---------------------------------------------------------------------------
-# _compute_swagger_hash
-# ---------------------------------------------------------------------------
-
-
-def test_compute_swagger_hash_returns_unknown_on_missing_dir(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    result = executor._compute_swagger_hash(["nonexistent_server"])
-    assert result in ("unknown", "no-servers")
-
-
-def test_compute_swagger_hash_no_servers_returns_no_servers(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    executor = CodeExecutor(config, _make_mock_cache())
-    assert executor._compute_swagger_hash([]) == "no-servers"
+def test_lease_reuses_private_inode_and_releases_idempotently(tmp_path: Path) -> None:
+    """A second open cannot acquire until the first closes; never unlink locks."""
+    first = RecoveryLease(str(tmp_path / "runs.db"))
+    second = RecoveryLease(str(tmp_path / "runs.db"))
+    first.acquire()
+    first.acquire()
+    lock = tmp_path / "runs.db.lock"
+    inode = lock.stat().st_ino
+    assert lock.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(CacheError):
+        second.acquire()
+    first.close()
+    first.close()
+    second.acquire()
+    second.close()
+    assert lock.stat().st_ino == inode
