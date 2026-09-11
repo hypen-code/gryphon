@@ -18,20 +18,21 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - run: pip install -e ".[dev]"
+      - run: python -m pip install uv==0.12.9
+      - run: uv sync --frozen --extra dev
 
       - name: ruff check
         shell: bash
         run: |
           set -o pipefail
-          ruff check src/ tests/ 2>&1 | tee ruff-report.txt
+          uv run --frozen ruff check src/ tests/ 2>&1 | tee ruff-report.txt
 
       - name: ruff format
         if: always()
         shell: bash
         run: |
           set -o pipefail
-          { echo ""; echo "=== ruff format ==="; ruff format --check src/ tests/; } 2>&1 | tee -a ruff-report.txt
+          { echo ""; echo "=== ruff format ==="; uv run --frozen ruff format --check src/ tests/; } 2>&1 | tee -a ruff-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -50,13 +51,14 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - run: pip install -e ".[dev]"
+      - run: python -m pip install uv==0.12.9
+      - run: uv sync --frozen --extra dev
 
       - name: mypy
         shell: bash
         run: |
           set -o pipefail
-          mypy src/ 2>&1 | tee mypy-report.txt
+          uv run --frozen mypy src/ tests/ 2>&1 | tee mypy-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -75,13 +77,14 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - run: pip install -e ".[dev]"
+      - run: python -m pip install uv==0.12.9
+      - run: uv sync --frozen --extra dev
 
       - name: pytest
         shell: bash
         run: |
           set -o pipefail
-          pytest --tb=short -q --cov-report=xml 2>&1 | tee pytest-report.txt
+          uv run --frozen pytest --tb=short -q --cov-report=xml --cov-fail-under=90 2>&1 | tee pytest-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -226,11 +229,12 @@ jobs:
         with:
           python-version: "3.13"
 
-      - run: pip install -e .
+      - run: python -m pip install uv==0.12.9
+      - run: uv sync --frozen
 
       - name: Check version consistency
         run: |
-          VERSION=$(python -c "from mce import __version__; print(__version__)")
+          VERSION=$(uv run --frozen python -c "from gryphon import __version__; print(__version__)")
           echo "Version: $VERSION"
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
 

@@ -1,25 +1,20 @@
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
 
-# Install system dependencies for TA-Lib C library
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    wget \
-    && wget -q https://github.com/ta-lib/ta-lib/releases/download/v0.6.4/ta-lib_0.6.4_amd64.deb \
-    && dpkg -i ta-lib_0.6.4_amd64.deb \
-    && rm ta-lib_0.6.4_amd64.deb \
-    && apt-get purge -y --auto-remove wget \
-    && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for offline compute: no compilers or download tools.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    HOME=/tmp
 
-# Install all sandbox Python dependencies
+# Install all sandbox Python dependencies from pinned binary wheels only.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
-# Pre-install cmdstan for Prophet (downloads prebuilt Stan binaries ~100 MB)
-RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan()" \
-    && python -c "from prophet import Prophet"
-
+# Pre-installed offline numeric wheels replace runtime model/compiler downloads.
 # Create non-root user for security
-RUN useradd -r -u 1000 -s /bin/false executor
+RUN groupadd -g 1000 executor && useradd -r -u 1000 -g executor -s /bin/false executor
 
 # Set workspace
 WORKDIR /workspace
@@ -28,8 +23,8 @@ WORKDIR /workspace
 COPY entrypoint.py /workspace/entrypoint.py
 
 # Lock down permissions
-RUN chmod 444 /workspace/entrypoint.py
+RUN chmod 444 /workspace/entrypoint.py && chmod 555 /workspace
 
-USER executor
+USER 1000:1000
 
-ENTRYPOINT ["python", "-X", "jit", "/workspace/entrypoint.py"]
+ENTRYPOINT ["python", "-I", "-B", "/workspace/entrypoint.py"]

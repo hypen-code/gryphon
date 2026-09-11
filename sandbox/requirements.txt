@@ -1,30 +1,13 @@
-httpx==0.28.*
-pydantic==2.*
-orjson==3.*
-openpyxl==3.1.*
-pandas==2.3.*
-numpy==2.2.*
-scipy>=1.13.0
+numpy==2.2.6
+pandas==2.3.3
+python-dateutil==2.9.0.post0
+pytz==2025.2
+tzdata==2025.2
+six==1.17.0
 
-# Technical Analysis
-TA-Lib>=0.6.0
-pandas-ta>=0.3.14b0
-
-# Backtesting & Strategy
-backtrader>=1.9.78
-
-# Machine Learning & Forecasting
-scikit-learn>=1.5.0
-prophet>=1.1.6
-statsmodels>=0.14.0
-
-# Portfolio & Risk Analysis
-PyPortfolioOpt>=1.5.5
-cvxpy>=1.5.0
-
-# Sentiment Analysis
-vaderSentiment>=3.3.2
-
-# Prophet transitive dependencies (explicit to avoid version conflicts)
-cmdstanpy>=1.2.0
-holidays>=0.46
+# Technical Analysis: use explicitly selected offline numeric operations only.
+# Backtesting & Strategy: no broad, unpinned execution dependency stack.
+# Machine Learning & Forecasting: model downloads and compilers are not included.
+# Portfolio & Risk Analysis: the restricted VM remains the default profile.
+# Sentiment Analysis: install no network clients in the offline compute image.
+# Prophet transitive dependencies: removed in favor of a minimal pinned image.

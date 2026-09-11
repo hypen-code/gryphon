@@ -1,0 +1,55 @@
+openapi: 3.1.0
+info:
+  title: Open-Meteo current weather
+  version: 1.0.0
+  description: Public current weather data. No API credential is needed for this example.
+servers:
+  - url: https://api.open-meteo.com
+paths:
+  /v1/forecast:
+    get:
+      operationId: get_forecast
+      summary: Get current weather for geographic coordinates
+      parameters:
+        - name: latitude
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -90
+            maximum: 90
+        - name: longitude
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -180
+            maximum: 180
+        - name: current
+          in: query
+          required: false
+          description: Comma-separated current weather variables
+          schema:
+            type: string
+            default: temperature_2m
+      responses:
+        '200':
+          description: Current weather at the requested location
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  latitude:
+                    type: number
+                  longitude:
+                    type: number
+                  timezone:
+                    type: string
+                  current:
+                    type: object
+                    properties:
+                      time:
+                        type: string
+                      temperature_2m:
+                        type: number

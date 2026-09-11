@@ -1,36 +1,46 @@
-version: "3.9"
-
-networks:
-  mce_network:
-    driver: bridge
-
 services:
-  mce:
+  gryphon:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mce-server
+    image: gryphon:2.0.0
+    env_file:
+      - .env
     environment:
-      - MCE_LOG_LEVEL=INFO
-      - MCE_COMPILE_ON_STARTUP=true
-      - MCE_DOCKER_IMAGE=mce-sandbox:latest
-      - MCE_NETWORK_MODE=mce_network
-      - MCE_CACHE_ENABLED=true
-      # Override with real values via .env file:
-      # MCE_WEATHER_BASE_URL=https://api.weather.example.com/v1
-      # MCE_WEATHER_AUTH=Authorization: Bearer <token>
+      GRYPHON_HOST: 0.0.0.0
+      GRYPHON_HTTP_AUTH_TOKEN: ${GRYPHON_HTTP_AUTH_TOKEN:?Set a random token of at least 32 characters}
+      GRYPHON_SANDBOX_MODE: restricted
+      GRYPHON_NETWORK_MODE: none
+      GRYPHON_COMPILED_OUTPUT_DIR: /app/compiled
+      GRYPHON_CACHE_DB_PATH: /app/data/cache.db
+      GRYPHON_RUN_DB_PATH: /app/data/runs.db
+      GRYPHON_ARTIFACT_DIR: /app/data/artifacts
+      # Upstream credentials belong only to this trusted broker process.
+      # Configure environment references in config/swaggers.yaml.
+      # Neither generated programs nor Docker compute receive these credentials.
     volumes:
       - ./config:/app/config:ro
-      - ./compiled:/app/compiled
-      - ./data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock # Docker-in-Docker for sandbox
+      - gryphon_compiled:/app/compiled
+      - gryphon_data:/app/data
+    read_only: true # The default service does not mount the Docker socket.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
     ports:
-      - "8000:8000"
-    networks:
-      - mce_network
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()" ]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  gryphon_compiled:
+  gryphon_data:

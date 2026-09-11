@@ -1,176 +1,164 @@
-"""Sandbox entrypoint — executes Python code and prints a JSON result to stdout.
+"""Gryphon offline compute entrypoint, running only INSIDE a hardened container.
 
-This file runs INSIDE the Docker sandbox container.  It must remain minimal
-and dependency-free (stdlib only).
-
-Code delivery
--------------
-Two modes are supported, in priority order:
-
-1. **Environment variable** (warm + cold mode, preferred):
-   The executor sets ``MCE_EXEC_CODE`` to the base64-encoded Python source.
-   The entrypoint decodes it and never touches stdin.  This avoids the
-   complexities of interactive stdin over ``docker exec``.
-
-2. **Stdin** (legacy / direct invocation):
-   If ``MCE_EXEC_CODE`` is absent the entrypoint falls back to reading the
-   entire stdin stream.  This keeps the container usable when invoked
-   manually (e.g. ``echo 'result=1' | docker run -i mce-sandbox``).
-
-Execution contract
-------------------
-The submitted code must define either:
-  - A ``main()`` function that returns the result, **or**
-  - A ``result`` variable containing the output.
-
-``print()`` calls inside user code are captured and returned in the ``prints``
-field so they do not corrupt the single JSON result line written to stdout.
-
-Timeout
--------
-``MCE_EXEC_TIMEOUT`` (seconds, default 30) is enforced via ``signal.alarm``.
-When the alarm fires the process exits immediately — the warm container stays
-alive and the pool returns it cleanly.
+Read one bounded JSON request from stdin and emit one strict JSON envelope.
+The host prepares explicit final-expression/result/return semantics; main is
+never automatically called. No credentials or compiled host files are present.
+CPython builtin filtering is defence in depth, NOT a security boundary: the
+networkless container and explicitly configured runtime provide that boundary.
 """
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import builtins
 import io
 import json
+import math
 import os
 import signal
 import sys
-import traceback
+from contextlib import redirect_stderr, redirect_stdout
+from typing import Any
+
+_MAX_REQUEST_BYTES = 18 * 1024 * 1024
+_MAX_SOURCE_BYTES = 1024 * 1024
+_MAX_JSON_NODES = 100_000
+_MAX_JSON_DEPTH = 32
+
+
+class _OutputCounter(io.TextIOBase):
+    """Discard untrusted stdout/stderr while enforcing a shared producer budget."""
+
+    def __init__(self, limit: int) -> None:
+        """Initialize a bounded counter without allocating output buffers."""
+        self.limit = limit
+        self.count = 0
+        self.exceeded = False
+
+    def write(self, text: str) -> int:
+        """Count UTF-8 bytes and reject overflow even if user code catches it."""
+        self.count += len(text.encode("utf-8"))
+        if self.count > self.limit:
+            self.exceeded = True
+            raise BufferError("Output limit exceeded")
+        return len(text)
+
+    def flush(self) -> None:
+        """Implement the standard stream interface without retaining content."""
 
 
 def _install_timeout(seconds: int) -> None:
-    """Install a SIGALRM-based hard timeout.
+    """Install an uncatchable hard process timeout independent of user exceptions."""
 
-    On timeout the process prints a JSON error and exits with code 1.
-    Using ``sys.exit`` inside a signal handler is safe here because the
-    handler runs in the main thread and there is no cleanup needed.
+    def stop(signum: int, frame: object) -> None:
+        """Exit immediately; Docker host cleanup always removes this container."""
+        os._exit(124)
 
-    Args:
-        seconds: Maximum execution time before the process is killed.
-    """
-
-    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        sys.stdout = _real_stdout  # type: ignore[name-defined]  # restored inside handler
-        print(  # noqa: T201
-            json.dumps(
-                {
-                    "success": False,
-                    "error": f"Execution timed out after {seconds}s",
-                    "traceback": None,
-                }
-            )
-        )
-        sys.exit(1)
-
-    signal.signal(signal.SIGALRM, _handler)
+    signal.signal(signal.SIGALRM, stop)
     signal.alarm(seconds)
 
 
-def main() -> None:
-    """Read code, execute it inside a restricted namespace, and write JSON to stdout."""
-    global _real_stdout  # noqa: PLW0603  # used by timeout handler
+def _read_request() -> dict[str, Any]:
+    """Read a bounded line without legacy code-bearing environment variables."""
+    raw = sys.stdin.buffer.readline(_MAX_REQUEST_BYTES + 1)
+    if len(raw) > _MAX_REQUEST_BYTES or not raw.endswith(b"\n"):
+        raise ValueError("Invalid request frame")
+    request = json.loads(raw)
+    if not isinstance(request, dict) or not isinstance(request.get("code"), str):
+        raise ValueError("Invalid request")
+    if len(request["code"].encode()) > _MAX_SOURCE_BYTES or not isinstance(request.get("inputs"), dict):
+        raise ValueError("Invalid code or inputs")
+    for name, maximum in (("timeout", 300), ("max_output", 1048576), ("max_response", 16777216)):
+        if type(request.get(name)) is not int or not 1 <= request[name] <= maximum:
+            raise ValueError("Invalid execution limit")
+    return request
 
-    # ------------------------------------------------------------------
-    # 1. Read code
-    # ------------------------------------------------------------------
-    encoded = os.environ.get("MCE_EXEC_CODE")
-    if encoded:
-        import base64  # noqa: PLC0415
 
-        code = base64.b64decode(encoded).decode("utf-8")
-    else:
-        code = sys.stdin.read()
-
-    if not code.strip():
-        print(json.dumps({"success": False, "error": "No code provided"}))  # noqa: T201
-        return
-
-    # ------------------------------------------------------------------
-    # 2. Install hard timeout (SIGALRM — Linux only, not available on Windows)
-    # ------------------------------------------------------------------
-    timeout_seconds = int(os.environ.get("MCE_EXEC_TIMEOUT", "30"))
-    if hasattr(signal, "SIGALRM"):
-        _install_timeout(timeout_seconds)
-
-    # ------------------------------------------------------------------
+async def _execute(code: str, inputs: dict[str, Any]) -> Any:
+    """Evaluate prepared Python exactly once, including top-level await."""
     # 3. Block dangerous builtins
     # Security is defence-in-depth alongside the AST guard and Docker limits.
-    # __import__ is kept so ``import`` statements work normally.
-    # ------------------------------------------------------------------
-    _blocked = {"open", "exec", "eval", "compile", "input", "breakpoint"}
-    safe_builtins = {k: v for k, v in vars(builtins).items() if k not in _blocked}
-
+    # __import__ is kept so offline compute imports work normally.
+    blocked = {"open", "exec", "eval", "compile", "input", "breakpoint"}
+    safe_builtins = {key: value for key, value in vars(builtins).items() if key not in blocked}
     # Single namespace for globals and locals so top-level imports are visible
     # inside functions defined in the same code block.
-    namespace: dict[str, object] = {"__builtins__": safe_builtins}
+    namespace: dict[str, Any] = {"__builtins__": safe_builtins, "inputs": inputs}
+    tree = ast.parse(code, filename="<gryphon>")
+    if not tree.body or not isinstance(tree.body[-1], ast.Expr):
+        raise ValueError("Expected a prepared final result expression")
+    final = tree.body[-1]
+    tree.body[-1] = ast.Assign(targets=[ast.Name(id="_gryphon_output", ctx=ast.Store())], value=final.value)
+    ast.fix_missing_locations(tree)
+    compiled = compile(tree, "<gryphon>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    coroutine = eval(compiled, namespace)  # noqa: S307
+    if coroutine is not None:
+        await coroutine
+    return namespace["_gryphon_output"]
 
-    # ------------------------------------------------------------------
-    # 4. Redirect stdout so user print() calls don't corrupt the JSON line
-    # ------------------------------------------------------------------
-    _captured = io.StringIO()
-    _real_stdout = sys.stdout
-    sys.stdout = _captured
 
+def _encode_result(data: Any, limit: int) -> str:
+    """Reject non-JSON output instead of silently coercing objects to strings."""
+    pending = [(data, 0)]
+    nodes = 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        kind = type(value)
+        if nodes > _MAX_JSON_NODES or depth > _MAX_JSON_DEPTH:
+            raise BufferError("JSON structure exceeds limit")
+        if kind is dict:
+            if any(type(key) is not str for key in value):
+                raise ValueError("JSON keys must be strings")
+            pending.extend((child, depth + 1) for child in value.values())
+        elif kind is list:
+            pending.extend((child, depth + 1) for child in value)
+        elif kind is str:
+            if len(value.encode()) > limit:
+                raise BufferError("JSON value exceeds limit")
+        elif kind not in (int, float, bool, type(None)):
+            raise ValueError("Result is not JSON-native")
+        elif kind is float and not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        if len(pending) > _MAX_JSON_NODES:
+            raise BufferError("JSON structure exceeds limit")
+    chunks: list[str] = []
+    size = 0
+    for chunk in json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":")).iterencode(data):
+        size += len(chunk.encode())
+        if size > limit:
+            raise BufferError("JSON output exceeds limit")
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def main() -> None:
+    """Receive, execute once, and emit bounded JSON without raw errors or traces."""
+    real_stdout = sys.stdout
     try:
-        compiled_code = compile(code, "<mce>", "exec")
-        exec(compiled_code, namespace)  # noqa: S102
-
-        if "main" in namespace and callable(namespace["main"]):
-            output = namespace["main"]()
-        elif "result" in namespace:
-            output = namespace["result"]
-        else:
-            sys.stdout = _real_stdout
-            print(  # noqa: T201
-                json.dumps(
-                    {
-                        "success": False,
-                        "error": "Code must define a 'result' variable or a 'main()' function",
-                    }
-                )
+        # 1. Read code
+        request = _read_request()
+        # 2. Install hard timeout (SIGALRM — Linux only, not available on Windows)
+        _install_timeout(request["timeout"])
+        # 4. Redirect stdout so user print() calls don't corrupt the JSON line
+        captured = _OutputCounter(request["max_output"])
+        with redirect_stdout(captured), redirect_stderr(captured):
+            result = asyncio.run(_execute(request["code"], request["inputs"]))
+            if captured.exceeded:
+                raise BufferError("Output limit exceeded")
+            output = _encode_result(
+                {"success": True, "data": result, "printed_bytes": captured.count}, request["max_response"]
             )
-            return
-
-        sys.stdout = _real_stdout
+    except (MemoryError, RecursionError, BufferError):
+        output = '{"success":false,"error_type":"capacity"}'
+    except BaseException:
+        output = '{"success":false,"error_type":"execution"}'
+    finally:
         # Cancel the alarm — execution completed in time
-        if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)
-
-        prints = _captured.getvalue() or None
-        print(json.dumps({"success": True, "data": output, "prints": prints}, default=str))  # noqa: T201
-
-    except SyntaxError as exc:
-        sys.stdout = _real_stdout
-        if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)
-        print(  # noqa: T201
-            json.dumps(
-                {
-                    "success": False,
-                    "error": f"Syntax error: {exc}",
-                    "traceback": traceback.format_exc(),
-                }
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        sys.stdout = _real_stdout
-        if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)
-        print(  # noqa: T201
-            json.dumps(
-                {
-                    "success": False,
-                    "error": str(exc),
-                    "traceback": traceback.format_exc(),
-                }
-            )
-        )
+        signal.alarm(0)
+    real_stdout.write(output + "\n")
+    real_stdout.flush()
 
 
 if __name__ == "__main__":
