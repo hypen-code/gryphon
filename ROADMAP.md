@@ -59,7 +59,7 @@ rename of the existing `submit_code`/`get_run`/`cancel_run` application handles.
 
 ## Proposing work
 
-Open a [proposal](https://github.com/hypen-code/mcp-code-execution/issues) with the
+Open a [proposal](https://github.com/hypen-code/gryphon/issues) with the
 user problem, intended contract, security implications, alternatives, and a
 verifiable acceptance plan. New work must retain the mandatory **90% coverage
 floor**, target **100%**, and document limitations rather than weaken controls.

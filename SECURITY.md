@@ -7,7 +7,7 @@ receive backports. Version 2.0.0 is installed from the repository checkout; this
 policy does not imply a published PyPI distribution or an external security audit.
 
 **Do not disclose vulnerabilities in public GitHub issues.** Submit a private
-[security advisory](https://github.com/hypen-code/mcp-code-execution/security/advisories/new).
+[security advisory](https://github.com/hypen-code/gryphon/security/advisories/new).
 Include the affected commit/version, execution profile, transport, minimal
 reproduction with synthetic data, impact, and any mitigation. Do not include
 real tokens, private API responses, or another user's data. Coordinate disclosure

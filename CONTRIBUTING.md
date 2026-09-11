@@ -16,8 +16,8 @@ Windows users can run the container deployment. Docker is optional for the
 normal test suite and default restricted execution profile.
 
 ```bash
-git clone https://github.com/hypen-code/mcp-code-execution.git
-cd mcp-code-execution
+git clone https://github.com/hypen-code/gryphon.git
+cd gryphon
 uv sync --frozen --extra dev
 uv run --frozen pre-commit install
 ```
@@ -176,7 +176,7 @@ Before requesting review:
 ## Bugs, features, and security reports
 
 For ordinary bugs, open an
-[issue](https://github.com/hypen-code/mcp-code-execution/issues) with:
+[issue](https://github.com/hypen-code/gryphon/issues) with:
 
 - `uv run --frozen gryphon --version`, Python/OS, and relevant installed versions;
 - execution profile, transport, and Docker/runtime details if applicable;

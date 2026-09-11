@@ -2,7 +2,7 @@
 
 > **APIs were designed for developers. Gryphon makes them usable by AI agents.**
 
-[![CI](https://github.com/hypen-code/mcp-code-execution/actions/workflows/ci.yml/badge.svg)](https://github.com/hypen-code/mcp-code-execution/actions)
+[![CI](https://github.com/hypen-code/gryphon/actions/workflows/ci.yml/badge.svg)](https://github.com/hypen-code/gryphon/actions)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -34,8 +34,8 @@ model API key, or upstream credentials** for the included offline demo.
 Run these commands from the repository root:
 
 ```bash
-git clone https://github.com/hypen-code/mcp-code-execution.git
-cd mcp-code-execution
+git clone https://github.com/hypen-code/gryphon.git
+cd gryphon
 uv sync --frozen --extra dev
 cp .env.example .env
 cp config/swaggers.yaml.example config/swaggers.yaml
@@ -60,22 +60,22 @@ inside `serve`/`run` do not print client JSON.
 The generated entry uses absolute storage paths, disables startup recompilation,
 and references the selected env-file path without copying its credentials.
 Keep operator settings/credentials in that private file or the launch environment.
-For this manual equivalent, replace `/absolute/path/to/mcp-code-execution` with
+For this manual equivalent, replace `/absolute/path/to/gryphon` with
 your actual checkout path; clients may not expand `~`.
 
 ```json
 {
   "mcpServers": {
     "gryphon": {
-      "command": "/absolute/path/to/mcp-code-execution/.venv/bin/gryphon",
-      "args": ["serve", "--env-file", "/absolute/path/to/mcp-code-execution/.env"],
+      "command": "/absolute/path/to/gryphon/.venv/bin/gryphon",
+      "args": ["serve", "--env-file", "/absolute/path/to/gryphon/.env"],
       "env": {
         "GRYPHON_COMPILE_ON_STARTUP": "false",
-        "GRYPHON_COMPILED_OUTPUT_DIR": "/absolute/path/to/mcp-code-execution/compiled",
-        "GRYPHON_SWAGGER_CONFIG_FILE": "/absolute/path/to/mcp-code-execution/config/swaggers.yaml",
-        "GRYPHON_CACHE_DB_PATH": "/absolute/path/to/mcp-code-execution/data/cache.db",
-        "GRYPHON_RUN_DB_PATH": "/absolute/path/to/mcp-code-execution/data/runs.db",
-        "GRYPHON_ARTIFACT_DIR": "/absolute/path/to/mcp-code-execution/data/artifacts"
+        "GRYPHON_COMPILED_OUTPUT_DIR": "/absolute/path/to/gryphon/compiled",
+        "GRYPHON_SWAGGER_CONFIG_FILE": "/absolute/path/to/gryphon/config/swaggers.yaml",
+        "GRYPHON_CACHE_DB_PATH": "/absolute/path/to/gryphon/data/cache.db",
+        "GRYPHON_RUN_DB_PATH": "/absolute/path/to/gryphon/data/runs.db",
+        "GRYPHON_ARTIFACT_DIR": "/absolute/path/to/gryphon/data/artifacts"
       }
     }
   }
@@ -387,7 +387,7 @@ rules are in [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for v2 changes and [ROADMAP.md](ROADMAP.md) for
 work that is not implemented. Report bugs through the
-[issue tracker](https://github.com/hypen-code/mcp-code-execution/issues);
+[issue tracker](https://github.com/hypen-code/gryphon/issues);
 report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 MIT licensed; see [LICENSE](LICENSE).

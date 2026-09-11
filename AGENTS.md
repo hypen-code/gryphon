@@ -15,7 +15,7 @@ per endpoint.
 The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings
 use `GRYPHON_`. Installation is from the checkout, not a claimed PyPI release.
 Keep the actual repository URL:
-`https://github.com/hypen-code/mcp-code-execution`.
+`https://github.com/hypen-code/gryphon`.
 
 The implemented deployment is **single-process, local/operator managed**.
 Owner-scoped storage is not a completed multi-tenant SaaS. Persistent receipts
