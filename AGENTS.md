@@ -13,9 +13,15 @@ code, and reuse recipes. Do not replace the meta-tool interface with one tool
 per endpoint.
 
 The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings
-use `GRYPHON_`. Installation is from the checkout, not a claimed PyPI release.
-Keep the actual repository URL:
-`https://github.com/hypen-code/gryphon`.
+use `GRYPHON_`. Checkout/local-wheel installation works without a claimed PyPI
+release. Only after verified publication document public-index installation as
+available. Keep `https://github.com/hypen-code/gryphon`. Release workflow
+`.github/workflows/publish.yml` accepts published releases or explicit version-tag
+dispatch, never branch pushes; tag `vX.Y.Z` must match both package versions.
+Keep full quality gates and wheel smoke checks before the separate OIDC publish
+job. PyPI publisher identity is `hypen-code` / `gryphon` / `publish.yml` / `pypi`,
+project `gryphon-runtime`; maintainers configure protected-environment reviewers.
+Never commit publishing tokens or automatically commit/tag/push/publish.
 
 Deployments include **local stdio, operator-token HTTP, and admin-managed hosted
 tenants/channels**. Hosted mode has exactly one active worker per control database,
@@ -54,13 +60,14 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/__main__.py` | CLI parsing, env selection, transport preflight, lifecycle |
 | `src/gryphon/cli_setup.py` | Environment-only stdio, private source-scoped user state |
 | `src/gryphon/saas.py`, `saas_config.py` | Single-worker hosted lifecycle and explicit operator settings |
-| `src/gryphon/saas_api.py`, `saas_auth.py`, `saas_http.py` | Admin sessions, CSRF, bounded HTTP and UI API |
+| `src/gryphon/saas_api.py`, `saas_auth.py`, `saas_http.py` | Browser sessions, CSRF, bounded HTTP and UI API |
+| `src/gryphon/saas_user_api.py`, `saas_access.py`, `saas_users.py`, `saas_passwords.py` | Platform/user authorization, revisioned accounts, bounded salted password hashing |
 | `src/gryphon/saas_store.py`, `saas_database.py` | Tenant control metadata, hashed keys, quotas and worker lease |
 | `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated runtimes, read-only uploaded catalogs |
 | `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
 | `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
 | `src/gryphon/config.py` | Validated operator settings |
-| `src/gryphon/models/__init__.py` | Shared Pydantic domain models |
+| `src/gryphon/models/` | Shared Pydantic models; account models in `users.py`, public exports in `__init__.py` |
 | `src/gryphon/errors.py` | Domain exception hierarchy |
 | `src/gryphon/server.py` | Thin MCP adapters, tool schemas, one reusable-code prompt |
 | `src/gryphon/runtime/context.py` | Ownership, bounded responses, dependency lifespan |
@@ -85,8 +92,8 @@ must fail explicitly, not call a provider or silently change compilation.
 | `sandbox/` | Optional offline compute image and entrypoint |
 | `tests/unit/`, `tests/integration/` | Isolated unit, protocol, compiler, runtime, opt-in Docker tests |
 
-Keep shared domain models in `models/__init__.py` and custom exceptions in
-`errors.py`; do not duplicate them. Prefer existing modules. Do not add files,
+Keep shared domain models in `models/`, exported from `models/__init__.py`, and
+custom exceptions in `errors.py`; do not duplicate them. Prefer existing modules. Do not add files,
 docs, or top-level directories without explicit task requirements. Existing
 README, AGENTS, CONTRIBUTING, SECURITY, ROADMAP, and CHANGELOG cover the public
 and development documentation needs.
@@ -129,10 +136,26 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 - `stdio` consumes JSON `GRYPHON_SWAGGERS`, permits empty-catalog compute, and
   derives private source-scoped user state under optional absolute `GRYPHON_STATE_DIR`.
   `stdio` and `saas` must not discover ambient dotenv; only explicit `--env-file`.
+  README must lead with least-setup stdio and SQLite SaaS commands; development
+  extras and standalone compile/config copies are not prerequisites for stdio.
+  SaaS uploads compile through the UI; legacy `serve --transport http` has no UI.
+  Copyable exports need separate lines; create the private SQLite parent first.
+  Generate a bootstrap token only if absent, retain it across restarts, and never
+  request its value in chat. Show it only in the user's private local terminal.
 - Hosted UI `/`, admin `/api`, DB-readiness `/health`, and per-channel
   `/mcp/{channelUUID}` are distinct surfaces. Channel bearer keys cannot administer
   tenants; administrator sessions require HttpOnly/SameSite=Strict cookies and CSRF.
   Secure cookies/HTTPS are mandatory except explicitly selected loopback development.
+- Named `platform_admin` accounts administer all tenants/users; `tenant_user`
+  accounts have immutable membership in exactly one enabled tenant. Enforce scope
+  server-side for every spec/channel/key/usage/analytics/audit route, never only in the UI.
+  Tenant users cannot list/manage users, create tenants or elevate/change roles.
+  Keep bootstrap-token recovery. Passwords use salted PBKDF2-HMAC-SHA256 with
+  600,000 iterations and bounded off-loop hashing; never expose passwords/hashes.
+  Self-service changes require current credentials. Profile/status/reset/change
+  and tenant status revisions invalidate cookies, including after re-enable.
+  Separately issued channel keys remain independent: document offboarding key
+  rotation. Platform/API authentication never substitutes for MCP channel keys.
 - Successful standalone `compile` (including unchanged catalogs) prints non-secret
   MCP client JSON to stdout; logs stay on stderr. Dry runs, failures, and startup
   compilation inside `serve`/`run` must not emit client JSON on MCP stdout.
@@ -207,9 +230,59 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 6. Close all partially initialized dependencies. Do not use process-global
    mutable state for credentials or execution authority.
 7. Hold the hosted control-database lease for the entire single-worker lifespan.
-   PostgreSQL control metadata does not replace per-channel local run-ledger locks
-   or store execution data. Operators must stop the worker and coordinate backups
-   of PostgreSQL and private local state; no automatic HA/backup guarantee exists.
+   Leases are automatic; never remove `.lock` files to free live workers/jobs.
+   PostgreSQL session advisory locks require direct/session-pooled connections,
+   not transaction pooling. PostgreSQL does not replace local run-ledger locks
+   or store execution data. Stop the worker for coordinated database/local-state
+   backups; no automatic HA/backup guarantee exists. Verify additive schema
+   upgrades only against disposable databases, never the operator's real store.
+
+### Analytics measurement contract
+
+- Keep `models/analytics.py`, `models/traffic.py`, runtime `execution_metrics.py`,
+  `saas_traffic.py` and `saas_analytics*.py` content-free and optional to execution.
+  Persist scalar counts/timing/static dimensions and hashed event IDs, not code,
+  inputs, results or credentials; log static failure categories only.
+- API reports require existing tenant authorization and exact channel scope.
+  Keep 1–90 UTC days, bounded aggregate JSON, first `recording_since`, no lifetime
+  backfill and the 100,000-**per-tenant** receipt cap. Other tenants must not evict
+  in-retention receipts; total storage is bounded by the hosted tenant quota (100).
+  Best-effort terminal observers cover background completion, but failures can miss records;
+  never claim complete billing auditing or exactly-once telemetry/effects.
+- Compare only paired successful eligible API-backed runs: accepted validated
+  decoded canonical API JSON before user reduction versus **full final JSON**,
+  including artifact content. “Original” is not raw HTTP or a no-framework LLM
+  counterfactual. Signed weighted reduction permits expansion; no baseline is N/A.
+- Count fixed allowlisted `tools/call` names (ten core/two optional), including
+  SDK-rejected known names, discovery, polls and artifact reads, separately from runs.
+  Exclude initialization, `tools/list`/SDK negotiation, HTTP headers and agent
+  context. Wire bytes retain duplicate text/structured representations; only
+  `structured_payload_bytes` counts the canonical structured payload once.
+  Response bytes are SDK-produced, not proven client reception/model consumption.
+  Attempt legacy usage/request-metric persistence once before final ASGI body
+  handoff, with incomplete fallback if the SDK stops early. Each writer has a
+  two-second timeout and static nonfatal failures. Request durations measure
+  response production excluding their own persistence, not client end-to-end latency.
+- `api_calls` is broker attempts, not HTTP dispatches: some fail before the wire.
+  Accepted validated responses are separate. Pure compute requires a backend
+  start and **zero broker attempts**, not merely zero accepted API responses.
+  Replay reuse is replay backend starts / all backend starts, not request counts;
+  retained idempotent duplicates do not start extra runs. Reused source executes
+  again and does not prove LLM generation avoided; source lines are static lines.
+- Backend wall time includes awaited network work. Broker timing wraps `_send`:
+  credential resolution/origin checks, network wait and response decoding/validation,
+  excluding earlier lookup/authorization/argument encoding/domain guards. Queue
+  time includes admission-to-backend preparation, not only semaphore wait.
+  Concurrent wall times overlap; fixed-bin p50/p95 are upper bounds, not exact.
+- Label `ceil(UTF-8 bytes / 4)` as heuristic token equivalents, never actual model
+  context/generation/reasoning/billing. Keep unobservable values null/N/A; do not
+  claim tool definitions/all client context counted by response budgets, or dollar,
+  CPU, time or round-trip savings. Downloads retain methodology and explicit
+  window tenant/channel IDs (null channel means all). Operational run success and
+  payload reduction do not measure answer correctness or equivalent task quality.
+- UI item totals count top-level JSON arrays, not semantic records. Cache errors
+  span all requests, not exact misses versus storage failures; failed replay
+  requests and request/run error categories remain separate from backend reuse.
 
 ## 6. Code quality
 

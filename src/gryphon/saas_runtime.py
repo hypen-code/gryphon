@@ -31,7 +31,8 @@ if TYPE_CHECKING:
     from fastmcp.server.http import StarletteWithLifespan
 
     from gryphon.config import GryphonConfig
-    from gryphon.models import Channel, SaaSSpec
+    from gryphon.models import Channel, RunMetrics, SaaSSpec
+    from gryphon.saas_analytics import AnalyticsStore
 
 verified_channel: ContextVar[str | None] = ContextVar("gryphon_verified_channel", default=None)
 logger = get_logger(__name__)
@@ -56,9 +57,10 @@ class ChannelTokenVerifier(TokenVerifier):
 class _Runtime:
     """Own a single revision's dependencies and drain request references before closure."""
 
-    def __init__(self, channel: Channel) -> None:
+    def __init__(self, channel: Channel, analytics: AnalyticsStore | None = None) -> None:
         """Track immutable configuration and initially idle, uninitialized resources."""
         self.channel = channel.model_copy(deep=True)
+        self.analytics = analytics
         self.verifier = ChannelTokenVerifier(channel.id)
         self.stack = AsyncExitStack()
         self.references = 0
@@ -81,7 +83,14 @@ class _Runtime:
             await cache.initialize()
             self.broker = ToolBroker(config, registry, allow_environment=False)
             self.stack.push_async_callback(self.broker.close)
-            executor = CodeExecutor(config, cache, registry, broker=self.broker, execution_slots=execution_slots)
+            executor = CodeExecutor(
+                config,
+                cache,
+                registry,
+                broker=self.broker,
+                execution_slots=execution_slots,
+                analytics=self._record_run if self.analytics is not None else None,
+            )
             self.stack.push_async_callback(executor.shutdown)
             await executor.startup()
             mcp = create_server(config, registry, cache, executor, auth=self.verifier)
@@ -94,6 +103,11 @@ class _Runtime:
             await finish_cleanup(self.stack.aclose())
             raise
         logger.info("channel_runtime_started", channel_id=self.channel.id, revision=self.channel.revision)
+
+    async def _record_run(self, metrics: RunMetrics) -> None:
+        """Bind execution observations to the runtime's immutable tenant/channel identity."""
+        if self.analytics is not None:
+            await self.analytics.record_run(self.channel.tenant_id, self.channel.id, metrics)
 
     async def _serve_app(self) -> None:
         """Enter and exit SDK task groups in the same dedicated lifecycle task."""
@@ -142,13 +156,16 @@ class ChannelRuntimeManager:
     hold their ordinary exclusive per-channel run-ledger leases.
     """
 
-    def __init__(self, base: GryphonConfig, state_dir: Path, max_runtimes: int) -> None:
+    def __init__(
+        self, base: GryphonConfig, state_dir: Path, max_runtimes: int, *, analytics: AnalyticsStore | None = None
+    ) -> None:
         """Copy operator policy without reading environment or performing filesystem I/O."""
         if max_runtimes < 1:
             raise ValueError("Hosted runtime capacity must be positive")
         self._base = base.model_copy(deep=True)
         self._state_dir = state_dir
         self._maximum = max_runtimes
+        self._analytics = analytics
         self._execution_slots = asyncio.Semaphore(base.max_concurrent_executions)
         self._runtimes: dict[str, _Runtime] = {}
         self._revoked: dict[str, int] = {}
@@ -190,7 +207,7 @@ class ChannelRuntimeManager:
         if len(self._runtimes) >= self._maximum:
             raise CapacityError("Hosted runtime capacity exhausted")
         config = channel_config(self._base, channel, self._state_dir)
-        runtime = _Runtime(channel)
+        runtime = _Runtime(channel, self._analytics)
         self._runtimes[channel.id] = runtime
         try:
             await runtime.start(config, specs, self._execution_slots)

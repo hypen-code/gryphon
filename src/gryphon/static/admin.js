@@ -1,9 +1,11 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { csrf: "", tenant: "", tenants: [], specs: [], channels: [], settings: null, editing: null, source: null, confirm: null, epoch: 0, busy: false };
-const pages = { overview: ["Overview", "A clear view of your channels, capabilities, and activity."], channels: ["Channels", "Give each connection exactly the capabilities it needs."], specs: ["API specifications", "Versioned API catalogs, ready to bind to your channels."], audit: ["Audit trail", "A transparent record of administrative changes across tenants."] };
+const state = { csrf: "", tenant: "", tenants: [], specs: [], channels: [], settings: null, editing: null, source: null, confirm: null, me: null, users: [], userOffset: 0, userNext: null, editingUser: null, passwordUser: null, epoch: 0, busy: false };
+const pages = { analytics: ["Analytics", "Measured execution activity, honest estimates, and transparent methodology."], overview: ["Overview", "A clear view of your channels, capabilities, and activity."], channels: ["Channels", "Give each connection exactly the capabilities it needs."], specs: ["API specifications", "Versioned API catalogs, ready to bind to your channels."], audit: ["Audit trail", "A transparent record of administrative changes in your scope."], users: ["Users", "Manage named accounts and their access to the control plane."] };
 const errors = {
   invalid_token: "The administrator token was not accepted.",
+  invalid_credentials: "The username or password was not accepted.",
+  invalid_password: "The password was not accepted. Check the current password and use 12–128 characters for a new password.",
   csrf: "Your security session is out of date. Refresh the page and sign in again.",
   invalid_csrf: "Your security session is out of date. Refresh the page and sign in again.",
   validation: "Check the document format, unique API binding names, and sandbox/library policy. The submitted configuration was not accepted.",
@@ -35,25 +37,38 @@ function showDialog(id) {
   dialog.showModal();
 }
 function clearKey() { $("channel-token").value = ""; $("channel-token").type = "password"; $("reveal-key").textContent = "Reveal key"; $("reveal-key").setAttribute("aria-pressed", "false"); }
+const isAdmin = () => state.me?.role === "platform_admin";
+function clearPasswords(root = document) { root.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; }); }
+function clearDialog(dialog) { clearPasswords(dialog); if (dialog.id === "key-dialog") clearKey(); }
 function signedOut() {
+  analytics.reset();
   state.epoch += 1; state.csrf = ""; state.tenant = ""; state.tenants = []; state.channels = []; state.specs = []; state.settings = null; state.source = null; state.confirm = null;
-  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); clearKey();
-  $("login-token").value = ""; $("source-content").textContent = ""; $("app").hidden = true; $("login").hidden = false; $("login-token").focus();
+  state.me = null; state.users = []; state.userOffset = 0; state.userNext = null; state.editing = null; state.editingUser = null; state.passwordUser = null;
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); clearKey(); clearPasswords();
+  document.querySelectorAll("form").forEach((form) => form.reset()); $("source-content").textContent = ""; $("client-config").textContent = ""; $("endpoint").value = "";
+  renderIdentity(); renderTenants(); renderSpecs(); renderChannels(); renderUsage([]); renderAudit([]); renderUsers(); notify("");
+  $("app").hidden = true; $("login").hidden = false; $("login-username").focus();
 }
-async function api(path, method = "GET", body) {
+function validationMessage(path) {
+  if (path === "/api/password" || (path.startsWith("/api/users/") && path.endsWith("/password"))) return errors.invalid_password;
+  if (path === "/api/users" || path.startsWith("/api/users/")) return "Check the username format, display name, 12–128 character password, and enabled assigned tenant.";
+  return errors.validation;
+}
+async function api(path, method = "GET", body, signal) {
   const epoch = state.epoch;
   const headers = { Accept: "application/json" };
   if (method !== "GET") { headers["Content-Type"] = "application/json"; if (state.csrf) headers["X-CSRF-Token"] = state.csrf; }
   let response;
-  try { response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30000), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+  try { response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
   catch { throw new Error("The server could not be reached. Check your connection, then refresh before retrying a change."); }
-  if (epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
+  if (signal?.aborted || epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
   const result = await response.json().catch(() => ({}));
-  if (epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
-  if (response.status === 401) { if (path !== "/api/login") signedOut(); throw new Error(path === "/api/login" ? "The administrator token was not accepted." : "Sign in to continue. Your session may have expired."); }
+  if (signal?.aborted || epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
+  if (response.status === 401) { if (path !== "/api/login") signedOut(); throw new Error(path === "/api/login" ? "The sign-in credentials were not accepted." : "Sign in to continue. Your session may have expired."); }
   if (!response.ok) {
+    if (response.status === 403) { clearPasswords(); state.users = []; state.userNext = null; renderUsers(); document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); if (location.hash === "#users") location.hash = "#overview"; }
     const fallback = { 400: "Check your input and try again.", 403: "This action was denied. Refresh your session or check operator policy.", 404: "Resource not found. Refresh the workspace.", 409: "A conflicting change was detected. Refresh and try again.", 413: "This specification exceeds the upload size limit.", 422: "The submitted configuration is not valid.", 429: "Too many requests. Wait a moment and try again.", 503: "The service is temporarily unavailable. Try again shortly." };
-    const category = Object.hasOwn(errors, result.error) ? errors[result.error] : "";
+    const category = result.error === "validation" ? validationMessage(path) : (Object.hasOwn(errors, result.error) ? errors[result.error] : "");
     throw new Error(`${category || fallback[response.status] || "The request failed. Refresh and try again."} (HTTP ${response.status})`);
   }
   return result;
@@ -62,23 +77,25 @@ async function run(work, trigger) {
   if (state.busy) return;
   state.busy = true; if (trigger) trigger.disabled = true; $("tenant-select").disabled = true;
   try { await work(); } catch (error) { notify(error.message || "Unable to complete this action.", true); }
-  finally { state.busy = false; if (trigger) trigger.disabled = false; $("tenant-select").disabled = !state.tenants.length; }
+  finally { state.busy = false; if (trigger) trigger.disabled = false; $("tenant-select").disabled = !isAdmin() || !state.tenants.length; renderUsers(); }
 }
 function bind(id, work, event = "click") {
   $(id).addEventListener(event, (e) => { e.preventDefault(); run(() => work(e), event === "submit" ? e.submitter : e.currentTarget); });
 }
 function page() {
-  const key = Object.hasOwn(pages, location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+  let key = Object.hasOwn(pages, location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+  if (key === "users" && !isAdmin()) { key = "overview"; if (state.me) { location.hash = "#overview"; notify("Only platform administrators can manage users.", true); } }
   Object.keys(pages).forEach((name) => { $(`page-${name}`).hidden = name !== key; document.querySelector(`[data-page="${name}"]`).toggleAttribute("aria-current", name === key); });
   document.querySelector(`[data-page="${key}"]`).setAttribute("aria-current", "page");
   $("page-title").textContent = pages[key][0]; $("page-description").textContent = pages[key][1];
-  $("tenant-empty").hidden = !!state.tenant || key === "audit"; $("tenant-content").hidden = !state.tenant;
+  $("tenant-empty").hidden = !!state.tenant || !isAdmin() || ["audit", "users"].includes(key); $("tenant-content").hidden = !state.tenant;
 }
 function renderTenants() {
   const select = $("tenant-select"); select.replaceChildren();
   if (!state.tenants.length) select.append(new Option("No tenants yet", ""));
   state.tenants.forEach((tenant) => select.append(new Option(`${tenant.name}${tenant.enabled ? "" : " · disabled"}`, tenant.id)));
-  select.value = state.tenant;
+  select.value = state.tenant; select.disabled = state.busy || !isAdmin() || !state.tenants.length;
+  $("assigned-tenant").textContent = state.tenants.find((item) => item.id === state.tenant)?.name || "Assigned tenant unavailable";
   const tenant = state.tenants.find((item) => item.id === state.tenant);
   $("tenant-heading").textContent = tenant?.name || "No tenant selected";
   $("tenant-status").textContent = tenant ? (tenant.enabled ? "Tenant enabled" : "Tenant disabled") : "No tenant selected";
@@ -87,31 +104,34 @@ function renderTenants() {
   $("toggle-tenant").disabled = !tenant; $("toggle-tenant").textContent = tenant?.enabled ? "Disable tenant" : "Enable tenant"; page();
 }
 async function refresh() {
+  analytics.clear("Refreshing analytics…");
   $("loading").hidden = false; $("main").setAttribute("aria-busy", "true");
   try {
+    state.me = (await api("/api/me")).user; renderIdentity();
     const [settings, tenants, audit] = await Promise.all([api("/api/settings"), api("/api/tenants"), api("/api/audit")]);
-    state.settings = settings; state.tenants = tenants.items;
+    state.settings = settings; state.tenants = isAdmin() ? tenants.items : tenants.items.filter((tenant) => tenant.id === state.me.tenant_id);
     if (!state.tenants.some((tenant) => tenant.id === state.tenant)) state.tenant = state.tenants[0]?.id || "";
-    renderTenants(); renderAudit(audit.items); await loadTenant(); notify("Workspace is up to date.");
-  } catch (error) { emptyRow("audit-rows", 4, "Audit data may be unavailable. Use Refresh data to retry."); throw error; }
+    renderTenants(); renderAudit(audit.items); await loadTenant(); if (isAdmin()) await loadUsers(); notify("Workspace is up to date.");
+  } catch (error) { analytics.clear(); emptyRow("audit-rows", 4, "Audit data may be unavailable. Use Refresh data to retry."); throw error; }
   finally { $("loading").hidden = true; $("main").removeAttribute("aria-busy"); }
 }
 async function loadTenant() {
+  analytics.selectTenant(state.tenant);
   state.specs = []; state.channels = []; renderSpecs(); renderChannels(); renderUsage([]);
   if (!state.tenant) return;
   $("loading").hidden = false;
   try {
     const [specs, channels, usage] = await Promise.all([api(tenantPath("/specs")), api(tenantPath("/channels")), api(tenantPath("/usage"))]);
-    state.specs = specs.items; state.channels = channels.items; renderSpecs(); renderChannels(); renderUsage(usage.items);
+    state.specs = specs.items; state.channels = channels.items; renderSpecs(); renderChannels(); renderUsage(usage.items); analytics.channels(state.channels); await analytics.load();
   } catch (error) {
-    emptyRow("spec-rows", 3, "Specifications unavailable. Use Refresh data to retry."); emptyRow("usage-rows", 4, "Usage unavailable. Use Refresh data to retry.");
+    analytics.clear(); emptyRow("spec-rows", 3, "Specifications unavailable. Use Refresh data to retry."); emptyRow("usage-rows", 4, "Usage unavailable. Use Refresh data to retry.");
     $("channel-list").replaceChildren(node("p", "Channels unavailable. Use Refresh data to retry.", "empty-state"));
     ["metric-calls", "metric-success", "metric-latency", "metric-channels"].forEach((id) => { $(id).textContent = "—"; });
     $("usage-chart").replaceChildren(node("p", "Usage unavailable. Refresh to retry.", "empty-cell")); throw error;
   } finally { $("loading").hidden = true; }
 }
 async function enter(session) {
-  state.csrf = session.csrf_token; $("login").hidden = true; $("app").hidden = false; $("main").focus(); await refresh();
+  state.csrf = session.csrf_token; clearPasswords(); $("login").hidden = true; $("app").hidden = false; $("main").focus(); await refresh();
 }
 function action(label, work, danger = false) {
   const button = node("button", label, `text-button${danger ? " danger-text" : ""}`); button.type = "button";
@@ -255,14 +275,90 @@ function confirmKey(channel, rotate) {
   });
 }
 function toggleTenant() {
+  if (!isAdmin()) throw new Error("Only platform administrators can change tenant status.");
   const tenant = state.tenants.find((item) => item.id === state.tenant);
   if (!tenant) return;
   confirmAction(tenant.enabled ? "Disable tenant" : "Enable tenant", `${tenant.name}: ${tenant.enabled ? "all of this tenant's channel access will be blocked." : "enabled channels will be allowed to accept authenticated connections again."}`, async () => {
     await api(tenantPath(), "PATCH", { enabled: !tenant.enabled }); $("confirm-dialog").close(); await refresh(); notify("Tenant status updated.");
   });
 }
+function renderIdentity() {
+  $("identity-name").textContent = state.me?.name || state.me?.username || ""; $("identity-role").textContent = state.me ? (isAdmin() ? "Platform administrator" : "Tenant user") : "";
+  ["nav-users", "new-tenant", "empty-new-tenant", "toggle-tenant", "tenant-select"].forEach((id) => { $(id).hidden = !isAdmin(); });
+  $("assigned-tenant").hidden = isAdmin(); $("change-password").hidden = !state.me?.id; $("audit-scope").textContent = isAdmin() ? "All tenants" : "Assigned tenant";
+  if (!isAdmin()) { state.users = []; state.userNext = null; renderUsers(); } page();
+}
+async function loadUsers(offset = 0) {
+  if (!isAdmin()) throw new Error("Only platform administrators can manage users.");
+  state.users = []; state.userNext = null; renderUsers();
+  const result = await api(`/api/users?offset=${offset}`); state.users = result.items; state.userOffset = offset; state.userNext = result.next_offset; renderUsers();
+}
+function renderUsers() {
+  $("user-rows").replaceChildren();
+  state.users.forEach((user) => {
+    const row = node("tr"); const actions = node("td", "", "user-actions");
+    const toggle = action(user.enabled ? "Disable" : "Enable", () => toggleUser(user), user.enabled); toggle.disabled = user.id === state.me?.id;
+    actions.append(action("Edit name", () => editUser(user)), toggle, action("Reset password", () => passwordDialog(user)));
+    row.append(node("td", user.username), node("td", user.name), node("td", user.role === "platform_admin" ? "Platform administrator" : "Tenant user"), node("td", state.tenants.find((tenant) => tenant.id === user.tenant_id)?.name || user.tenant_id || "All tenants"), node("td", user.enabled ? "Enabled" : "Disabled"), actions); $("user-rows").append(row);
+  });
+  if (!state.users.length) emptyRow("user-rows", 6, "No users to display. Create an account or refresh to retry.");
+  $("users-previous").disabled = !isAdmin() || state.userOffset === 0; $("users-next").disabled = !isAdmin() || state.userNext === null;
+  $("users-page").textContent = state.users.length ? `Users ${state.userOffset + 1}–${state.userOffset + state.users.length}` : "No users loaded";
+}
+function userRole() {
+  const tenant = $("user-role").value === "tenant_user"; $("user-tenant-field").hidden = !tenant; $("user-tenant").disabled = !tenant; $("user-tenant").required = tenant;
+}
+function editUser(user = null) {
+  if (!isAdmin()) throw new Error("Only platform administrators can manage users.");
+  state.editingUser = user; $("user-form").reset(); $("user-title").textContent = user ? "Edit user name" : "Create user"; $("user-name").value = user?.name || "";
+  $("user-create-fields").hidden = !!user; $("user-create-fields").disabled = !!user;
+  $("user-tenant").replaceChildren(new Option("Select a tenant", "")); state.tenants.forEach((tenant) => $("user-tenant").append(new Option(tenant.name, tenant.id))); userRole(); showDialog("user-dialog");
+}
+function passwordValue(passwordId, confirmId) {
+  const password = $(passwordId).value;
+  if ([...password].length < 12 || [...password].length > 128) throw new Error("Use a password of 12–128 characters; a generated passphrase is recommended.");
+  if (password !== $(confirmId).value) throw new Error("The password confirmation does not match.");
+  return password;
+}
+async function saveUser() {
+  if (!isAdmin()) throw new Error("Only platform administrators can manage users.");
+  const payload = { name: $("user-name").value.trim() }; if (!payload.name) throw new Error("Enter a name.");
+  if (!state.editingUser) {
+    Object.assign(payload, { username: $("user-username").value.trim(), password: passwordValue("user-password", "user-confirm"), role: $("user-role").value, tenant_id: $("user-role").value === "tenant_user" ? $("user-tenant").value : null });
+    if (payload.role === "tenant_user" && !payload.tenant_id) throw new Error("Select the user's assigned tenant.");
+  }
+  const user = state.editingUser; clearPasswords($("user-dialog"));
+  await api(user ? `/api/users/${segment(user.id)}` : "/api/users", user ? "PATCH" : "POST", payload);
+  $("user-dialog").close();
+  if (user && user.id === state.me?.id) { signedOut(); notify("Profile updated. Sign in again to continue."); }
+  else { await refresh(); notify("User saved."); }
+}
+function toggleUser(user) {
+  if (!isAdmin() || user.id === state.me?.id) throw new Error("You cannot change this account's status.");
+  confirmAction(user.enabled ? "Disable user" : "Enable user", `${user.username}: ${user.enabled ? "sessions will be revoked. Separately issued shared channel keys remain valid; rotate exposed channel keys too." : "the account will be allowed to sign in again."}`, async () => {
+    await api(`/api/users/${segment(user.id)}`, "PATCH", { enabled: !user.enabled }); $("confirm-dialog").close(); await refresh(); notify("User status updated.");
+  });
+}
+function passwordDialog(user = null) {
+  if (user ? !isAdmin() : !state.me?.id) throw new Error("A named account is required for this action.");
+  state.passwordUser = user; $("password-form").reset(); $("password-title").textContent = user ? "Reset password" : "Change password"; $("password-subject").textContent = user ? user.username : state.me.username;
+  $("current-password-field").hidden = !!user; $("current-password").disabled = !!user; $("current-password").required = !user; showDialog("password-dialog");
+}
+async function savePassword() {
+  const user = state.passwordUser; const password = passwordValue("new-password", "confirm-password"); const current = $("current-password").value; clearPasswords($("password-dialog"));
+  await api(user ? `/api/users/${segment(user.id)}/password` : "/api/password", "POST", user ? { password } : { current_password: current, new_password: password });
+  $("password-dialog").close(); if (!user || user.id === state.me?.id) { signedOut(); notify("Password changed. Sign in with your new password."); } else { await refresh(); notify("Password reset. The user's existing sessions were revoked."); }
+}
+function wireAccounts() {
+  bind("account-login-form", async () => { const username = $("login-username").value.trim(); const password = $("login-password").value; clearPasswords(); await enter(await api("/api/login", "POST", { username, password })); }, "submit");
+  bind("new-user", () => editUser()); bind("user-form", saveUser, "submit"); $("user-role").addEventListener("change", userRole);
+  bind("change-password", () => passwordDialog()); bind("password-form", savePassword, "submit");
+  bind("users-previous", () => loadUsers(Math.max(0, state.userOffset - 100))); bind("users-next", () => { if (state.userNext !== null) return loadUsers(state.userNext); });
+  ["user-dialog", "password-dialog"].forEach((id) => $(id).addEventListener("close", () => { clearPasswords($(id)); $(id).querySelector("form").reset(); state.editingUser = null; state.passwordUser = null; }));
+  window.addEventListener("pagehide", () => clearPasswords());
+}
 function wireForms() {
-  bind("login-form", async () => { const token = $("login-token").value; $("login-token").value = ""; await enter(await api("/api/login", "POST", { token })); }, "submit");
+  bind("login-form", async () => { const token = $("login-token").value; clearPasswords(); await enter(await api("/api/login", "POST", { token })); }, "submit");
   bind("tenant-form", async () => {
     const name = $("tenant-name").value.trim(); if (!name) throw new Error("Enter a tenant name.");
     const tenant = await api("/api/tenants", "POST", { name }); state.tenant = tenant.id; $("tenant-dialog").close(); await refresh(); notify("Tenant created. Upload a specification or create your first channel.");
@@ -273,19 +369,19 @@ function wireForms() {
   $("sandbox-mode").addEventListener("change", sandboxPolicy);
 }
 function wireActions() {
-  const newTenant = () => { $("tenant-form").reset(); showDialog("tenant-dialog"); };
+  const newTenant = () => { if (!isAdmin()) throw new Error("Only platform administrators can create tenants."); $("tenant-form").reset(); showDialog("tenant-dialog"); };
   bind("new-tenant", newTenant); bind("empty-new-tenant", newTenant); bind("toggle-tenant", toggleTenant);
   bind("new-channel", () => editChannel());
   bind("new-spec", () => { if (!state.settings) throw new Error("Refresh settings before uploading."); $("spec-form").reset(); $("file-limit").textContent = `Maximum file size: ${count(state.settings.max_spec_bytes)} bytes. No remote URLs are fetched by this form.`; showDialog("spec-dialog"); });
-  bind("refresh", refresh); bind("logout", async () => { await api("/api/logout", "POST", {}); signedOut(); notify("Signed out."); });
-  $("tenant-select").addEventListener("change", () => run(async () => { state.epoch += 1; state.tenant = $("tenant-select").value; clearKey(); renderTenants(); await loadTenant(); notify("Tenant workspace loaded."); }));
+  bind("refresh", refresh); bind("logout", async () => { analytics.reset(); try { await api("/api/logout", "POST", {}); } finally { signedOut(); } notify("Signed out."); });
+  $("tenant-select").addEventListener("change", () => run(async () => { if (!isAdmin()) { renderTenants(); return; } state.epoch += 1; state.tenant = $("tenant-select").value; clearKey(); renderTenants(); await loadTenant(); notify("Tenant workspace loaded."); }));
   bind("download-source", downloadSource); bind("copy-endpoint", () => copy($("endpoint").value)); bind("copy-config", () => copy($("client-config").textContent)); bind("copy-key", () => copy($("channel-token").value));
   bind("reveal-key", () => { const reveal = $("channel-token").type === "password"; $("channel-token").type = reveal ? "text" : "password"; $("reveal-key").textContent = reveal ? "Hide key" : "Reveal key"; $("reveal-key").setAttribute("aria-pressed", String(reveal)); });
-  document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => { if (!state.busy) button.closest("dialog").close(); }));
-  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("cancel", (event) => { if (state.busy) event.preventDefault(); }));
+  document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => { if (!state.busy) { const dialog = button.closest("dialog"); clearDialog(dialog); dialog.close(); } }));
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("cancel", (event) => { if (state.busy) event.preventDefault(); else clearDialog(dialog); }));
   $("key-dialog").addEventListener("close", clearKey); $("confirm-dialog").addEventListener("close", () => { state.confirm = null; });
   $("source-dialog").addEventListener("close", () => { state.source = null; $("source-content").textContent = ""; });
   window.addEventListener("hashchange", page); window.addEventListener("pagehide", clearKey);
 }
-wireForms(); wireActions(); page();
+wireForms(); wireActions(); wireAccounts(); analytics.wire(); page();
 run(async () => { try { await enter(await api("/api/session")); } catch (error) { if (state.csrf) throw error; notify(error.message, true); } });

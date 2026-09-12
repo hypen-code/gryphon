@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from gryphon.errors import CapacityError, ExecutionTimeoutError, SecurityViolationError
+from gryphon.runtime.execution_metrics import broker_measurements
 from gryphon.security.auth import AsyncVault
 from gryphon.security.encoding import encode_request, validate_arguments
 from gryphon.security.network import NetworkClient, decode_json
@@ -81,9 +82,28 @@ class ToolBroker:
         normalized = validate_arguments(endpoint, arguments)
         url, headers, body = encode_request(endpoint, endpoint.base_url or manifest.base_url, normalized)
         check_domain_allowed(url, self._config.allowed_domains)
+        return await self._dispatch(
+            server_name, manifest, endpoint, url, headers, body, scope, body_present="json_body" in normalized
+        )
+
+    async def _dispatch(
+        self,
+        server_name: str,
+        manifest: ServerManifest,
+        endpoint: EndpointManifest,
+        url: str,
+        headers: dict[str, str],
+        body: Any,
+        scope: ExecutionScope,
+        *,
+        body_present: bool,
+    ) -> Any:
+        """Bound broker wall wait and optionally count only fully accepted JSON returns."""
+        state = broker_measurements(scope)
+        started = time.monotonic() if state is not None else 0
         try:
             async with asyncio.timeout(scope.deadline - time.monotonic()):
-                return await self._send(
+                result = await self._send(
                     server_name,
                     manifest,
                     endpoint,
@@ -91,10 +111,16 @@ class ToolBroker:
                     headers,
                     body,
                     scope,
-                    body_present="json_body" in normalized,
+                    body_present=body_present,
                 )
         except TimeoutError:
             raise ExecutionTimeoutError("Execution deadline exceeded during capability call") from None
+        finally:
+            if state is not None:
+                state.broker_ms += max(0, (time.monotonic() - started) * 1000)
+        if state is not None:
+            state.accept_response(result, self._config.max_response_size_bytes)
+        return result
 
     async def _send(
         self,

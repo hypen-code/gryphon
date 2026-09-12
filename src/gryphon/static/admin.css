@@ -54,6 +54,13 @@ legend { padding: 0; margin-bottom: 7px; }
 .login-card h2 { font-size: 27px; margin-bottom: 12px; }
 .login-card .primary { display: flex; justify-content: space-between; margin-top: 28px; padding: 13px 16px; }
 .login-footnote { text-align: center; font-size: 11px; color: var(--muted); margin-top: 25px; }
+.bootstrap-login { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
+.bootstrap-login summary { cursor: pointer; color: var(--green); font-size: 12px; }
+.identity-badge { min-width: 0; overflow-wrap: anywhere; }
+.identity-badge .text-button { display: block; color: #e5c584; font-size: 11px; padding: 6px 0; }
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; font-size: 12px; }
+.user-actions .text-button { display: block; white-space: nowrap; }
+#assigned-tenant { white-space: normal; overflow-wrap: anywhere; max-width: 240px; }
 .app-shell { min-height: 100vh; }
 .sidebar { width: 236px; position: fixed; inset: 0 auto 0 0; padding: 30px 20px 24px; background: var(--navy); color: #c9d3d7; display: flex; flex-direction: column; }
 .sidebar .brand { padding: 0 10px; margin-bottom: 45px; }
@@ -165,5 +172,29 @@ pre { background: #f3f6f0; padding: 18px; border: 1px solid #e2e8dc; border-radi
 @media (min-width: 1600px) { #main { padding-top: 50px; } .metrics { gap: 24px; } .metric { padding: 28px; } }
 @media (max-width: 1180px) { .sidebar { width: 210px; padding-inline: 14px; } .workspace { margin-left: 210px; } #main { padding: 28px 24px; } .topbar { padding-inline: 24px; } .metrics { gap: 12px; } .metric { padding: 18px; } .overview-grid { grid-template-columns: 1.3fr 1fr; gap: 18px; } .panel-heading { align-items: start; flex-wrap: wrap; } .workspace-label { display: none; } .tenant-tools { margin-left: auto; } }
 @media (max-width: 900px) { .sidebar { width: 185px; padding-inline: 10px; } .sidebar .brand { font-size: 23px; } .sidebar nav a { padding-inline: 12px; gap: 9px; font-size: 12px; } .workspace { margin-left: 185px; } .sidebar-bottom { gap: 7px; } .operator-avatar { display: none; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .overview-grid, .channel-grid { grid-template-columns: 1fr; } .page-heading { align-items: start; } .tenant-banner > div { align-items: start; flex-direction: column; gap: 5px; } .login-story { padding: 40px 30px; } .brand-label { display: none; } }
-@media (max-width: 640px) { .login-screen { grid-template-columns: 1fr; } .login-story { padding: 26px; gap: 28px; } .login-story h1 { font-size: 30px; } .login-story > .muted, .story-copy { display: none; } .login-story .brand { font-size: 23px; } .login-panel { padding: 38px 26px; } .sidebar { position: static; width: 100%; padding: 17px 16px 10px; display: block; } .sidebar .brand { margin: 0 0 16px; padding: 0; } .sidebar-caption, .sidebar-bottom { display: none; } .sidebar nav { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 5px; } .sidebar nav a { white-space: nowrap; padding: 9px 11px; font-size: 11px; } .sidebar nav a > span:first-child, .nav-count { display: none; } .workspace { margin-left: 0; } .topbar { padding: 12px 16px; min-height: auto; } .tenant-tools { width: 100%; } .tenant-tools select { flex: 1; min-width: 0; width: 100px; } .tenant-tools button { white-space: nowrap; } #main { padding: 25px 16px; } .page-heading { gap: 12px; } .page-heading .eyebrow { font-size: 8px; letter-spacing: 1px; } .page-heading > button { padding: 8px 10px; font-size: 10px; } h1 { font-size: 26px; } .page-heading .muted { font-size: 12px; } .metric { padding: 17px; } .metric strong { font-size: 28px; } .metric small { font-size: 9px; } .tenant-banner { padding: 10px; } .tenant-banner button { font-size: 10px; } .section-toolbar { align-items: start; } .section-toolbar button { font-size: 11px; padding: 9px 11px; } .panel-heading, td, th { padding-inline: 16px; } .workspace-footer span:last-child { display: none; } dialog { padding: 22px; } .copy-row { flex-direction: column; } .sidebar-bottom { display: flex; position: absolute; top: 10px; right: 16px; padding: 0; } .sidebar-bottom > div { display: none; } .sidebar-bottom .icon-button { font-size: 25px; } }
+@media (max-width: 640px) { .login-screen { grid-template-columns: 1fr; } .login-story { padding: 26px; gap: 28px; } .login-story h1 { font-size: 30px; } .login-story > .muted, .story-copy { display: none; } .login-story .brand { font-size: 23px; } .login-panel { padding: 38px 26px; } .sidebar { position: static; width: 100%; padding: 17px 16px 10px; display: block; } .sidebar .brand { margin: 0 0 16px; padding: 0; } .sidebar-caption, .sidebar-bottom { display: none; } .sidebar nav { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 5px; } .sidebar nav a { white-space: nowrap; padding: 9px 11px; font-size: 11px; } .sidebar nav a > span:first-child, .nav-count { display: none; } .workspace { margin-left: 0; } .topbar { padding: 12px 16px; min-height: auto; } .tenant-tools { width: 100%; } .tenant-tools select { flex: 1; min-width: 0; width: 100px; } .tenant-tools button { white-space: nowrap; } #main { padding: 25px 16px; } .page-heading { gap: 12px; } .page-heading .eyebrow { font-size: 8px; letter-spacing: 1px; } .page-heading > button { padding: 8px 10px; font-size: 10px; } h1 { font-size: 26px; } .page-heading .muted { font-size: 12px; } .metric { padding: 17px; } .metric strong { font-size: 28px; } .metric small { font-size: 9px; } .tenant-banner { padding: 10px; } .tenant-banner button { font-size: 10px; } .section-toolbar { align-items: start; } .section-toolbar button { font-size: 11px; padding: 9px 11px; } .panel-heading, td, th { padding-inline: 16px; } .workspace-footer span:last-child { display: none; } dialog { padding: 22px; } .copy-row { flex-direction: column; } .sidebar-bottom { display: flex; position: static; padding: 12px 0 0; border-top: 1px solid #314542; margin-top: 8px; } .sidebar-bottom > .identity-badge { display: block; } .sidebar-bottom .icon-button { font-size: 25px; } }
+.analytics-toolbar { flex-wrap: wrap; align-items: end; }
+.analytics-filters { display: flex; flex-wrap: wrap; gap: 14px; min-width: 0; }
+.analytics-filters > div { min-width: 160px; max-width: 300px; }
+.analytics-filters label { margin-top: 0; }
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-bottom: 24px; }
+.analytics-note { padding: 0 24px 20px; margin: 0; font-size: 12px; color: var(--muted); }
+.analytics-unobservable { display: flex; align-items: center; gap: 30px; padding: 24px; margin-bottom: 24px; background: #edf1e8; }
+.analytics-unobservable > div { min-width: 210px; }
+.analytics-unobservable h2, .analytics-unobservable p { margin-bottom: 0; }
+.analytics-unobservable p:not(.eyebrow) { font-size: 12px; color: #56684f; }
+.analytics-facts { padding: 0 24px 20px; margin: 0; }
+.analytics-facts > div { display: flex; justify-content: space-between; gap: 24px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.analytics-facts dt { color: var(--muted); }
+.analytics-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.analytics-section { margin-bottom: 24px; }
+.analytics-methodology { padding: 24px; font-size: 12px; color: var(--muted); }
+.analytics-methodology li { margin-bottom: 8px; }
+.analytics-daily-chart { padding: 0 24px 16px; }
+.analytics-daily-chart svg { width: 100%; height: 120px; display: block; }
+.analytics-daily-chart rect { fill: var(--green); }
+.analytics-daily-chart text { fill: var(--muted); font-size: 12px; }
+#analytics-kpis .metric strong { overflow-wrap: anywhere; }
+@media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } .analytics-unobservable { display: block; } .analytics-unobservable > div { margin-bottom: 15px; } }
+@media (max-width: 640px) { .analytics-filters, .analytics-filters > div { width: 100%; max-width: none; } .analytics-note, .analytics-facts { padding-inline: 16px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }

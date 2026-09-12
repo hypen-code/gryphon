@@ -88,7 +88,9 @@ def fields(data: dict[str, Any], required: set[str], optional: set[str] | None =
 
 
 def admin_endpoint(
-    sessions: AdminSessions, handler: Callable[[Request], Awaitable[Response]]
+    sessions: AdminSessions,
+    handler: Callable[[Request], Awaitable[Response]],
+    authorize: Callable[[Request], Awaitable[Response | None]] | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Authenticate before handler execution and require a session-bound CSRF token on writes."""
 
@@ -102,6 +104,10 @@ def admin_endpoint(
             csrf.encode(), request.headers.get("x-csrf-token", "").encode()
         ):
             return failure("csrf", 403)
+        if authorize is not None:
+            denied = await authorize(request)
+            if denied is not None:
+                return denied
         return await handler(request)
 
     return guarded

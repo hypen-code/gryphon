@@ -11,6 +11,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2] / "src" / "gryphon"
 _TEMPLATE = _ROOT / "templates" / "admin.html"
 _SCRIPT = _ROOT / "static" / "admin.js"
+_ANALYTICS = _ROOT / "static" / "analytics.js"
 _STYLE = _ROOT / "static" / "admin.css"
 
 
@@ -39,7 +40,10 @@ def test_admin_template_assets_same_origin_and_external() -> None:
     elements = _document().elements
     scripts = [attrs for tag, attrs in elements if tag == "script"]
     styles = [attrs for tag, attrs in elements if tag == "link" and attrs.get("rel") == "stylesheet"]
-    assert scripts == [{"src": "/static/admin.js", "defer": None}]
+    assert scripts == [
+        {"src": "/static/analytics.js", "defer": None},
+        {"src": "/static/admin.js", "defer": None},
+    ]
     assert styles == [{"rel": "stylesheet", "href": "/static/admin.css"}]
     assert not any(tag == "style" for tag, _ in elements)
     assert all(not key.startswith("on") and key != "style" for _, attrs in elements for key in attrs)
@@ -60,7 +64,7 @@ def test_admin_template_ids_unique_and_script_targets_present() -> None:
     """Every literal JavaScript target resolves to one shipped element."""
     identifiers = [attrs["id"] for _, attrs in _document().elements if "id" in attrs]
     assert len(identifiers) == len(set(identifiers))
-    script_targets = set(re.findall(r'\$\("([a-z-]+)"\)', _SCRIPT.read_text()))
+    script_targets = set(re.findall(r'\$\("([a-z-]+)"\)', _SCRIPT.read_text() + _ANALYTICS.read_text()))
     assert script_targets <= set(identifiers)
 
 
@@ -81,13 +85,28 @@ def test_admin_template_fields_and_dialogs_accessibly_named() -> None:
 
 
 def test_admin_template_login_no_get_credential_submission() -> None:
-    """Even without JavaScript, a form must not place credentials in a URL."""
+    """POST-only forms bound UTF-16 fields while permitting all 128-code-point passwords."""
     forms = [attrs for tag, attrs in _document().elements if tag == "form"]
     assert forms
     assert all(attrs.get("method") == "post" for attrs in forms)
     passwords = [attrs for tag, attrs in _document().elements if tag == "input" and attrs.get("type") == "password"]
-    assert {attrs["id"] for attrs in passwords} == {"login-token", "channel-token"}
-    assert all(attrs.get("autocomplete") == "off" for attrs in passwords)
+    expected = {
+        "login-token": "off",
+        "channel-token": "off",
+        "login-password": "current-password",
+        "user-password": "new-password",
+        "user-confirm": "new-password",
+        "current-password": "current-password",
+        "new-password": "new-password",
+        "confirm-password": "new-password",
+    }
+    assert {attrs["id"]: attrs.get("autocomplete") for attrs in passwords} == expected
+    assert all(not attrs.get("value") for attrs in passwords)
+    for attrs in passwords:
+        if attrs["id"] not in {"login-token", "channel-token"}:
+            assert attrs["maxlength"] == str(128 * 2)
+        if attrs["autocomplete"] == "new-password":
+            assert attrs["minlength"] == "12"
 
 
 @pytest.mark.parametrize(
@@ -95,7 +114,7 @@ def test_admin_template_login_no_get_credential_submission() -> None:
 )
 def test_admin_script_unsafe_rendering_and_persistence_absent(forbidden: str) -> None:
     """Untrusted tenant/specification data and keys never use unsafe DOM or browser stores."""
-    assert forbidden not in _SCRIPT.read_text()
+    assert forbidden not in _SCRIPT.read_text() + _ANALYTICS.read_text()
 
 
 def test_admin_script_api_session_and_csrf_contract() -> None:
@@ -151,7 +170,7 @@ def test_admin_script_upload_limits_and_blob_cleanup() -> None:
     assert "URL.revokeObjectURL(url)" in script
 
 
-@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _STYLE])
+@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _ANALYTICS, _STYLE])
 def test_admin_assets_size_limits_respected(path: Path) -> None:
     """All shipped assets remain within the repository file-size constraint."""
     assert len(path.read_text().splitlines()) <= 400
@@ -166,3 +185,77 @@ def test_admin_style_responsive_and_keyboard_focus_rules() -> None:
     assert "prefers-reduced-motion" in style
     assert "dialog::backdrop" in style
     assert "url(" not in style
+    mobile = style.split("@media (max-width: 640px)")[1]
+    assert ".sidebar-bottom > .identity-badge { display: block; }" in mobile
+
+
+def test_admin_script_named_login_and_verified_scope() -> None:
+    """Verified identity gates platform controls and foreign tenant choices, not client claims."""
+    script = _SCRIPT.read_text()
+    assert 'api("/api/login", "POST", { username, password })' in script
+    assert 'state.me = (await api("/api/me")).user' in script
+    assert 'state.me?.role === "platform_admin"' in script
+    assert "tenants.items.filter((tenant) => tenant.id === state.me.tenant_id)" in script
+    assert 'if (key === "users" && !isAdmin())' in script
+    assert "if (isAdmin()) await loadUsers()" in script
+    assert '["nav-users", "new-tenant", "empty-new-tenant", "toggle-tenant", "tenant-select"]' in script
+    assert '$("change-password").hidden = !state.me?.id' in script
+    assert "response.status === 403" in script
+    assert 'location.hash = "#overview"' in script
+
+
+def test_admin_script_user_management_pagination_and_fixed_membership() -> None:
+    """Account creation includes fixed membership while updates cannot reassign authority."""
+    script = _SCRIPT.read_text()
+    assert "api(`/api/users?offset=${offset}`)" in script
+    assert "state.userNext = result.next_offset" in script
+    assert "loadUsers(Math.max(0, state.userOffset - 100))" in script
+    assert "loadUsers(state.userNext)" in script
+    assert 'const payload = { name: $("user-name").value.trim() }' in script
+    assert "if (!state.editingUser) {" in script
+    assert 'tenant_id: $("user-role").value === "tenant_user" ? $("user-tenant").value : null' in script
+    assert '$("user-create-fields").disabled = !!user' in script
+    assert "toggle.disabled = user.id === state.me?.id" in script
+    assert "if (!isAdmin() || user.id === state.me?.id)" in script
+    assert '"PATCH", { enabled: !user.enabled }' in script
+    assert "rotate exposed channel keys too" in script
+
+
+def test_admin_script_password_change_reset_and_cleanup() -> None:
+    """Password material is transient; self-service and administrator reset stay distinct."""
+    script = _SCRIPT.read_text()
+    assert "password !== $(confirmId).value" in script
+    assert "[...password].length < 12 || [...password].length > 128" in script
+    assert 'user ? `/api/users/${segment(user.id)}/password` : "/api/password"' in script
+    assert "user ? { password } : { current_password: current, new_password: password }" in script
+    assert '$("current-password").required = !user' in script
+    assert "if (!user || user.id === state.me?.id) { signedOut()" in script
+    assert 'clearPasswords($("user-dialog"))' in script
+    assert 'clearPasswords($("password-dialog"))' in script
+    assert '["user-dialog", "password-dialog"].forEach' in script
+    assert 'addEventListener("close", () => { clearPasswords($(id))' in script
+    assert 'window.addEventListener("pagehide", () => clearPasswords())' in script
+    assert "clearDialog(dialog); dialog.close()" in script
+    assert "if (state.busy) event.preventDefault(); else clearDialog(dialog)" in script
+    assert 'clearPasswords(dialog); if (dialog.id === "key-dialog") clearKey()' in script
+    signout = script.split("function signedOut()")[1].split("async function api(")[0]
+    assert "clearKey(); clearPasswords();" in signout
+    assert "state.me = null; state.users = []" in signout
+    assert 'document.querySelectorAll("form").forEach((form) => form.reset())' in signout
+    assert '$("client-config").textContent = ""' in signout
+
+
+def test_admin_accounts_validation_matches_named_account_forms() -> None:
+    """Account fields accept the backend username bound and errors stay safe and relevant."""
+    fields = {attrs.get("id"): attrs for tag, attrs in _document().elements if tag == "input"}
+    for identifier in ("login-username", "user-username"):
+        assert fields[identifier]["maxlength"] == "128"
+        assert fields[identifier]["minlength"] == "3"
+        assert fields[identifier]["autocapitalize"] == "none"
+    assert fields["user-name"]["maxlength"] == "128"
+    script = _SCRIPT.read_text()
+    assert 'result.error === "validation" ? validationMessage(path)' in script
+    assert 'path === "/api/password"' in script
+    assert 'path.endsWith("/password"))) return errors.invalid_password' in script
+    assert "Object.hasOwn(errors, result.error)" in script
+    assert "result.message" not in script

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import TYPE_CHECKING
@@ -10,17 +11,21 @@ from uuid import UUID
 from starlette.requests import Request
 
 from gryphon.errors import CapacityError, ConflictError, SecurityViolationError
+from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.saas_http import failure
 from gryphon.saas_runtime import ChannelRuntimeManager, verified_channel
 from gryphon.saas_store import TOOLS, SaaSStore
+from gryphon.saas_traffic import TrafficObservation, record_traffic
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from gryphon.models import Channel
+    from gryphon.saas_analytics import AnalyticsStore
 
 logger = get_logger(__name__)
+_USAGE_WRITE_TIMEOUT_SECONDS = 2
 
 
 def _tool(body: bytes) -> str | None:
@@ -39,9 +44,11 @@ def _tool(body: bytes) -> str | None:
 class MCPGateway:
     """Resolve opaque channel credentials from the database, never from URL claims."""
 
-    def __init__(self, store: SaaSStore, runtimes: ChannelRuntimeManager) -> None:
-        """Inject independently managed persistence and runtime dependencies."""
-        self.store, self.runtimes = store, runtimes
+    def __init__(
+        self, store: SaaSStore, runtimes: ChannelRuntimeManager, analytics: AnalyticsStore | None = None
+    ) -> None:
+        """Inject independently managed persistence, runtime and optional analytics dependencies."""
+        self.store, self.runtimes, self.analytics = store, runtimes, analytics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authorize the exact path and revision, then delegate protocol handling to FastMCP."""
@@ -75,19 +82,28 @@ class MCPGateway:
             await failure("channel_unavailable", 409)(scope, receive, send)
 
     async def _dispatch(self, request: Request, app: ASGIApp, channel: Channel, send: Send) -> None:
-        """Record fixed tool outcomes after SDK dispatch without retaining request values."""
+        """Persist produced tool outcomes before forwarding the final SDK response frame."""
         body = await request.body()
         tool, started = _tool(body), time.monotonic()
-        status = 500
-        response = bytearray()
+        observation = TrafficObservation(len(body))
+        recorded = False
+
+        async def record_once() -> None:
+            """Snapshot before persistence and finish both owned writes before propagating cancellation."""
+            nonlocal recorded
+            if recorded or tool is None:
+                return
+            recorded = True
+            duration_ms = (time.monotonic() - started) * 1000
+            success = observation.finished and _successful(observation.status, observation.buffer)
+            await finish_cleanup(self._record(channel, observation, tool, success, duration_ms))
 
         async def observed(message: Message) -> None:
-            """Inspect bounded response bytes only for result status and never log them."""
-            nonlocal status
-            if message["type"] == "http.response.start":
-                status = message["status"]
-            if message["type"] == "http.response.body" and len(response) < 1048576:
-                response.extend(message.get("body", b"")[: 1048576 - len(response)])
+            """Count produced bytes, not client consumption, and persist before final transport handoff."""
+            if tool is not None:
+                observation.observe(message)
+                if observation.finished:
+                    await record_once()
             await send(message)
 
         delivered = False
@@ -101,15 +117,26 @@ class MCPGateway:
             return await request.receive()
 
         scope = {**request.scope, "path": "/", "raw_path": b"/", "root_path": ""}
-        await app(scope, replay, observed)
-        if tool is not None:
-            await self.store.record_usage(
-                channel.tenant_id,
-                channel.id,
-                tool,
-                "success" if _successful(status, response) else "error",
-                (time.monotonic() - started) * 1000,
-            )
+        try:
+            await app(scope, replay, observed)
+        finally:
+            await record_once()
+
+    async def _record(
+        self, channel: Channel, observation: TrafficObservation, tool: str, success: bool, duration_ms: float
+    ) -> None:
+        """Attempt both optional stores independently without replacing the primary SDK outcome."""
+        if self.analytics is not None:
+            await record_traffic(self.analytics, channel.tenant_id, channel.id, observation, tool, success)
+        else:
+            observation.buffer.clear()
+        try:
+            async with asyncio.timeout(_USAGE_WRITE_TIMEOUT_SECONDS):
+                await self.store.record_usage(
+                    channel.tenant_id, channel.id, tool, "success" if success else "error", duration_ms
+                )
+        except Exception:
+            logger.warning("traffic_usage_record_failed")
 
 
 def _successful(status: int, body: bytearray) -> bool:
@@ -120,7 +147,7 @@ def _successful(status: int, body: bytearray) -> bool:
         data = json.loads(body)
         if not isinstance(data, dict) or "error" in data:
             return False
-        result = data.get("result", {})
+        result = data.get("result")
         if not isinstance(result, dict) or result.get("isError"):
             return False
         structured = result.get("structuredContent", {})

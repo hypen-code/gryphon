@@ -50,6 +50,54 @@ def test_sessions_expiry_and_capacity_are_bounded(monkeypatch: pytest.MonkeyPatc
     assert sessions.login(config.admin_token.get_secret_value()) is not None
 
 
+def test_user_sessions_cannot_exhaust_platform_recovery_capacity() -> None:
+    """Bound one account's sessions and reserve platform access under tenant pressure."""
+    config = settings(max_admin_sessions=6)
+    sessions = AdminSessions(config)
+    issued = [sessions.login_user("tenant-user", 1) for _ in range(4)]
+    assert all(issued)
+    assert sessions.login_user("tenant-user", 1) is None
+    assert sessions.login_user("other-user", 1) is not None
+    assert sessions.login_user("third-user", 1) is None
+    admin = sessions.login(config.admin_token.get_secret_value())
+    assert admin is not None
+    sessions.logout(admin[0])
+    assert sessions.login_user("platform-user", 1, platform=True) is not None
+    sessions.close()
+    assert all(sessions.identity(item[0]) is None for item in issued if item is not None)
+
+
+def test_user_session_expiry_and_logout_release_account_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expired or revoked cookies cannot retain named identity or block future login."""
+    now = [100.0]
+    monkeypatch.setattr("gryphon.saas_auth.time.monotonic", lambda: now[0])
+    config = settings(max_admin_sessions=1)
+    sessions = AdminSessions(config)
+    first = sessions.login_user("user", 3)
+    assert first is not None and sessions.identity(first[0]) == ("user", 3)
+    assert sessions.login_user("user", 3) is None
+    sessions.logout(first[0])
+    assert sessions.identity(first[0]) is None
+    second = sessions.login_user("user", 4)
+    assert second is not None
+    now[0] += config.session_ttl_seconds + 1
+    assert sessions.verify(second[0]) is None and sessions.identity(second[0]) is None
+    assert sessions.login_user("user", 4) is not None
+
+
+def test_user_session_revocation_preserves_new_revisions_and_other_accounts() -> None:
+    """Committed account changes proactively discard only older affected sessions."""
+    sessions = AdminSessions(settings())
+    old = sessions.login_user("one", 1)
+    new = sessions.login_user("one", 2)
+    other = sessions.login_user("two", 1)
+    assert old is not None and new is not None and other is not None
+    sessions.revoke_user("one", before_revision=2)
+    assert sessions.verify(old[0]) is None and sessions.identity(old[0]) is None
+    assert sessions.verify(new[0]) == new[1]
+    assert sessions.verify(other[0]) == other[1]
+
+
 def test_rate_limiter_rejects_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fixed global window bounds unauthenticated attempts without an IP map."""
     clock = [10.0]

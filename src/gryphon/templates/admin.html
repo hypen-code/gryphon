@@ -7,6 +7,7 @@
   <title>Gryphon · Control plane</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314212c'/%3E%3Cpath d='M23 10a10 10 0 1 0 0 12v-7h-8v4h4v1a6 6 0 1 1 0-8z' fill='%23e5c584'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/admin.css">
+  <script src="/static/analytics.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -19,15 +20,24 @@
       <p class="muted">Purpose-built for operator-managed agent infrastructure.</p>
     </div>
     <main class="login-panel">
-      <form method="post" id="login-form" class="login-card">
-        <p class="eyebrow">OPERATOR ACCESS</p><h2>Welcome to Gryphon</h2>
-        <p class="muted">Sign in with your administrator token to manage tenants and channels.</p>
-        <label for="login-token">Administrator token</label>
-        <input id="login-token" name="token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="login-hint">
-        <p id="login-hint" class="hint">Your token is exchanged for a secure session. It is not saved in browser storage.</p>
-        <button class="primary full" type="submit">Sign in to control plane <span aria-hidden="true">→</span></button>
+      <div class="login-card">
+        <p class="eyebrow">WORKSPACE ACCESS</p><h2>Welcome to Gryphon</h2>
+        <p class="muted">Sign in with the account provided by your administrator.</p>
+        <form method="post" id="account-login-form">
+          <label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required minlength="3" maxlength="128" spellcheck="false" autocapitalize="none">
+          <label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          <button class="primary full" type="submit">Sign in</button>
+        </form>
+        <details class="bootstrap-login"><summary>Bootstrap administrator token</summary>
+          <form method="post" id="login-form">
+            <p class="hint">Alternative access for first setup or recovery. Create named accounts from Users after signing in.</p>
+            <label for="login-token">Administrator token</label><input id="login-token" name="token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="login-hint">
+            <p id="login-hint" class="hint">Your token is exchanged for a secure session. It is not saved in browser storage.</p>
+            <button class="secondary full" type="submit">Sign in with token</button>
+          </form>
+        </details>
         <p class="login-footnote">Private access · Use HTTPS for remote connections</p>
-      </form>
+      </div>
     </main>
   </section>
   <div id="app" class="app-shell" hidden>
@@ -36,17 +46,19 @@
       <p class="sidebar-caption">CONTROL PLANE</p>
       <nav aria-label="Main navigation">
         <a href="#overview" data-page="overview" aria-current="page"><span aria-hidden="true">◈</span> Overview</a>
+        <a href="#analytics" data-page="analytics">Analytics</a>
         <a href="#channels" data-page="channels"><span aria-hidden="true">⇄</span> Channels <span id="nav-channel-count" class="nav-count">0</span></a>
         <a href="#specs" data-page="specs"><span aria-hidden="true">▤</span> API specifications</a>
         <a href="#audit" data-page="audit"><span aria-hidden="true">◷</span> Audit trail</a>
+        <a id="nav-users" href="#users" data-page="users" hidden>Users</a>
       </nav>
-      <div class="sidebar-bottom"><div class="operator-avatar" aria-hidden="true">OP</div><div><strong>Operator</strong><small>Administrator session</small></div><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out">↗</button></div>
+      <div class="sidebar-bottom"><div class="identity-badge"><strong id="identity-name"></strong><small id="identity-role"></small><button id="change-password" class="text-button" hidden>Change password</button></div><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out">↗</button></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div class="workspace-label">Workspace <span aria-hidden="true">/</span> <strong id="tenant-heading">Select a tenant</strong></div><div class="tenant-tools"><label class="sr-only" for="tenant-select">Current tenant</label><select id="tenant-select"><option value="">Loading tenants…</option></select><button id="new-tenant" class="secondary">New tenant</button></div></header>
+      <header class="topbar"><div class="workspace-label">Workspace <span aria-hidden="true">/</span> <strong id="tenant-heading">Select a tenant</strong></div><div class="tenant-tools"><label class="sr-only" for="tenant-select">Current tenant</label><select id="tenant-select"><option value="">Loading tenants…</option></select><span id="assigned-tenant" class="badge neutral" hidden></span><button id="new-tenant" class="secondary" hidden>New tenant</button></div></header>
       <main id="main" tabindex="-1">
         <div class="page-heading"><div><p class="eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</p><h1 id="page-title">Overview</h1><p id="page-description" class="muted">A clear view of your channels, capabilities, and activity.</p></div><button id="refresh" class="secondary">Refresh data</button></div>
-        <div class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><button id="toggle-tenant" class="text-button" disabled>Disable tenant</button></div>
+        <div class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><button id="toggle-tenant" class="text-button" hidden disabled>Disable tenant</button></div>
         <p id="loading" class="loading-state" role="status" hidden>Loading workspace data…</p>
         <div id="tenant-empty" class="empty-state" hidden><span class="empty-symbol" aria-hidden="true">◈</span><h2>Your first workspace starts here</h2><p>Create a tenant, upload an API specification, then bind it to a channel.</p><button id="empty-new-tenant" class="primary">Create a tenant</button></div>
         <div id="tenant-content">
@@ -55,10 +67,30 @@
             <div class="overview-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">TRAFFIC DISTRIBUTION</p><h2>Calls by channel</h2></div><span class="badge neutral">Recorded totals</span></div><div id="usage-chart" class="chart-list"></div></article><article class="panel policy-panel"><p class="eyebrow">ISOLATION BY DESIGN</p><h2>The right boundaries.<br>For every channel.</h2><p>Restricted execution exposes bound APIs through the broker, with no imports.</p><p>Docker is offline computation: no network or API access. Only operator-approved, preinstalled libraries are available.</p><a href="#channels" class="text-link">Manage execution policies <span aria-hidden="true">→</span></a></article></div>
             <article class="panel"><div class="panel-heading"><div><p class="eyebrow">EXECUTION INSIGHTS</p><h2>Tool activity</h2></div><span class="subtle">Aggregate usage · not a time series</span></div><div class="table-wrap"><table><caption class="sr-only">Recorded tool usage by channel and status</caption><thead><tr><th>Channel / tool</th><th>Status</th><th>Calls</th><th>Average latency</th></tr></thead><tbody id="usage-rows"></tbody></table></div></article>
           </section>
+          <section id="page-analytics" class="page-section" aria-label="Analytics" hidden>
+            <div class="section-toolbar analytics-toolbar"><div class="analytics-filters"><div><label for="analytics-days">UTC reporting window</label><select id="analytics-days"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></div><div><label for="analytics-channel">Channel</label><select id="analytics-channel"><option value="">All channels</option></select></div></div><button id="analytics-download" class="secondary" disabled>Download raw JSON</button></div>
+            <p id="analytics-status" class="loading-state" role="status" aria-live="polite">Select a tenant to view recorded analytics.</p>
+            <div id="analytics-report" hidden>
+              <p id="analytics-window" class="hint"></p>
+              <div id="analytics-kpis" class="metrics"></div>
+              <div class="analytics-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OBSERVED BYTES</p><h2>Full API payload vs final output</h2></div><span class="badge neutral">Comparable successful runs</span></div><div id="analytics-bytes" class="chart-list"></div><p class="analytics-note">Full final JSON includes artifact content, not just its small preview. Negative reduction means code expanded the data.</p></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">ESTIMATED · NOT MODEL TOKENS</p><h2>Payload token equivalents</h2></div></div><div id="analytics-tokens" class="chart-list"></div><p class="analytics-note">ceil(UTF-8 bytes / 4) is a heuristic, not a model tokenizer or a measurement of LLM context.</p></article></div>
+              <article class="panel analytics-unobservable"><div><p class="eyebrow">ACTUAL MODEL TOKENS &amp; BILLING</p><h2>Not observable</h2></div><p>MCP cannot measure the host model's context, generation, or billing. Token equivalents and reused code do not establish actual generation avoided, cost savings, or time saved.</p></article>
+              <div class="analytics-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">EXECUTION &amp; REUSE</p><h2>Fresh work and recipe replay</h2></div></div><dl id="analytics-reuse" class="analytics-facts"></dl></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">ALL RECORDED OUTCOMES</p><h2>Workload and backend timing</h2></div></div><dl id="analytics-workload" class="analytics-facts"></dl><p class="analytics-note">Backend wall, queue, and API wait durations are not CPU time or time saved. Failed and cancelled runs remain included.</p></article></div>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">DAILY · UTC</p><h2>Recorded activity over time</h2></div></div><div id="analytics-daily-chart" class="analytics-daily-chart"></div><div class="table-wrap"><table><caption class="sr-only">Daily recorded traffic and execution outcomes in UTC</caption><thead><tr><th>UTC day</th><th>MCP calls</th><th>Runs</th><th>Succeeded</th><th>Failed</th><th>Cancelled</th><th>Payload reduction</th></tr></thead><tbody id="analytics-daily-rows"></tbody></table></div></article>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">CHANNEL COMPARISON</p><h2>Same window, same methodology</h2></div></div><div class="table-wrap"><table><caption class="sr-only">Per-channel observed activity in the selected window</caption><thead><tr><th>Channel</th><th>MCP calls</th><th>Runs</th><th>Success rate</th><th>Code reuse</th><th>Payload reduction</th></tr></thead><tbody id="analytics-channel-rows"></tbody></table></div></article>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">TRAFFIC IS NOT EXECUTIONS</p><h2>MCP request accounting</h2></div></div><dl id="analytics-traffic" class="analytics-facts"></dl><p class="analytics-note">An async submission is counted as a run when it completes, not each time a client polls for its result.</p></article>
+              <article class="panel analytics-methodology"><h2>Methodology &amp; recording coverage</h2><p id="analytics-recording"></p><ul id="analytics-methodology"></ul><p class="hint">The JSON download includes the server's methodology and exact reporting window. It is a local export only; nothing is automatically published or sent to an external metrics service.</p></article>
+            </div>
+          </section>
           <section id="page-channels" class="page-section" aria-label="Channels" hidden><div class="section-toolbar"><p class="muted">Dedicated MCP endpoints with explicit capabilities and policy.</p><button id="new-channel" class="primary">Create channel</button></div><div id="channel-list" class="channel-grid"></div></section>
           <section id="page-specs" class="page-section" aria-label="API specifications" hidden><div class="section-toolbar"><p class="muted">Immutable API catalogs. Upload a new version to change a specification.</p><button id="new-spec" class="primary">Upload specification</button></div><article class="panel"><div class="table-wrap"><table><caption class="sr-only">Uploaded API specifications</caption><thead><tr><th>Specification</th><th>Version ID</th><th>Actions</th></tr></thead><tbody id="spec-rows"></tbody></table></div></article></section>
         </div>
-        <section id="page-audit" class="page-section" aria-label="Audit trail" hidden><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OPERATOR VISIBILITY</p><h2>Recent administrative activity</h2></div><span class="badge neutral">All tenants</span></div><div class="table-wrap"><table><caption class="sr-only">Recent administrative events across tenants</caption><thead><tr><th>Event</th><th>Tenant</th><th>Channel</th><th>Recorded at</th></tr></thead><tbody id="audit-rows"></tbody></table></div></article></section>
+        <section id="page-audit" class="page-section" aria-label="Audit trail" hidden><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OPERATOR VISIBILITY</p><h2>Recent administrative activity</h2></div><span id="audit-scope" class="badge neutral">Your workspace</span></div><div class="table-wrap"><table><caption class="sr-only">Recent administrative events across tenants</caption><thead><tr><th>Event</th><th>Tenant</th><th>Channel</th><th>Recorded at</th></tr></thead><tbody id="audit-rows"></tbody></table></div></article></section>
+        <section id="page-users" class="page-section" aria-label="Users" hidden>
+          <div class="section-toolbar"><p class="muted">Named accounts with a fixed role and, for tenant users, exactly one tenant.</p><button id="new-user" class="primary">Create user</button></div>
+          <p class="security-note">Disabling a user revokes their sessions, not separately issued shared channel keys. When offboarding someone with exposed keys, administrators must rotate those channel keys too.</p>
+          <article class="panel"><div class="table-wrap"><table><caption class="sr-only">Hosted user accounts</caption><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Tenant</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div><div class="pagination"><button id="users-previous" class="secondary" disabled>Previous</button><span id="users-page" role="status"></span><button id="users-next" class="secondary" disabled>Next</button></div></article>
+        </section>
         <footer class="workspace-footer"><span>Gryphon control plane</span><span>Explicit capabilities. Bounded execution.</span></footer>
       </main>
     </div>
@@ -70,6 +102,28 @@
   <dialog id="connect-dialog" class="wide-dialog" aria-labelledby="connect-title"><div class="dialog-heading"><h2 id="connect-title">Connect your MCP client</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><label for="endpoint">Channel endpoint</label><div class="copy-row"><input id="endpoint" readonly><button id="copy-endpoint" class="secondary">Copy endpoint</button></div><h3>Client configuration</h3><pre id="client-config" tabindex="0"></pre><p class="hint">Replace <code>&lt;YOUR_CHANNEL_TOKEN&gt;</code> with the channel key shown once when you rotated it, keeping it in your client's secure credential store instead of a shared file. The placeholder is not a real secret, and the key must never be added to the URL.</p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button id="copy-config" class="primary">Copy configuration</button></div></dialog>
   <dialog id="key-dialog" aria-labelledby="key-title"><div class="dialog-heading"><h2 id="key-title">Your new channel key</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><div class="security-note"><strong>Copy it now. It is shown only once.</strong><p>The previous key is invalid. Store this key securely; it cannot be retrieved after closing this dialog.</p></div><label for="channel-token">Channel token</label><input id="channel-token" type="password" readonly autocomplete="off" spellcheck="false"><div class="key-actions"><button id="reveal-key" class="secondary" aria-pressed="false">Reveal key</button><button id="copy-key" class="primary">Copy key</button></div><p class="dialog-message" role="status"></p><div class="dialog-actions"><button class="secondary" data-close>Done, clear key</button></div></dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form method="post" id="confirm-form"><div class="dialog-heading"><h2 id="confirm-title">Confirm action</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p id="confirm-description" class="muted"></p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close autofocus>Cancel</button><button id="confirm-submit" class="danger" type="submit">Confirm</button></div></form></dialog>
+  <dialog id="user-dialog" aria-labelledby="user-title"><form method="post" id="user-form">
+    <div class="dialog-heading"><h2 id="user-title">Create user</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <label for="user-name">Name</label><input id="user-name" required maxlength="128" autocomplete="off">
+    <fieldset id="user-create-fields"><label for="user-username">Username</label><input id="user-username" required minlength="3" maxlength="128" autocomplete="off" spellcheck="false" autocapitalize="none" aria-describedby="username-hint">
+      <p id="username-hint" class="hint">3–128 ASCII letters, digits, periods, underscores, @, + or hyphens. Usernames are case-insensitive.</p>
+      <label for="user-password">Password</label><input id="user-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" aria-describedby="user-password-hint">
+      <label for="user-confirm">Confirm password</label><input id="user-confirm" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
+      <p id="user-password-hint" class="hint">Use 12–128 characters. A generated passphrase is recommended. Passwords are never returned by the API.</p>
+      <label for="user-role">Role</label><select id="user-role"><option value="tenant_user">Tenant user</option><option value="platform_admin">Platform administrator</option></select>
+      <div id="user-tenant-field"><label for="user-tenant">Assigned tenant</label><select id="user-tenant" required></select></div>
+    </fieldset>
+    <p class="hint">Roles and tenant assignments cannot be changed after creation. Use the status action in the user list to enable or disable an account.</p>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save user</button></div>
+  </form></dialog>
+  <dialog id="password-dialog" aria-labelledby="password-title"><form method="post" id="password-form">
+    <div class="dialog-heading"><h2 id="password-title">Change password</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <p id="password-subject" class="muted"></p><div id="current-password-field"><label for="current-password">Current password</label><input id="current-password" type="password" required maxlength="256" autocomplete="current-password"></div>
+    <label for="new-password">New password</label><input id="new-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" aria-describedby="password-hint">
+    <label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
+    <p id="password-hint" class="hint">Use 12–128 characters; a generated passphrase is recommended. Existing sessions are revoked. Changing your own password signs you out.</p>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save password</button></div>
+  </form></dialog>
   <noscript><p class="noscript">JavaScript is required for the Gryphon control plane. Enable it for this origin to continue.</p></noscript>
 </body>
 </html>

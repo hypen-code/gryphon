@@ -9,9 +9,13 @@ from starlette.routing import Route
 
 from gryphon.compiler.catalog import module_name
 from gryphon.errors import InputValidationError
+from gryphon.saas_access import AccessControl, account, platform_admin
+from gryphon.saas_analytics import AnalyticsStore
 from gryphon.saas_auth import COOKIE_NAME, AdminSessions, RateLimiter
 from gryphon.saas_http import admin_endpoint, failure, fields, read_object
 from gryphon.saas_upload import validate_upload
+from gryphon.saas_user_api import UserAPI
+from gryphon.saas_users import UserStore
 from gryphon.security.ast_guard import available_imports
 
 if TYPE_CHECKING:
@@ -47,12 +51,22 @@ class AdminAPI:
     """Keep HTTP handlers separate from storage and channel execution authority."""
 
     def __init__(
-        self, config: SaaSConfig, base: GryphonConfig, store: SaaSStore, runtimes: ChannelRuntimeManager
+        self,
+        config: SaaSConfig,
+        base: GryphonConfig,
+        store: SaaSStore,
+        runtimes: ChannelRuntimeManager,
+        *,
+        analytics: AnalyticsStore | None = None,
     ) -> None:
         """Compose explicit dependencies without starting services or reading environment state."""
         self.config, self.base, self.store, self.runtimes = config, base, store, runtimes
         self.sessions = AdminSessions(config)
         self.logins = RateLimiter(config.login_attempts_per_minute)
+        self.users = UserStore(store._db)
+        self.access = AccessControl(self.sessions, self.users, store)
+        self.user_api = UserAPI(self.users, self.access, self.sessions, config)
+        self.analytics = analytics if analytics is not None else AnalyticsStore(store._db)
 
     def routes(self) -> list[Route]:
         """Register the closed administrator API; only login is unauthenticated."""
@@ -70,10 +84,11 @@ class AdminAPI:
             (prefix + "/channels/{channel_id}/rotate", self.rotate, ["POST"]),
             (prefix + "/channels/{channel_id}/revoke", self.revoke, ["POST"]),
             (prefix + "/usage", self.usage, ["GET"]),
+            (prefix + "/analytics", self.analytics_report, ["GET"]),
             ("/api/audit", self.audit, ["GET"]),
         ]
-        return [Route("/api/login", self.login, methods=["POST"])] + [
-            Route(path, admin_endpoint(self.sessions, handler), methods=methods)
+        return [Route("/api/login", self.login, methods=["POST"]), *self.user_api.routes()] + [
+            Route(path, admin_endpoint(self.sessions, handler, self.access.authorize), methods=methods)
             for path, handler, methods in definitions
         ]
 
@@ -82,11 +97,7 @@ class AdminAPI:
         if not self.logins.accept():
             return failure("rate_limit", 429)
         data = await read_object(request, 4096)
-        fields(data, {"token"})
-        token = data["token"]
-        if not isinstance(token, str) or len(token) > 256:
-            return failure("unauthorized", 401)
-        session = self.sessions.login(token)
+        session = await self._login(data)
         if session is None:
             return failure("unauthorized", 401)
         self.sessions.logout(request.cookies.get(COOKIE_NAME, ""))
@@ -102,6 +113,22 @@ class AdminAPI:
             path="/api",
         )
         return response
+
+    async def _login(self, data: dict[str, Any]) -> tuple[str, str] | None:
+        """Keep bootstrap recovery separate from username/password authentication."""
+        if set(data) == {"token"}:
+            token = data["token"]
+            return self.sessions.login(token) if isinstance(token, str) and len(token) <= 256 else None
+        fields(data, {"username", "password"})
+        username, password = data["username"], data["password"]
+        if not isinstance(username, str) or not isinstance(password, str) or len(username) > 128 or len(password) > 128:
+            return None
+        user = await self.users.authenticate(username, password)
+        return (
+            self.sessions.login_user(user.id, user.revision, platform=user.role == "platform_admin")
+            if user is not None
+            else None
+        )
 
     async def session(self, request: Request) -> Response:
         """Recover CSRF state after reload without exposing the HttpOnly session cookie."""
@@ -129,20 +156,26 @@ class AdminAPI:
     async def tenants(self, request: Request) -> Response:
         """List bounded tenant metadata or create a server-owned tenant identity."""
         if request.method == "GET":
-            items = await self.store.list_tenants()
+            items = await self.access.tenants(request)
             return JSONResponse({"items": [item.model_dump() for item in items]})
+        if not platform_admin(request):
+            return failure("forbidden", 403)
         data = await read_object(request, 4096)
         fields(data, {"name"})
         return JSONResponse((await self.store.create_tenant(_string(data["name"]))).model_dump(), status_code=201)
 
     async def tenant(self, request: Request) -> Response:
         """Disable tenant authentication and revoke all active channel runtimes."""
+        if not platform_admin(request):
+            return failure("forbidden", 403)
         data = await read_object(request, 4096)
         fields(data, {"enabled"})
         if type(data["enabled"]) is not bool:
             raise InputValidationError("Invalid enabled state")
         tenant_id = request.path_params["tenant_id"]
         item = await self.store.set_tenant_enabled(tenant_id, data["enabled"])
+        for user in await self.users.list_users(tenant_id=tenant_id):
+            self.sessions.revoke_user(user.id, before_revision=user.revision)
         for channel in await self.store.list_channels(tenant_id):
             await self.runtimes.invalidate(channel.id, before_revision=channel.revision)
         return JSONResponse(item.model_dump())
@@ -239,10 +272,28 @@ class AdminAPI:
             {"items": [{**item.model_dump(exclude={"latency_ms"}), "total_ms": item.latency_ms} for item in items]}
         )
 
+    async def analytics_report(self, request: Request) -> Response:
+        """Report scoped recorded measurements; never infer actual model-token usage or billing."""
+        query = request.query_params
+        if set(query) - {"days", "channel_id"} or any(len(query.getlist(key)) != 1 for key in query):
+            raise InputValidationError("Invalid analytics filters")
+        raw_days = query.get("days", "7")
+        if not raw_days.isascii() or not raw_days.isdigit() or len(raw_days) > 2:
+            raise InputValidationError("Invalid analytics window")
+        report = await self.analytics.get_report(
+            request.path_params["tenant_id"],
+            days=int(raw_days),
+            channel_id=query.get("channel_id"),
+        )
+        return JSONResponse(report)
+
     async def audit(self, request: Request) -> Response:
         """Merge a bounded view of recent static administrator events across tenants."""
-        events = []
-        for tenant in await self.store.list_tenants():
-            events.extend(await self.store.list_audit(tenant.id, limit=10))
-        events.sort(key=lambda item: item.created_at, reverse=True)
-        return JSONResponse({"items": [item.model_dump() for item in events[:100]]})
+        events: list[dict[str, Any]] = []
+        for tenant in await self.access.tenants(request):
+            events.extend(item.model_dump() for item in await self.store.list_audit(tenant.id, limit=10))
+        user = account(request)
+        tenant_id = user.tenant_id if user is not None else None
+        events.extend(item.model_dump() for item in await self.users.list_audit(tenant_id=tenant_id))
+        events.sort(key=lambda item: item["created_at"], reverse=True)
+        return JSONResponse({"items": events[:100]})

@@ -13,6 +13,8 @@ from psycopg.rows import dict_row
 from gryphon.errors import CacheError, SaaSStoreError, SaaSValidationError
 from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.runtime.recovery_lease import RecoveryLease
+from gryphon.saas_analytics_schema import ANALYTICS_SCHEMA
+from gryphon.saas_passwords import PasswordHasher
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -43,6 +45,19 @@ SCHEMA = (
     "CREATE TABLE IF NOT EXISTS saas_audit (id TEXT PRIMARY KEY, "
     "tenant_id TEXT NOT NULL REFERENCES saas_tenants(id), created_at DOUBLE PRECISION NOT NULL, "
     "payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS saas_users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, "
+    "name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('platform_admin','tenant_user')), "
+    "tenant_id TEXT REFERENCES saas_tenants(id), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), "
+    "revision BIGINT NOT NULL CHECK(revision >= 1), created_at DOUBLE PRECISION NOT NULL, "
+    "password_hash TEXT NOT NULL, CHECK((role='tenant_user' AND tenant_id IS NOT NULL) OR "
+    "(role='platform_admin' AND tenant_id IS NULL)))",
+    "CREATE INDEX IF NOT EXISTS saas_users_tenant ON saas_users(tenant_id)",
+    "CREATE TABLE IF NOT EXISTS saas_user_audit (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, "
+    "subject_id TEXT NOT NULL REFERENCES saas_users(id), tenant_id TEXT REFERENCES saas_tenants(id), "
+    "event TEXT NOT NULL CHECK(event IN ('user_created','user_updated','user_disabled','user_enabled',"
+    "'password_reset','password_changed')), created_at DOUBLE PRECISION NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS saas_user_audit_tenant ON saas_user_audit(tenant_id,created_at)",
+    *ANALYTICS_SCHEMA,
 )
 
 
@@ -57,6 +72,7 @@ class SaaSDatabase:
         self._lock = asyncio.Lock()
         self._lease: RecoveryLease | None = None
         self._host_lease = False
+        self.password_hasher = PasswordHasher()
 
     async def initialize(self) -> None:
         """Open storage and atomically install schema, closing on initialization failure."""

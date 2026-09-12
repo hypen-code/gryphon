@@ -138,6 +138,7 @@ class SaaSStore(SaaSRecords):
                     "UPDATE saas_channels SET payload=? WHERE tenant_id=? AND id=?",
                     (channel.model_dump_json(), tenant_id, channel.id),
                 )
+            await self._db.execute("UPDATE saas_users SET revision=revision+1 WHERE tenant_id=?", (tenant_id,))
             await self._audit(tenant_id, "tenant_enabled" if enabled else "tenant_disabled")
             return item
 

@@ -6,6 +6,11 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from gryphon.models.analytics import RunMetrics as RunMetrics
+from gryphon.models.users import UserAccount as UserAccount
+from gryphon.models.users import UserAudit as UserAudit
+from gryphon.models.users import UserRole as UserRole
+
 # ---------------------------------------------------------------------------
 # Swagger / OpenAPI models (swagger.py namespace)
 # ---------------------------------------------------------------------------

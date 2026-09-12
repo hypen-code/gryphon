@@ -3,8 +3,14 @@
 ## Supported code line and reporting
 
 Security work targets the **Gryphon 2.0.x** code line. Older versions do not
-receive backports. Version 2.0.0 is installed from the repository checkout; this
-policy does not imply a published PyPI distribution or an external security audit.
+receive backports. Install from a checkout or a locally built wheel until an
+actual PyPI release is verified; this policy implies neither publication nor an
+external security audit. The GitHub release workflow uses a separate protected
+`pypi` environment job and PyPI Trusted Publishing (OIDC), not committed API
+tokens. Maintainers must configure the publisher, environment reviewers and tag
+protections; see [CONTRIBUTING.md](CONTRIBUTING.md). Publishing is gated on version
+agreement, full quality checks with 90% minimum coverage, and installed-wheel
+MCP smoke tests. A green workflow is not an independent security assessment.
 
 **Do not disclose vulnerabilities in public GitHub issues.** Submit a private
 [security advisory](https://github.com/hypen-code/gryphon/security/advisories/new).
@@ -153,10 +159,14 @@ Stdio derives private source-scoped paths below an optional absolute
 `GRYPHON_STATE_DIR`, or the XDG/home state directory, without package writes.
 Protect explicit storage overrides and stop competing processes using a ledger.
 
-Hosted `/api/login` exchanges the operator's bootstrap token for a bounded,
-in-memory administrator session. Cookies are Secure, HttpOnly, SameSite=Strict;
-mutations require the session-bound CSRF token. Sessions expire and are lost
-on restart. Canonical Host and browser Origin checks, CSP, no-store responses,
+Hosted `/api/login` exchanges either the recovery bootstrap token or a named
+user's username/password for a bounded in-memory session. Cookies are Secure,
+HttpOnly, SameSite=Strict; mutations require the session-bound CSRF token.
+Sessions expire and are lost on restart. Each named account has at most four
+sessions; tenant logins leave one platform slot free when the total limit exceeds
+one. Account changes proactively discard older sessions while retaining any
+concurrently authenticated newer revision. Canonical Host and browser Origin checks,
+CSP, no-store responses,
 request-size/deadline/concurrency limits, and bounded login/request rate limits
 complement authentication; they are not comprehensive public-service DDoS defense.
 Plain HTTP requires **both** a loopback canonical origin and explicit
@@ -169,8 +179,31 @@ database and verifies tenant/channel status. Keys are shown once when generated,
 stored only as hashes, and cannot access the administrator API. Rotate lost keys;
 revocation, tenant disable, and policy revision invalidate runtime authority.
 Multiple clients with the same channel key share that channel's ownership.
-Admin sessions can manage all tenants; there are no tenant-user login, invitation,
-SSO, or scoped administrator roles. Keep the admin credential out of MCP clients.
+The bootstrap operator and named **`platform_admin`** accounts can manage all
+tenants. Named **`tenant_user`** accounts are immutably bound to exactly one tenant
+and require both account and tenant to be enabled. Server-side checks restrict
+specs, channels, keys, usage, analytics and audit to that tenant, independent of UI visibility.
+Tenant users cannot create tenants, list/create/manage users, change their role
+or membership, or access foreign-tenant resources. Only platform administrators
+can create accounts, edit display names, change status or reset another password.
+There is no self-signup, invitation flow, SSO or custom/multi-tenant account role.
+
+Passwords are salted **PBKDF2-HMAC-SHA256 with 600,000 iterations** and fresh
+32-byte cryptographic salts; password/hash material is not returned in API
+profiles or audits. Passwords must be 12–128 characters, at most 512 UTF-8 bytes.
+Hashing runs off the event loop with bounded admission and cancellation-safe
+cleanup. Rejected/unknown identities still perform fixed-cost hash verification.
+Named users can change their own password only with their current password.
+Account profile/status changes and password reset/change advance the revision;
+every authenticated API request rechecks revision, account status and tenant
+status. Tenant status changes advance bound users' revisions too. Old cookies
+remain invalid after re-enable; self-service password change signs the user out.
+Bootstrap-token recovery remains independent and cannot be reset in the user UI.
+
+**User disable/reset does not revoke separately issued channel keys.** Offboarding
+must also rotate/revoke exposed shared keys. A browser/platform login grants no
+MCP access without a valid channel key; channel keys grant no browser API authority.
+Keep bootstrap credentials, passwords and session cookies out of MCP clients.
 
 Uploaded JSON/YAML versions are immutable and tenant-bound. External references,
 environment interpolation, and caller-supplied host paths/auth configuration are
@@ -186,13 +219,77 @@ existing non-private or foreign-owned channel directories are rejected.
 Docker channel settings can only narrow the approved preinstalled import list;
 restricted mode permits no imports. No arbitrary pip installation is supported.
 
-Exactly **one hosted worker per database** is enforced by an exclusive lease.
+Exactly **one hosted worker per database** is enforced by an automatic exclusive
+lease; no installer is needed. PostgreSQL uses a **session-level advisory lock**,
+requiring a direct connection or session pooling, never transaction pooling.
+SQLite and local run ledgers use POSIX locks. Stop the existing worker before
+starting another; **never delete `.lock` files** to release a live process or
+repair live jobs. The OS/connection lifecycle releases ownership on shutdown.
+For native SQLite, create a dedicated private parent directory before startup;
+SQLite cannot create its parent and `umask 077` does not fix existing permissions.
+Normal startup adds account/audit and analytics tables to control databases without
+replacing tenants, uploads, channels or keys. Stop/back up before upgrading;
+verify upgrades only with disposable test databases, never operator stores.
+Retain the bootstrap admin token across restarts in a password manager or private
+operator environment; show it only in a private terminal, never shared logs/chat.
 PostgreSQL holds tenant/channel metadata, immutable specs, hashed keys, aggregate
-usage, and audit events. Recipe source, run receipts, and artifacts remain in
+usage/analytics and audit events. Recipe source, run receipts, and artifacts remain in
 private per-channel local storage, not PostgreSQL. Both stores may contain
 sensitive information; hashed keys do not imply encryption at rest. Do not scale
 replicas or replace the local volume with an unreviewed network filesystem.
 `/health` checks database readiness only—not all channels, TLS, or API reachability.
+
+### Tenant analytics and activity privacy
+
+`GET /api/tenants/{tenant_id}/analytics` uses the existing browser-session and
+revision/status checks. Platform administrators can select tenants; tenant users
+are restricted server-side to their one enabled tenant. Optional `channel_id`
+requires exact tenant membership even for empty windows. Channel bearer keys
+cannot read reports. JSON downloads contain methodology and explicit
+`window.tenant_id` / `window.channel_id` (null means all channels); protect them
+as tenant activity metadata, not anonymous public statistics.
+
+Analytics persist numeric counts, byte sizes, timings and fixed tool/status/error/
+origin/sandbox dimensions, not source, inputs, result bodies or credentials.
+Tenant/channel identifiers and first-observation metadata remain scoped control
+metadata; run/request identifiers become SHA-256 deduplication digests. Reports
+also include existing channel names. Hashing does not make activity anonymous:
+size, timing, reuse and volume can reveal workload patterns. Normal execution
+stores still contain source/results under their separate retention policies.
+The traffic observer temporarily buffers a bounded response for structured-payload
+measurement, then clears it; it does not persist those contents in analytics.
+Measurement/observer failures log static events, not payloads or exception text.
+Response bytes measure SDK-produced bodies, not proven client reception or model
+consumption. For the fixed 12 allowlisted `tools/call` names, request metrics and
+legacy usage each attempt persistence before the final ASGI body handoff, once per
+request; early SDK termination triggers an incomplete fallback observation.
+Each writer has a two-second timeout; failures remain static and nonfatal, not
+an unbounded persistence wait or a delivery guarantee. Response-production timing
+excludes its own observation persistence; it is not client end-to-end latency.
+Allowlisted names can count as errors even when unsupported by the current SDK.
+
+Daily aggregates use fixed, bounded JSON and a 90-UTC-day reporting/retention
+window, pruned on recording. Report building admits one active build and one
+queued request per shared analytics store, with bounded waiting; cancellation
+drains an in-progress off-loop build before releasing its slot. These bounds are
+not a general DDoS guarantee. The **100,000-receipt cap is per tenant**, so another
+tenant's activity cannot evict still-in-retention receipts. A tenant's own volume
+can shorten its deduplication window; deduplication applies only while receipts
+remain. Total receipt storage is bounded by that cap times the hosted tenant quota
+(currently 100 tenants), not a single shared 100,000-receipt pool.
+First-observation metadata is retained; old lifetime usage is not backfilled.
+The terminal observer runs after receipt persistence, including background work;
+crashes/timeouts/observer failures can miss observations. Retained duplicate
+idempotency requests do not start another run, but this is **not** a complete
+billing audit or exactly-once event/effect guarantee. Incomplete request traffic
+is explicit; requests minus runs must never be treated as saved round trips.
+
+Only paired successful eligible runs compare accepted, validated canonical API
+JSON to full final JSON, including artifact content. This is not raw HTTP bytes,
+all model context, or a no-framework counterfactual. Signed reduction may be
+negative; no API baseline yields null/N/A. Heuristic `ceil(UTF-8 bytes / 4)` token
+equivalents do not observe model context, generation, reasoning or billing, which
+remain null/N/A. No dollar, CPU, elapsed-time or round-trip savings are guaranteed.
 
 ### 8. Optional Docker is offline computation only
 

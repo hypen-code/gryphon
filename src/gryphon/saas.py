@@ -13,6 +13,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from gryphon.saas_analytics import AnalyticsStore
 from gryphon.saas_api import AdminAPI
 from gryphon.saas_gateway import MCPGateway
 from gryphon.saas_http import HTTPBoundary
@@ -33,8 +34,9 @@ _ASSETS = Path(__file__).parent
 def create_app(config: SaaSConfig, base: GryphonConfig) -> Starlette:
     """Compose explicit hosted dependencies; initialization happens only inside lifespan."""
     store = SaaSStore(config.database_url.get_secret_value(), max_tenants=100, max_spec_bytes=config.max_spec_bytes)
-    runtimes = ChannelRuntimeManager(base, config.state_dir, config.max_runtimes)
-    admin = AdminAPI(config, base, store, runtimes)
+    analytics = AnalyticsStore(store._db)
+    runtimes = ChannelRuntimeManager(base, config.state_dir, config.max_runtimes, analytics=analytics)
+    admin = AdminAPI(config, base, store, runtimes, analytics=analytics)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -62,12 +64,13 @@ def create_app(config: SaaSConfig, base: GryphonConfig) -> Starlette:
             Route("/health", health),
             *admin.routes(),
             Mount("/static", StaticFiles(directory=_ASSETS / "static")),
-            Mount("/mcp", MCPGateway(store, runtimes)),
+            Mount("/mcp", MCPGateway(store, runtimes, analytics)),
         ],
         lifespan=lifespan,
         middleware=[Middleware(HTTPBoundary, config=config)],
     )
     app.state.store, app.state.runtimes, app.state.admin = store, runtimes, admin
+    app.state.analytics = analytics
     return app
 
 
