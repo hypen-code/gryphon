@@ -169,7 +169,7 @@ def test_admin_script_upload_limits_and_blob_cleanup() -> None:
     assert "file.size > state.settings.max_spec_bytes" in script
     assert "await file.text()" in script
     assert "new TextEncoder().encode(content).length > state.settings.max_spec_bytes" in script
-    assert '"POST", { name, content }' in script
+    assert '"POST", { name, content, read_only_filter }' in script
     assert 'new Blob([state.source.text], { type: "application/json" })' in script
     assert "URL.revokeObjectURL(url)" in script
 
@@ -308,10 +308,54 @@ def test_admin_specification_source_modes_and_refresh_confirmation() -> None:
     ):
         assert text in template
     script = _SPECIFICATIONS.read_text()
-    assert '"POST", { name, url, kind }' in script
-    assert 'const payload = { update_channels: $("spec-update-channels").checked }' in script
+    assert '"POST", { name, url, kind, read_only_filter }' in script
+    assert 'const payload = { update_channels: $("spec-update-channels").checked, read_only_filter:' in script
     assert "fetch(" not in script
     for field in ("available_operations", "filtered_operations", "unsupported_operations", "total_operations"):
         assert field in script
     assert "snapshot.tenant !== state.tenant" in script and "snapshot.epoch !== state.epoch" in script
     assert "const content = await file.text(); current(snapshot)" in script
+
+
+def test_admin_discovery_checkboxes_defaults_and_permission_explanation() -> None:
+    """Visibility defaults do not imply execution approval or expanded UCP support."""
+    fields = {attrs.get("id"): attrs for _, attrs in _document().elements if "id" in attrs}
+    for identifier in ("spec-read-only-filter", "spec-refresh-read-only-filter"):
+        assert fields[identifier]["type"] == "checkbox"
+        assert "checked" in fields[identifier]
+    assert fields["channel-function-summaries"]["type"] == "checkbox"
+    assert "checked" not in fields["channel-function-summaries"]
+    template = _TEMPLATE.read_text()
+    for text in (
+        "Included in discovery does not mean callable",
+        "include all supported OpenAPI operations",
+        "without granting execution permission",
+        "UCP remains the adapter-supported REST GET subset",
+        "Include function names and descriptions in list_servers",
+        "follow bounded continuation",
+    ):
+        assert text in template
+    script = _SPECIFICATIONS.read_text()
+    assert 'snapshot.filterOnly ? "filter" : "refresh"' in script
+    assert "if (!snapshot.filterOnly && !remote(spec))" in script
+    assert "input.checked = spec.read_only_filter ?? true" in script
+    assert "input.disabled = superseded" in script
+    assert 'include_function_summaries: $("channel-function-summaries").checked' in _SCRIPT.read_text()
+
+
+def test_admin_notification_dismiss_is_accessible_and_independent_of_busy() -> None:
+    """A named SVG close control never goes through the busy mutation helper."""
+    fields = {attrs.get("id"): attrs for _, attrs in _document().elements if "id" in attrs}
+    assert fields["dismiss-notice"]["aria-label"] == "Dismiss notification"
+    assert fields["dismiss-notice"]["type"] == "button"
+    assert "data-close" not in fields["dismiss-notice"]
+    assert fields["notice-text"]["role"] == "status"
+    assert fields["notice-text"]["aria-live"] == "polite"
+    assert fields["notice-text"]["aria-atomic"] == "true"
+    notice = _TEMPLATE.read_text().split('id="dismiss-notice"')[1].split("</button>")[0]
+    assert "<svg " in notice and 'aria-hidden="true"' in notice and 'focusable="false"' in notice
+    script = _SCRIPT.read_text()
+    assert '$("dismiss-notice").addEventListener("click", dismissNotice)' in script
+    assert "const NOTICE_DURATION_MS = 10000" in script
+    assert "if (revision === noticeRevision) dismissNotice()" in script
+    assert "clearTimeout(noticeTimer)" in script

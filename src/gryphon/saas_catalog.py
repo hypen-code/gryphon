@@ -91,6 +91,7 @@ def channel_config(base: GryphonConfig, channel: Channel, state_dir: Path) -> Gr
         "http_auth_token": None,
         "compile_on_startup": False,
         "enable_additional_tools": False,
+        "include_function_summaries": channel.include_function_summaries,
         "allow_writes": False,
         "allowed_write_operations": [],
         "llm_api_key": "",
@@ -141,7 +142,7 @@ def _stable_metadata(output: Path, config: GryphonConfig, revision: int, specs: 
         name = module_name(spec.name)
         path = output / name / "manifest.json"
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        source = SwaggerSource(name=name, swagger_url=f"uploaded:{spec.id}", is_read_only=True)
+        source = SwaggerSource(name=name, swagger_url=f"uploaded:{spec.id}", is_read_only=spec.read_only_filter)
         manifest["template_hash"] = compiler._source_hash(source)
         manifest["compiled_at"] = f"channel-revision:{revision}"
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -158,5 +159,5 @@ def _write_sources(root: Path, specs: Sequence[SaaSSpec], max_bytes: int) -> lis
         names.add(name)
         path = root / f"source-{index}.json"
         path.write_text(validate_uploaded_document(spec.document, max_bytes), encoding="utf-8")
-        sources.append({"name": name, "swagger_url": str(path), "is_read_only": True})
+        sources.append({"name": name, "swagger_url": str(path), "is_read_only": spec.read_only_filter})
     return sources

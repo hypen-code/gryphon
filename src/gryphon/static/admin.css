@@ -40,6 +40,9 @@ legend { padding: 0; margin-bottom: 7px; }
 .skip-link:focus { top: 12px; }
 .notice { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: min(600px, calc(100% - 32px)); width: max-content; z-index: 20; background: var(--navy); color: white; border: 1px solid #62756c; box-shadow: 0 6px 28px #14212c33; padding: 14px 22px; border-radius: 9px; }
 .notice.error { background: #802b2b; border-color: #ad6565; }
+.notice { display: flex; align-items: center; gap: 14px; }
+#notice-text { min-width: 0; overflow-wrap: anywhere; }
+.notice-close { display: grid; place-items: center; flex-shrink: 0; min-width: 44px; min-height: 44px; padding: 8px; color: inherit; background: transparent; border-color: currentColor; }
 .brand { font-size: 25px; letter-spacing: -.8px; color: white; font-weight: 600; display: flex; align-items: center; gap: 12px; }
 .brand-mark { width: 34px; height: 38px; display: inline-grid; place-items: center; background: var(--gold); color: var(--navy); font-size: 23px; font-family: Georgia, serif; font-weight: bold; clip-path: polygon(0 0, 100% 0, 100% 72%, 50% 100%, 0 72%); }
 .brand-label { font-size: 9px; letter-spacing: 1.5px; font-weight: 400; color: #bdc9c9; margin-left: 12px; }

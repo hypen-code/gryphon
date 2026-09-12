@@ -58,7 +58,12 @@ async def refresh_spec(
         if any(SaaSSpec.model_validate_json(str(row["payload"])).parent_id == spec_id for row in rows):
             raise ConflictError("Refresh the latest specification version")
         item = new_spec(tenant_id, previous.name, imported.document, store._max_spec_bytes, imported)
-        if (item.sha256, item.diagnostics, item.warnings) == (previous.sha256, previous.diagnostics, previous.warnings):
+        if (item.sha256, item.diagnostics, item.warnings, item.read_only_filter) == (
+            previous.sha256,
+            previous.diagnostics,
+            previous.warnings,
+            previous.read_only_filter,
+        ):
             return previous, []
         item.parent_id = previous.id
         await insert_spec(store, item)

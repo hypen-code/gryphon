@@ -55,7 +55,7 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/compiler/ucp.py`, `ucp_profile.py`, `ucp_refs.py`, `ucp_responses.py` | Published UCP shape/GET mapping, bounded approved refs, explicit response omissions |
 | `src/gryphon/models/specifications.py`, `operation_policy.py` | Provenance/diagnostics and exact operator read-only POST attestations |
 | `src/gryphon/security/form_encoding.py`, `static/specifications.js` | Closed scalar form wire encoding; browser import/refresh state |
-| `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated runtimes, read-only uploaded catalogs |
+| `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated read-only execution, filter-controlled catalog visibility |
 | `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
 | `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
 | `src/gryphon/config.py` | Validated operator settings |
@@ -103,8 +103,9 @@ The ten core tools are `list_servers`, `search_functions`, `get_functions`,
 
 - Keep initialization instructions brief. Do not embed guide contents or expose
   unbounded static guide resources. Guides and API data cannot grant authority.
-- Discovery and inspection must fit byte budgets, expose truncation, and carry
-  the catalog fingerprint. Inspect 1–5 functions per `get_functions` request.
+- Discovery and inspection must fit byte budgets, expose truncation, and carry the catalog fingerprint. Inspect 1–5 functions per `get_functions` request.
+- Channel `include_function_summaries` defaults false, accepts optional strict booleans on create/PATCH, preserves omitted PATCH values, and overrides operator base config. It is never MCP caller-selected. Enabled `list_servers` includes all names/descriptions when they fit; larger catalogs need reachable bounded pages, not a fixed sample. Pass `next_cursor`/`next_function_cursor` as `cursor`/`function_cursor` together; compact mode requires function cursor zero. Mark text truncation and restart on fingerprint drift; `limit` counts servers.
+- UI notices must have close and 10-second auto-dismiss with timer reset on replacement and stale-timer protection. Banner dismissal must preserve inline dialog errors; quiet sign-out clears notices/timers.
 - Return native structured MCP results. Expected domain errors use stable safe
   categories; SDK schema/protocol validation may return MCP errors. Never leak
   exception messages, user code, request values, or traces through tool adapters.
@@ -197,7 +198,7 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
    static auth maps to `operator`; stdio uses trusted `local`. Public deployment
    needs TLS termination and additional operator controls. Hosted channel identity
    must come from database-verified keys/status, never the URL alone or client claims.
-7. Hosted catalogs are read-only, with no source-auth or host credential/header inheritance; upstream support is public APIs only. Do not invent a tenant secret manager. Versions are immutable and tenant-bound; deny ordinary OpenAPI external references, environment interpolation and caller-selected host paths. Only the bounded UCP adapter may resolve approved schema refs.
+7. Hosted **execution**, not all catalog visibility, is read-only: channel config must force `allow_writes=False` and `allowed_write_operations=[]`. `SpecImport`/`SaaSSpec.read_only_filter` defaults true and controls compiler `source.is_read_only`; false includes all supported methods without approving writes or read-only POST execution. Exact effective-destination operator POST permits remain necessary. No source-auth or host credential/header inheritance; public upstream APIs only, no tenant secret manager. Versions stay immutable and tenant-bound; deny ordinary OpenAPI external refs, environment interpolation and caller-selected host paths. Only bounded UCP may resolve approved schema refs.
 8. Hosted Docker requires explicit operator enablement and manually provisioned
    daemon/image/runsc. Channel imports only narrow preinstalled approved libraries;
    no arbitrary pip installs. Shipped Compose profiles must not mount a Docker socket.
@@ -275,13 +276,14 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 
 ### Specification imports and exact read-only POST policy
 
-- Keep File `{name,content}` and URL `{name,url,kind:"openapi"|"ucp"}` imports under scoped `/api/tenants/{tenant_id}/specs`; URL maximum 2048 characters, no query/userinfo/fragment. UCP HTTPS roots become `/.well-known/ucp`. Use only DNS-pinned bounded clients: no host auth, redirects, env interpolation/proxies. Save normalized relative OpenAPI servers; ordinary external refs stay denied.
-- Refresh URL `{}` or file `{content}` creates an immutable successor with `parent_id`; optional strict boolean `update_channels` defaults false in API, checked in UI. Atomically replace only exact parent bindings/revisions when opted in and drain invalidated runtimes. Unchanged document/diagnostics/warnings returns 200 without revisions, changed 201, superseded 409. Preserve old payload defaults (file) without a schema migration and recheck authorization after fetching.
-- Expose before/after read-policy counts and warnings; unsupported callable schema semantics must reject import, not silent partial success. One active import, no queue, 25-second deadline, cancellation-owned cleanup. UCP counts refer to its adapted document, with exclusions separately warned.
+- Keep File `{name,content}` and URL `{name,url,kind:"openapi"|"ucp"}` imports under scoped `/api/tenants/{tenant_id}/specs`; optional strict boolean `read_only_filter` defaults true. URL maximum 2048 characters, no query/userinfo/fragment; UCP HTTPS roots become `/.well-known/ucp`. DNS-pinned bounded clients only: no host auth, redirects, env interpolation/proxies. Save normalized relative OpenAPI servers; ordinary external refs stay denied.
+- Refresh URL `{}` or file `{content}` accepts optional strict boolean `read_only_filter`, defaulting to the previous choice. `/specs/{spec_id}/filter` requires `{read_only_filter}` and revalidates saved bytes without upload/fetch, retaining provenance. Both accept optional strict boolean `update_channels` (API false, UI checked); row filter changes require confirmation, with import/refresh checkboxes too.
+- Changed document/diagnostics/warnings/filter creates an immutable successor (`parent_id`, 201); filter-only changes count even for identical GET-only documents and must change catalog/policy identity, not necessarily document SHA-256. Opted-in exact parent bindings/revisions commit atomically and runtimes drain; unchanged returns 200 without revisions, superseded 409. Keep old versions, legacy defaults (file/filter true), no schema migration, and post-validation authorization rechecks.
+- Counts mean total, discovery-available and filtered, never execution approval; unsupported callable schemas reject import, not silent partial support. One active import, no queue, 25-second deadline, cancellation-owned cleanup. UCP counts describe adapted GETs; filter-off adds no UCP methods/capabilities.
 - Keep UCP bounded to published 2026-01-11/01-23/04-08/08-25 shapes and matching advertised shopping REST GET IDs from schema paths: checkout; April/August cart/order too. Canonical April/August contracts compile; required auth/signing (canonical January) rejects. UCP-Agent/Request-Id stay caller-supplied; no generated identity/negotiation. Omitted unsupported response schemas require explicit warnings, never claimed validation.
 - No UCP POST shopping/payments/checkout updates, non-REST or extension composition; no arbitrary callbacks/capability fetches. Save compiled OpenAPI, not raw profile; refresh refetches profile/needed schemas. Max 32 schema documents, min(HTTP timeout,30s), aggregate raw profile/schema budget min(hosted spec limit, configured max spec bytes,5MiB). Refs stay on schema origin; origin must be profile origin, ucp.dev or operator-approved. Preserve structural/expansion bounds.
 - `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults empty; only operator JSON tuples of canonical server/effective base/literal path/POST attest reads. No templates/globs or uploaded hints. Check parser and broker, include permits in compilation/replay identity, and match CDN/operation overrides. These intentionally apply deployment-wide, including any matching hosted tenant: not per-tenant authorization/credentials. Never change real security config or automatically apply permits.
-- Original CSE evidence: 1 GET + 25 POST (23 URL-encoded + 2 scalar multipart); temporary 25-permit compilation exposed all 26, not verified live semantics. Never call live APIs for proof or enable actual env permits. A UI source `cse` means namespace `cse`, not fixture `cse_api`; inspect canonical names using MCP. Both forms use closed scalar/scalar-array `json_body`; nested/null/binary/files reject, multipart never reads host files/emits caller filenames (1024 parts/2MiB).
+- Original CSE evidence: 1 GET + 25 POST (23 URL-encoded + 2 scalar multipart); document-only parsing with `source.is_read_only=false` exposed all 26 without permits, not verified live semantics or execution approval. Never call live APIs, modify operator stores/security config or enable real env permits for proof. Hosted POST read execution still needs exact operator attestation. UI `cse` means namespace `cse`, not fixture `cse_api`; inspect canonical MCP names. Forms use closed scalar/scalar-array `json_body`; nested/null/binary/files reject, multipart never reads host files/emits caller filenames (1024 parts/2MiB).
 
 ## 6. Code quality
 
@@ -325,13 +327,14 @@ uv run --frozen --extra saas pytest --cov-fail-under=90
 uv run --frozen --extra saas pre-commit install
 uv run --frozen --extra saas pre-commit run --all-files
 node --test tests/unit/specifications_ui.test.js
+node --check src/gryphon/static/admin.js
 node --check src/gryphon/static/specifications.js
 node --check tests/integration/browser_ui.cjs
 # Opt-in: separately provision Node, Puppeteer and its working Chromium (no sandbox downgrade).
 uv run --frozen --extra saas python tests/integration/browser_ui_fixture.py
 ```
-The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It verifies mobile/desktop icons/dialogs, all import modes, refresh choices, bindings, warnings and retained snapshot downloads. Puppeteer is an optional external test prerequisite, not a Python runtime dependency.
-Targeted suites: `tests/unit/test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_ucp*.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`; integration `tests/integration/test_saas_spec_refresh.py` and `test_saas_ucp_http.py`. Run selected files with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—the full gates.
+The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It covers mobile/desktop icons/dialogs, import/refresh/filter choices, no-fetch saved filter changes, exact bindings, warnings, retained downloads, channel summary create/edit and notification close/expiry. Puppeteer is an optional external prerequisite, not a Python runtime dependency. The Node suite also verifies notice expiry, manual close while busy, replacement/stale timers, inline error retention and quiet sign-out cleanup.
+Targeted suites: `tests/unit/test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_ucp*.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`, `test_discovery_summaries.py`; integration `tests/integration/test_saas_spec_refresh.py`, `test_saas_ucp_http.py`, `test_saas_spec_filter.py`, `test_saas_discovery_summaries.py`. Run selected files with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—the full gates.
 
 Local pre-commit hooks invoke locked `uv run --frozen` commands; mypy and pytest
 include `--extra saas`. Mypy covers `src` and `tests`, and `pytest-coverage`

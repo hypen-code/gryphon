@@ -83,6 +83,7 @@ class AdminAPI:
             (prefix + "/specs", self.specs, ["GET", "POST"]),
             (prefix + "/specs/{spec_id}", self.spec, ["GET"]),
             (prefix + "/specs/{spec_id}/refresh", self.refresh_spec, ["POST"]),
+            (prefix + "/specs/{spec_id}/filter", self.filter_spec, ["POST"]),
             (prefix + "/channels", self.channels, ["GET", "POST"]),
             (prefix + "/channels/{channel_id}", self.channel, ["PATCH"]),
             (prefix + "/channels/{channel_id}/rotate", self.rotate, ["POST"]),
@@ -191,12 +192,16 @@ class AdminAPI:
             items = await self.store.list_specs(tenant_id)
             return JSONResponse({"items": [item.model_dump(exclude={"document"}) for item in items]})
         data = await read_object(request, self.config.max_spec_bytes * 2)
-        fields(data, {"name", "url", "kind"} if "url" in data else {"name", "content"})
+        fields(data, {"name", "url", "kind"} if "url" in data else {"name", "content"}, {"read_only_filter"})
         name = _string(data["name"])
         if not (await self.store.get_tenant(tenant_id)).enabled:
             raise SaaSDisabledError("Tenant is disabled")
         imported = await self.importer.load(
-            module_name(name), content=data.get("content"), url=data.get("url"), kind=data.get("kind", "openapi")
+            module_name(name),
+            content=data.get("content"),
+            url=data.get("url"),
+            kind=data.get("kind", "openapi"),
+            read_only_filter=data.get("read_only_filter", True),
         )
         denied = await self.access.authorize(request)
         if denied is not None:
@@ -211,7 +216,7 @@ class AdminAPI:
         if not (await self.store.get_tenant(tenant_id)).enabled:
             raise SaaSDisabledError("Tenant is disabled")
         data = await read_object(request, self.config.max_spec_bytes * 2)
-        fields(data, {"content"} if previous.source_type == "file" else set(), {"update_channels"})
+        fields(data, {"content"} if previous.source_type == "file" else set(), {"update_channels", "read_only_filter"})
         update_channels = data.get("update_channels", False)
         if type(update_channels) is not bool:
             raise InputValidationError("Invalid binding update choice")
@@ -220,7 +225,26 @@ class AdminAPI:
             content=data.get("content"),
             url=previous.source_url,
             kind="ucp" if previous.source_type == "ucp_url" else "openapi",
+            read_only_filter=data.get("read_only_filter", previous.read_only_filter),
         )
+        denied = await self.access.authorize(request)
+        if denied is not None:
+            return denied
+        item = await finish_cleanup(self._publish_spec(tenant_id, spec_id, imported, update_channels))
+        return JSONResponse(item.model_dump(exclude={"document"}), status_code=200 if item.id == spec_id else 201)
+
+    async def filter_spec(self, request: Request) -> Response:
+        """Publish a different catalog selection from saved bytes, without granting execution authority."""
+        tenant_id, spec_id = request.path_params["tenant_id"], request.path_params["spec_id"]
+        previous = await self.store.get_spec(tenant_id, spec_id)
+        if not (await self.store.get_tenant(tenant_id)).enabled:
+            raise SaaSDisabledError("Tenant is disabled")
+        data = await read_object(request, 4096)
+        fields(data, {"read_only_filter"}, {"update_channels"})
+        update_channels = data.get("update_channels", False)
+        if type(data["read_only_filter"]) is not bool or type(update_channels) is not bool:
+            raise InputValidationError("Filter and binding selection must be booleans")
+        imported = await self.importer.refilter(previous, data["read_only_filter"])
         denied = await self.access.authorize(request)
         if denied is not None:
             return denied
@@ -245,7 +269,9 @@ class AdminAPI:
         """Validate narrowed import policy and same-tenant bindings before a transaction."""
         data = await read_object(request, 32768)
         required = {"name", "spec_ids", "sandbox_mode", "allowed_imports"}
-        fields(data, required | ({"enabled"} if update else set()))
+        fields(data, required | ({"enabled"} if update else set()), {"include_function_summaries"})
+        if "include_function_summaries" in data and type(data["include_function_summaries"]) is not bool:
+            raise InputValidationError("Function summary selection must be a boolean")
         data["name"], data["spec_ids"] = _string(data["name"]), _strings(data["spec_ids"])
         data["allowed_imports"] = _strings(data["allowed_imports"])
         mode = data["sandbox_mode"]

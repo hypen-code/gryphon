@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+from gryphon.compiler.catalog import module_name
 from gryphon.compiler.documents import DEFAULT_MAX_DOCUMENT_BYTES
 from gryphon.compiler.ucp import profile_to_openapi
 from gryphon.errors import CapacityError, CompileError, ExecutionError, InputValidationError
@@ -16,7 +17,7 @@ from gryphon.security.policies import validated_url
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
-    from gryphon.models import SpecImport
+    from gryphon.models import SaaSSpec, SpecImport
 
 
 def source_url(value: Any, *, ucp: bool = False) -> str:
@@ -39,8 +40,12 @@ class SpecImporter:
         self.config, self.limit = config, min(limit, config.max_spec_size_bytes)
         self._lock = asyncio.Lock()
 
-    async def load(self, name: str, *, content: Any = None, url: Any = None, kind: Any = "openapi") -> SpecImport:
+    async def load(
+        self, name: str, *, content: Any = None, url: Any = None, kind: Any = "openapi", read_only_filter: Any = True
+    ) -> SpecImport:
         """Validate a file or fetch a public document, never accepting a caller-selected host file."""
+        if type(read_only_filter) is not bool:
+            raise InputValidationError("Read-only filter must be a boolean")
         if not isinstance(kind, str) or kind not in {"openapi", "ucp"}:
             raise InputValidationError("Invalid specification kind")
         if self._lock.locked():
@@ -49,13 +54,24 @@ class SpecImporter:
             if url is None:
                 if not isinstance(content, str) or kind != "openapi":
                     raise InputValidationError("Invalid specification content")
-                return await inspect_upload(content, self.config, self.limit, name)
+                return await inspect_upload(content, self.config, self.limit, name, read_only_filter=read_only_filter)
             if content is not None or kind not in {"openapi", "ucp"}:
                 raise InputValidationError("Invalid specification source")
             location = source_url(url, ucp=kind == "ucp")
-            return await self._remote(name, location, kind)
+            return await self._remote(name, location, kind, read_only_filter)
 
-    async def _remote(self, name: str, location: str, kind: str) -> SpecImport:
+    async def refilter(self, previous: SaaSSpec, read_only_filter: Any) -> SpecImport:
+        """Revalidate saved bytes without refetching remote sources or altering provenance."""
+        content = await finish_cleanup(
+            asyncio.to_thread(json.dumps, previous.document, ensure_ascii=False, separators=(",", ":"))
+        )
+        imported = await self.load(module_name(previous.name), content=content, read_only_filter=read_only_filter)
+        imported.source_type, imported.source_url = previous.source_type, previous.source_url
+        if previous.source_type == "ucp_url":
+            imported.warnings = sorted(set(imported.warnings + previous.document["x-gryphon-ucp"]["warnings"]))
+        return imported
+
+    async def _remote(self, name: str, location: str, kind: str, read_only_filter: bool) -> SpecImport:
         """Fetch exactly the configured document through verified, bounded, DNS-pinned HTTP."""
         client = NetworkClient(self.config)
         try:
@@ -85,7 +101,9 @@ class SpecImporter:
             )
             warnings = document["x-gryphon-ucp"]["warnings"]
             content = json.dumps(document, ensure_ascii=False)
-        result = await inspect_upload(content, self.config, self.limit, name, origin=location)
+        result = await inspect_upload(
+            content, self.config, self.limit, name, origin=location, read_only_filter=read_only_filter
+        )
         result.source_url = location
         result.source_type = "ucp_url" if kind == "ucp" else "openapi_url"
         result.warnings = sorted(set(result.warnings + warnings))

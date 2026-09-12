@@ -21,6 +21,7 @@ from gryphon.runtime.context import (
     trusted_owner,
     validate_page,
 )
+from gryphon.runtime.discovery import list_servers_description, list_servers_page
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -61,23 +62,18 @@ class _Tools:
         kwargs["limit"] = min(kwargs.get("limit", self.config.discovery_limit), self.config.discovery_limit)
         return bounded_page(field, items, self.registry.fingerprint(), self.budget, **kwargs)
 
-    async def list_servers(self, cursor: int = 0, limit: int = 10) -> dict[str, Any]:
-        """Discover a compact page of servers, without dumping all function names.
+    async def list_servers(self, cursor: int = 0, limit: int = 10, function_cursor: int = 0) -> dict[str, Any]:
+        """Discover servers in the operator-configured compact or function-summary mode.
 
         Args:
-            cursor: Nonnegative position from the previous next_cursor.
-            limit: Requested summaries, 1–100; capped by configured discovery_limit.
+            cursor: Nonnegative server position from next_cursor.
+            limit: Requested servers, 1–100; capped by discovery_limit, not a function cap.
+            function_cursor: Position from next_function_cursor; zero in compact mode.
 
         Returns:
-            Server metadata, registry fingerprint, truncation, and next cursor.
+            Bounded metadata, fingerprint, truncation, and paired continuation positions.
         """
-        validate_page(cursor, limit)
-        servers = sorted(self.registry.list_servers(), key=lambda server: server.name)
-        items = [
-            {"name": server.name, "description": server.description, "function_count": len(server.functions)}
-            for server in servers[cursor : cursor + limit]
-        ]
-        return self._page("servers", items, cursor=cursor, total=len(servers), limit=limit)
+        return list_servers_page(self.registry, self.config, cursor, limit, function_cursor)
 
     async def search_functions(self, query: str, limit: int = 10) -> dict[str, Any]:
         """Search the compiled registry before requesting full function schemas.
@@ -353,17 +349,11 @@ def create_server(
     *,
     auth: TokenVerifier | None = None,
 ) -> FastMCP:
-    """Create the server without importing generated host code or initializing supplied objects.
+    """Create structured MCP tools without importing generated code or restarting supplied objects.
 
-    Args:
-        config: Validated settings; HTTP transport requires a configured bearer token.
-        registry: Preloaded CLI-owned registry, or None for lifespan-owned loading.
-        cache: Initialized CLI-owned cache, or None for lifespan-owned initialization/close.
-        executor: Started CLI-owned engine, or None for lifespan-owned startup/shutdown.
-        auth: Explicit trusted verifier for hosted ownership, overriding the static operator token.
-
-    Returns:
-        FastMCP server using SDK protocol negotiation and native structured tool results.
+    Supplied registry/cache/executor dependencies remain CLI-owned; missing ones are
+    initialized and closed by the lifespan. Validated config controls discovery and
+    execution; explicit trusted auth overrides the configured static operator token.
     """
     # Registry and cache ownership are tracked explicitly by ServerDependencies.
     # Pre-flight initialization uses these same instances, never duplicate stores.
@@ -390,9 +380,11 @@ def create_server(
     for name in names:
         # Group tool registration by side-effect and context-budget contract.
         budget = min(config.max_output_size_bytes, MAX_EXECUTION_BYTES) if name in _EXECUTION_TOOLS else tools.budget
-        mcp.tool(name=name, annotations={"readOnlyHint": name not in _STATEFUL_TOOLS})(
-            guard_tool(getattr(tools, name), budget)
-        )
+        mcp.tool(
+            name=name,
+            annotations={"readOnlyHint": name not in _STATEFUL_TOOLS},
+            description=list_servers_description(config) if name == "list_servers" else None,
+        )(guard_tool(getattr(tools, name), budget))
     # Register core tools as first-class FastMCP tools, never compiled host functions.
     # Each callable above is an async adapter around validated models or the execution broker.
     # Its explicit name becomes the MCP tool name; its docstring the description.

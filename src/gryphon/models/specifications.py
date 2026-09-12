@@ -20,6 +20,7 @@ class SpecImport(BaseModel):
     """A validated snapshot and provenance, not authority for remote execution."""
 
     document: dict[str, Any] = Field(default_factory=dict, repr=False)
+    read_only_filter: bool = Field(default=True, strict=True)
     source_type: Literal["file", "openapi_url", "ucp_url"] = "file"
     source_url: str | None = Field(default=None, max_length=2048)
     diagnostics: SpecDiagnostics | None = None

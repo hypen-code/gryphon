@@ -26,8 +26,19 @@ const tenantPath = (tail = "") => `/api/tenants/${segment(state.tenant)}${tail}`
 const channelPath = (channel, tail = "") => tenantPath(`/channels/${segment(channel.id)}${tail}`);
 const node = (tag, text = "", className = "") => { const item = document.createElement(tag); item.textContent = text; item.className = className; return item; };
 const successStatus = (status) => ["success", "succeeded", "ok", "completed"].includes(status);
+const NOTICE_DURATION_MS = 10000;
+let noticeTimer = null;
+let noticeRevision = 0;
+function dismissNotice() {
+  clearTimeout(noticeTimer); noticeTimer = null; noticeRevision += 1;
+  $("notice").hidden = true; $("notice-text").textContent = ""; $("notice").classList.remove("error");
+}
 function notify(message, error = false) {
-  $("notice").textContent = message; $("notice").classList.toggle("error", error); $("notice").hidden = !message;
+  dismissNotice();
+  if (!message) return;
+  $("notice-text").textContent = message; $("notice").classList.toggle("error", error); $("notice").hidden = false;
+  const revision = noticeRevision;
+  noticeTimer = setTimeout(() => { if (revision === noticeRevision) dismissNotice(); }, NOTICE_DURATION_MS);
   const target = document.querySelector("dialog[open] .dialog-message");
   if (target) { target.textContent = message; target.classList.toggle("error", error); }
 }
@@ -52,7 +63,7 @@ function signedOut() {
 function validationMessage(path) {
   if (path === "/api/password" || (path.startsWith("/api/users/") && path.endsWith("/password"))) return errors.invalid_password;
   if (path === "/api/users" || path.startsWith("/api/users/")) return "Check the username format, display name, 12–128 character password, and enabled assigned tenant.";
-  if (path.includes("/specs")) return "Check the specification document or direct public URL and operator network policy. POST read endpoints need exact operator read-only approvals; unsupported transports are not callable.";
+  if (path.includes("/specs")) return "Check the specification document or direct public URL and operator network policy. POST read endpoints need exact operator read-only approvals for execution, not unfiltered discovery; unsupported transports are not callable.";
   return errors.validation;
 }
 async function api(path, method = "GET", body, signal) {
@@ -151,6 +162,7 @@ function renderChannels() {
     const details = node("div", "", "channel-details");
     const bindings = channel.spec_ids.map((id) => state.specs.find((spec) => spec.id === id)?.name || id);
     details.append(detail("Sandbox", channel.sandbox_mode === "docker" ? "Docker · offline" : "Restricted Python"), detail("Specifications", bindings.join(", ") || "None bound"), detail("Libraries", channel.allowed_imports.join(", ") || "No imports"), detail("Revision", String(channel.revision ?? "—")));
+    details.append(detail("Discovery", channel.include_function_summaries ? "Function names and descriptions · bounded continuation" : "Compact server summaries"));
     const actions = node("div", "", "channel-actions");
     actions.append(action("Edit channel", () => editChannel(channel)), action("Connect", () => connect(channel)), action("Rotate key", () => confirmKey(channel, true)), action("Revoke key", () => confirmKey(channel, false), true));
     card.append(header, node("p", channel.id, "channel-id"), details, actions); $("channel-list").append(card);
@@ -212,6 +224,7 @@ function editChannel(channel = null) {
   if (!state.settings || !state.tenant) throw new Error("Select a tenant and refresh its settings first.");
   state.editing = channel; $("channel-form").reset(); $("channel-dialog-title").textContent = channel ? "Edit channel" : "Create channel";
   $("channel-name").value = channel?.name || ""; $("channel-enabled").checked = channel?.enabled ?? true; $("channel-enabled-label").hidden = !channel;
+  $("channel-function-summaries").checked = channel?.include_function_summaries ?? false;
   choices("spec-options", state.specs, channel?.spec_ids || []);
   choices("library-options", state.settings.allowed_imports.map((name) => ({ id: name, name })), channel?.allowed_imports || []);
   $("sandbox-mode").querySelector('[value="docker"]').disabled = !state.settings.docker_enabled;
@@ -219,7 +232,7 @@ function editChannel(channel = null) {
 }
 const selected = (id) => [...$(id).querySelectorAll("input:checked")].map((input) => input.value);
 async function saveChannel() {
-  const payload = { name: $("channel-name").value.trim(), spec_ids: selected("spec-options"), sandbox_mode: $("sandbox-mode").value, allowed_imports: $("sandbox-mode").value === "docker" ? selected("library-options") : [] };
+  const payload = { name: $("channel-name").value.trim(), spec_ids: selected("spec-options"), sandbox_mode: $("sandbox-mode").value, allowed_imports: $("sandbox-mode").value === "docker" ? selected("library-options") : [], include_function_summaries: $("channel-function-summaries").checked };
   if (!payload.name) throw new Error("Enter a channel name.");
   if (payload.sandbox_mode === "docker" && !state.settings.docker_enabled) throw new Error("Docker is disabled by the operator. Select restricted execution.");
   if (state.editing) payload.enabled = $("channel-enabled").checked;
@@ -352,6 +365,7 @@ function wireForms() {
   $("sandbox-mode").addEventListener("change", sandboxPolicy);
 }
 function wireActions() {
+  $("dismiss-notice").addEventListener("click", dismissNotice);
   const newTenant = () => { if (!isAdmin()) throw new Error("Only platform administrators can create tenants."); $("tenant-form").reset(); showDialog("tenant-dialog"); };
   bind("new-tenant", newTenant); bind("empty-new-tenant", newTenant); bind("toggle-tenant", toggleTenant);
   bind("new-channel", () => editChannel());

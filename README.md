@@ -137,19 +137,22 @@ the canonical Host; it does not test all channels or upstream APIs.
    `Authorization: Bearer <channel-key>` (use your local origin for development).
 5. Manage channels, revoke keys, disable tenants, and inspect aggregate usage/audit.
 
-Hosted catalogs are read-only and **public-API-only**: no upstream host-auth inheritance, tenant secret manager, environment interpolation or caller-selected host paths. Ordinary OpenAPI external references stay denied; only the bounded UCP adapter resolves approved schema references. Channels have independent runtime stores/authority.
+Hosted **execution stays read-only**, while the **Read-only filter** controls catalog visibility: checked by default; uncheck to include all supported methods, **not to approve writes or read-only POST execution**. Channels force `allow_writes=False` and empty write permits. Upstream access remains **public-API-only**: no host-auth inheritance, tenant secret manager, environment interpolation or caller-selected host paths. Ordinary OpenAPI external references stay denied; only the bounded UCP adapter resolves approved schema references. Channels have independent runtime stores/authority.
+Channel create/edit offers **Include function names and descriptions** (`include_function_summaries`, default false): optional strict boolean on channel create/PATCH; omission on PATCH preserves the saved value. This channel-owned discovery choice overrides the operator base setting; it is not an MCP caller option. Compact mode remains the default; enabled mode includes all function summaries when they fit, otherwise requires bounded continuation (see [MCP interface](#the-mcp-interface)).
 Admin `/api` sessions use bounded, in-memory **Secure, HttpOnly, SameSite=Strict** cookies with session-bound CSRF checks for mutations; restart invalidates sessions. Channel keys cannot administer `/api`; admin login does not grant MCP access without a separately issued channel key.
 
 ### Import, inspect and refresh specifications
 
 Navigation uses consistent outlined icons. **API specifications** offers File, OpenAPI URL and UCP URL, operation counts/warnings, and saved JSON view/download. Browser-session/CSRF APIs (all under `/api/tenants/{tenant_id}`):
-- `POST /specs`: file `{"name":"cse","content":"<OpenAPI JSON or YAML>"}`; URL `{"name":"store","url":"https://merchant.example","kind":"ucp"}` (or `kind:"openapi"`). Never submit a host file path.
+- `POST /specs`: file `{"name":"cse","content":"<OpenAPI JSON or YAML>"}`; URL `{"name":"store","url":"https://merchant.example","kind":"ucp"}` (or `kind:"openapi"`). Optional strict boolean `read_only_filter` defaults **true**. Never submit a host file path.
 - URLs are at most **2048 characters**, without queries, userinfo or fragments. UCP requires HTTPS; a root URL becomes `/.well-known/ucp`. Fetches use bounded DNS-pinned HTTP, no auth inheritance, redirects, environment interpolation or proxies. Public OpenAPI relative server URLs resolve against the fetched document and are saved in the self-contained snapshot.
-- `POST /specs/{spec_id}/refresh`: URL source `{}` refetches its saved URL; file source `{"content":"<replacement document>"}` requires replacement bytes. Optional `update_channels` is a strict boolean, **false by default in the API**; the UI's **Update bound channels** checkbox starts **checked**.
-- Changed refresh returns **201**, creating an immutable successor with `parent_id`. When requested, only channels bound to that exact old ID advance atomically with their revisions; invalidated runtimes are drained before returning. Other channel settings and old snapshots remain intact.
-- Unchanged document/diagnostics/warnings returns **200** with the old ID and no channel revisions, even if updating was requested. Refreshing a superseded version returns **409**; use its latest successor. Legacy uploads default to file provenance; this metadata needs **no database schema migration**.
-- Diagnostics report `total_operations`, `available_operations`, `filtered_operations` before/after read policy, plus `unsupported_operations`. Unsupported callable request/schema semantics reject the import, not silent partial success; a successful import does not turn unsupported operations into callable ones. UCP counts describe its adapted GET document; exclusions are warnings.
+- `POST /specs/{spec_id}/refresh`: URL source `{}` refetches its saved URL; file source `{"content":"<replacement document>"}` requires replacement bytes. Optional strict boolean `read_only_filter` defaults to the previous version's choice; import/refresh dialogs expose the checkbox.
+- `POST /specs/{spec_id}/filter`: `{"read_only_filter":false,"update_channels":false}` revalidates the **saved document**, without upload or remote fetch, and preserves source provenance. The row's **Read-only filter** checkbox opens a confirmation dialog. Both refresh/filter accept optional strict boolean `update_channels`, **false by default in the API**; the UI's **Update bound channels** starts **checked**.
+- Changed refresh/filter returns **201**, creating an immutable successor with `parent_id`. A filter change counts even for unchanged GET-only bytes and changes catalog/policy identity (not necessarily document SHA-256). On opt-in, only exact old bindings/revisions advance atomically; invalidated runtimes drain before returning. Other settings and old snapshots stay intact.
+- Unchanged document/diagnostics/warnings/**filter** returns **200** with the old ID and no channel revisions, even if updating was requested. Updating a superseded version returns **409**; use its latest successor. Legacy uploads default to file provenance and filtering on; **no database schema migration**.
+- Diagnostics report `total_operations`, `available_operations`, `filtered_operations` before/after the discovery filter, plus `unsupported_operations`; **available means included in discovery, not execution-approved**. Unsupported callable request/schema semantics reject import, not silent partial success. UCP counts describe its adapted GET document; disabling the filter adds no UCP methods/capabilities.
 - One active import, **no queued imports**, with a **25-second** import deadline and cancellation cleanup. Existing spec/storage quotas still apply.
+Notifications have a close button and **10-second auto-dismiss**; replacement messages restart the timer. Inline dialog errors remain after banner dismissal; quiet sign-out clears pending notifications.
 
 **UCP is a bounded adapter, not full protocol support.** It recognizes published **2026-01-11, 2026-01-23, 2026-04-08 and 2026-08-25** profile shapes. Paths come from the advertised shopping REST schema, never guessed from names. Only matching advertised GET operation IDs `get_checkout`, `get_cart`, `get_order` are mapped (January: checkout only). Canonical April/August checkout/cart/order GET contracts compile; that does not prove merchant access or upstream behavior.
 Required **UCP-Agent** and **Request-Id** remain caller-supplied; Gryphon generates no platform identity or negotiation. Required auth/signing rejects the import, including canonical January signing requirements. Unsupported response validation schemas (such as canonical `oneOf`) are explicitly omitted with warnings: returned JSON is **not schema-validated** against those contracts.
@@ -269,11 +272,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for maintainer release setup and quality 
 | `list_recipes` | Search caller-owned cached recipe summaries |
 | `read_artifact` | Read caller-owned JSON in bounded chunks |
 
-`reusable_code_guide` explains execution on demand. Optional
-`GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and
-`get_server_skills` in local/operator mode. Guides are bounded, untrusted data,
-not write approval. Discovery includes fingerprints/truncation; follow
-`next_cursor` or narrow searches. MCP `readOnlyHint` is **not authorization**.
+`reusable_code_guide` explains execution on demand. Optional `GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and `get_server_skills` in local/operator mode. Guides are bounded, untrusted data, not write approval. Discovery includes fingerprints/truncation; follow continuation or narrow searches. MCP `readOnlyHint` is **not authorization**.
+`list_servers` stays compact by default. Hosted channels choose `include_function_summaries`; local/operator config uses `GRYPHON_INCLUDE_FUNCTION_SUMMARIES=true`. When enabled, server rows include `functions` with names/descriptions, all when they fit—not a fixed sample. Larger collections paginate within response budgets: pass **both** `next_cursor` and `next_function_cursor` back as `cursor` and `function_cursor`; a nonzero function cursor continues the same server. `limit` counts servers, not functions; compact mode requires `function_cursor=0`. Oversized text is marked truncated. Restart pagination if the registry fingerprint changes; use `get_functions` for schemas.
 
 ### Execute, then reuse
 
@@ -330,12 +330,12 @@ Public APIs need no auth block. **Local/operator mode** supports trusted source 
 Host auth supports `static`, `jwt`, `basic`, OAuth2 client credentials (`oauth2`), `keycloak` and `session`, with refresh. Alternatives: `GRYPHON_{SERVER}_AUTH` and JSON `GRYPHON_{SERVER}_EXTRA_HEADERS`.
 Neither sandbox receives credentials. **Hosted channels cannot use these credentials**; public upstream APIs only.
 
-`is_read_only: true` filters writes at compile time and dispatch. Local/operator writes require a write-enabled source, `GRYPHON_ALLOW_WRITES=true`, **and** exact administrator permits such as `GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]`. No model flag, guide, idempotency key or tool hint authorizes writes; there is no interactive write-approval UI. Hosted catalogs remain read-only regardless of write permits.
+`is_read_only: true` filters writes at compile time and dispatch, except exact operator-attested read-only POSTs below. Hosted `read_only_filter` sets this source flag; false expands discovery only. Local/operator writes require a write-enabled source, `GRYPHON_ALLOW_WRITES=true`, **and** exact administrator permits such as `GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]`. No model flag, guide, idempotency key or tool hint authorizes writes; there is no interactive write-approval UI. Hosted execution remains read-only regardless of catalog filter or write permits.
 
 ### Read-only POST attestations and CSE forms
 
-Some read APIs use POST. The original inspected CSE document contains **1 GET + 25 POST**: **23 URL-encoded + 2 scalar multipart** POST bodies. The default read-only filter therefore exposed only one operation; operation names and user hints cannot grant read authority. All 26 compiled with 25 temporary exact permits during document-only verification; **no permits were enabled in the actual environment, no live API calls were made, and upstream read semantics are not proven**.
-`GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults to `[]`. An operator may attest reviewed routes using a JSON array of exact `server_name`, effective `base_url`, literal `path`, and `method:"POST"`. No templates/globs; the effective base includes operation/path server or CDN overrides. Compiler **and broker** check the permit; permit sets also bind compilation/replay identity. Recompile/reimport (or refresh) after an intentional policy change.
+Some read APIs use POST. The original inspected CSE document contains **1 GET + 25 POST**: **23 URL-encoded + 2 scalar multipart** POST bodies. Default filtering exposed one operation. To discover all supported functions, uncheck **Read-only filter** and confirm the new snapshot (optionally update bound channels); no read permits are needed for visibility. Document-only verification parsed **all 26 with `source.is_read_only=false` and no permits**, without live API calls or operator storage/security changes. This does **not** prove upstream read semantics or approve execution; operation names and user hints grant no authority.
+`GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults to `[]`. For POST **read execution**, an operator must attest reviewed routes using a JSON array of exact `server_name`, effective `base_url`, literal `path`, and `method:"POST"`. No templates/globs; the effective base includes operation/path server or CDN overrides. Compiler **and broker** check read-only POST classification; disabling the discovery filter never supplies that attestation. Permit sets bind compilation/replay identity. Recompile/reimport (or refresh) after an intentional policy change.
 These are **deployment-wide read-semantic attestations**, including any hosted tenant matching the exact route namespace—not per-tenant authorization or credentials. Do not automatically enable them or change security configuration to make a catalog larger. Review the upstream semantics and hosted tenant exposure first.
 Example shape only, using a **synthetic** destination, not a live CSE approval:
 ```json
@@ -345,7 +345,7 @@ For the UI source name **cse**, use canonical server **`cse`**, not `cse_api`. U
 ```python
 result = await call_tool("cse.get_company_info_summery", {"json_body": {"symbol": inputs["symbol"]}})
 ```
-That illustrative function name must match your inspected catalog. Both `application/x-www-form-urlencoded` and `multipart/form-data` accept a **`json_body` object**; the broker chooses wire encoding. Forms are closed objects of scalars/scalar arrays (repeated fields), not nested/null/binary/file values. Multipart never reads host files or emits caller-selected filenames; bounds are **1024 parts / 2 MiB**. Other POSTs remain filtered or subject to ordinary write controls.
+That illustrative function name must match your inspected catalog and still needs an exact read-only POST permit for hosted execution. Both `application/x-www-form-urlencoded` and `multipart/form-data` accept a **`json_body` object**; the broker chooses wire encoding. Forms are closed objects of scalars/scalar arrays (repeated fields), not nested/null/binary/file values. Multipart never reads host files or emits caller-selected filenames; bounds are **1024 parts / 2 MiB**. Unattested POSTs are filtered when the filter is on; visible but execution-denied in hosted mode when off. Local/operator ordinary write controls remain separate.
 
 ### Runtime settings
 
@@ -387,11 +387,9 @@ AST checks still apply. Hosted Docker requires `GRYPHON_SAAS_DOCKER_ENABLED=true
 
 ## Development and support
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full locked Ruff, strict mypy, pytest and
-pre-commit commands, optional PostgreSQL/Docker checks and release instructions.
-The **90% coverage floor** is mandatory; target **100%**. Normal tests need no live
-upstream, Docker or PostgreSQL but import the `saas` extra. The offline real-MCP
-demo is `uv run --frozen python examples/demo.py` (use isolated config/stores).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for locked Ruff, strict mypy, pytest/pre-commit commands, optional PostgreSQL/Docker checks and release instructions.
+The **90% coverage floor** is mandatory; target **100%**. Normal tests need no live upstream, Docker or PostgreSQL but import the `saas` extra. The offline real-MCP demo is `uv run --frozen python examples/demo.py` (use isolated config/stores).
+UI state/notification tests: `node --test tests/unit/specifications_ui.test.js`; `node --check src/gryphon/static/admin.js`; `node --check tests/integration/browser_ui.cjs`. With separately provisioned Puppeteer/Chromium, opt in to `uv run --frozen --extra saas python tests/integration/browser_ui_fixture.py` for disposable browser checks (filters, bindings, channel summaries, notifications); see [AGENTS.md](AGENTS.md) for prerequisites.
 For offline measurements including receipts, run
 `uv run --frozen python examples/benchmark.py --iterations 25 --concurrency 1`;
 these are not model/API or end-to-end agent benchmarks.

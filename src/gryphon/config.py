@@ -38,6 +38,7 @@ class GryphonConfig(BaseSettings):
     http_auth_token: SecretStr | None = None
     context_budget_bytes: int = Field(default=16384, ge=1024, le=262144)
     discovery_limit: int = Field(default=10, ge=1, le=100)
+    include_function_summaries: bool = False
 
     # Compiler
     compile_on_startup: bool = True

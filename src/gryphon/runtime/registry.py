@@ -179,7 +179,7 @@ class Registry:
             "server_name": server_name,
             "function_name": function_name,
             "summary": endpoint.summary,
-            "description": "Use original API parameter names in call_tool; SDK aliases do not apply.",
+            "description": endpoint.summary,
             "parameters": endpoint.parameters,
             "response_fields": endpoint.response_fields,
             "return_type": endpoint.return_type,

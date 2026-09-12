@@ -193,6 +193,7 @@ class SaaSStore(SaaSRecords):
         spec_ids: list[str] | None = None,
         sandbox_mode: Literal["restricted", "docker"] = "restricted",
         allowed_imports: list[str] | None = None,
+        include_function_summaries: bool = False,
     ) -> Channel:
         """Create a keyless channel; its random UUID is the execution owner namespace."""
         item = Channel(
@@ -202,6 +203,7 @@ class SaaSStore(SaaSRecords):
             spec_ids=spec_ids or [],
             sandbox_mode=sandbox_mode,
             allowed_imports=allowed_imports or [],
+            include_function_summaries=include_function_summaries,
             created_at=time.time(),
         )
         async with self._db.transaction():
@@ -234,6 +236,7 @@ class SaaSStore(SaaSRecords):
         sandbox_mode: Literal["restricted", "docker"] | None = None,
         allowed_imports: list[str] | None = None,
         enabled: bool | None = None,
+        include_function_summaries: bool | None = None,
     ) -> Channel:
         """Replace supplied configuration fields and increment revision transactionally."""
         async with self._db.transaction():
@@ -249,6 +252,7 @@ class SaaSStore(SaaSRecords):
                         "sandbox_mode": sandbox_mode,
                         "allowed_imports": allowed_imports,
                         "enabled": enabled,
+                        "include_function_summaries": include_function_summaries,
                     }.items()
                     if value is not None
                 }

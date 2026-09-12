@@ -361,6 +361,7 @@ class Channel(BaseModel):
     spec_ids: list[str] = Field(default_factory=list, max_length=100)
     sandbox_mode: Literal["restricted", "docker"] = "restricted"
     allowed_imports: list[str] = Field(default_factory=list, max_length=100)
+    include_function_summaries: bool = Field(default=False, strict=True)
     revision: int = 1
     key_active: bool = False
     created_at: float

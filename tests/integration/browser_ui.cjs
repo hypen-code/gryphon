@@ -6,8 +6,8 @@ const { setTimeout: delay } = require("node:timers/promises");
 const puppeteer = require("puppeteer");
 
 async function idle(page) { await page.waitForFunction(() => !state.busy); }
-async function submit(page, form, suffix, status = 201) {
-  const received = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith(suffix));
+async function submit(page, form, suffix, status = 201, method = "POST") {
+  const received = page.waitForResponse((response) => response.request().method() === method && new URL(response.url()).pathname.endsWith(suffix));
   await page.click(`${form} button[type=submit]`); const response = await received;
   assert.equal(response.status(), status, `Unexpected status for ${suffix}`); await idle(page);
   return response.json();
@@ -36,6 +36,7 @@ async function icons(page, width) {
 }
 async function modes(page) {
   await page.click("#new-spec");
+  assert.equal(await page.$eval("#spec-read-only-filter", (input) => input.checked), true);
   for (const kind of ["file", "openapi", "ucp", "file"]) {
     await page.select("#spec-kind", kind);
     const controls = await page.evaluate(() => ({ file: document.querySelector("#spec-file").disabled, url: document.querySelector("#spec-url").disabled, required: document.querySelector("#spec-file").required }));
@@ -47,8 +48,21 @@ async function modes(page) {
 async function channel(page, spec, name) {
   await page.click('[data-page="channels"]'); await page.click("#new-channel"); await page.type("#channel-name", name);
   await page.click(`#spec-options input[value="${spec}"]`);
+  assert.equal(await page.$eval("#channel-function-summaries", (input) => input.checked), false);
+  if (name === "File channel") await page.click("#channel-function-summaries");
   const created = await submit(page, "#channel-form", "/channels");
+  assert.equal(created.include_function_summaries, name === "File channel");
+  if (created.include_function_summaries) await editSummaries(page, created);
   await page.click('[data-page="specs"]'); return created;
+}
+async function editSummaries(page, channel) {
+  const edit = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector("button"), channel.id);
+  await edit.asElement().click();
+  assert.equal(await page.$eval("#channel-function-summaries", (input) => input.checked), true);
+  await page.click("#channel-function-summaries");
+  const updated = await submit(page, "#channel-form", `/channels/${channel.id}`, 200, "PATCH");
+  assert.equal(updated.include_function_summaries, false);
+  assert.match(await page.$eval("#channel-list", (list) => list.textContent), /Compact server summaries/);
 }
 async function refreshFile(page, root, spec, version, update) {
   await (await rowButton(page, spec, 1)).click(); await dialogSizes(page, "#spec-refresh-dialog");
@@ -67,7 +81,7 @@ async function fileFlow(page, root) {
   await (await page.$("#spec-file")).uploadFile(join(root, "spec-1.json"));
   const original = await submit(page, "#spec-form", "/specs");
   assert.deepEqual(original.diagnostics, { total_operations: 2, available_operations: 1, filtered_operations: 1, unsupported_operations: 0 });
-  assert.match(await page.$eval("#spec-rows", (rows) => rows.textContent), /1 available · 1 filtered/);
+  assert.match(await page.$eval("#spec-rows", (rows) => rows.textContent), /1 included in discovery · 1 filtered/);
   const bound = await channel(page, original.id, "File channel");
   const second = await refreshFile(page, root, original.id, 2, true); await binding(page, bound.id, second.id);
   const third = await refreshFile(page, root, second.id, 3, false); await binding(page, bound.id, second.id);
@@ -82,7 +96,33 @@ async function fileFlow(page, root) {
   await page.click("#download-source");
   for (let tries = 0; tries < 50; tries++) { if (await stat(join(root, "BrowserFile.json")).catch(() => null)) break; await delay(50); }
   assert.deepEqual(JSON.parse(await readFile(join(root, "BrowserFile.json"), "utf8")), source);
-  await close(page, "#source-dialog"); return "file upload; refresh true updates binding, false preserves binding; superseded update disabled; old compiled JSON view/download retained";
+  await close(page, "#source-dialog");
+  const latestBound = await channel(page, third.id, "Filter channel"); await filterFlow(page, third, latestBound.id);
+  return "file upload; refresh choices preserve/update exact bindings; saved filter confirmation creates successor without upload, old snapshots/download retained; channel summaries POST/PATCH persisted";
+}
+async function savedFilter(page, id) {
+  const handle = await page.evaluateHandle((id) => [...document.querySelectorAll("#spec-rows tr")].find((row) => row.children[1].firstChild.textContent === id).querySelector('input[type="checkbox"]'), id);
+  return handle.asElement();
+}
+async function filterFlow(page, original, channelId) {
+  const filter = await savedFilter(page, original.id); assert.equal(await filter.evaluate((input) => input.checked), true);
+  await filter.click(); await dialogSizes(page, "#spec-refresh-dialog");
+  assert.equal(await filter.evaluate((input) => input.checked), true);
+  assert.equal(await page.$eval("#spec-refresh-read-only-filter", (input) => input.checked), false);
+  assert.equal(await page.$eval("#spec-replacement", (input) => input.disabled && !input.required), true);
+  assert.match(await page.$eval("#spec-refresh-help", (p) => p.textContent), /No URL refetch or replacement upload/);
+  await close(page, "#spec-refresh-dialog"); await binding(page, channelId, original.id);
+  await filter.click(); const changed = await submit(page, "#spec-refresh-form", "/filter");
+  assert.equal(changed.read_only_filter, false); assert.equal(changed.parent_id, original.id);
+  assert.equal(changed.diagnostics.available_operations, original.source_type === "ucp_url" ? original.diagnostics.available_operations : 2);
+  await binding(page, channelId, changed.id);
+  assert.equal(await (await savedFilter(page, original.id)).evaluate((input) => input.disabled && input.checked), true);
+  const next = await savedFilter(page, changed.id); assert.equal(await next.evaluate((input) => input.checked), false);
+  await next.click(); await page.click("#spec-refresh-read-only-filter");
+  const same = await submit(page, "#spec-refresh-form", "/filter", 200); assert.equal(same.id, changed.id);
+  await (await savedFilter(page, changed.id)).click(); await page.click("#spec-update-channels");
+  const restored = await submit(page, "#spec-refresh-form", "/filter"); assert.equal(restored.read_only_filter, true);
+  await binding(page, channelId, changed.id);
 }
 async function urlFlow(page) {
   await page.click("#new-spec"); await page.type("#spec-name", "BrowserURL"); await page.select("#spec-kind", "openapi");
@@ -93,8 +133,9 @@ async function urlFlow(page) {
   const updated = await submit(page, "#spec-refresh-form", "/refresh"); await binding(page, bound.id, updated.id);
   assert.equal(updated.source_url, original.source_url); assert.equal(updated.parent_id, original.id);
   await (await rowButton(page, updated.id, 1)).click(); const same = await submit(page, "#spec-refresh-form", "/refresh", 200);
-  assert.equal(same.id, updated.id); assert.match(await page.$eval("#notice", (notice) => notice.textContent), /unchanged/);
-  return "OpenAPI URL import/refetch uses synthetic pinned HTTP; bound channel advances; unchanged refresh reports HTTP 200";
+  assert.equal(same.id, updated.id); assert.match(await page.$eval("#notice-text", (notice) => notice.textContent), /unchanged/);
+  await filterFlow(page, updated, bound.id);
+  return "OpenAPI URL import/refetch uses synthetic pinned HTTP; saved filter changes do not refetch; bindings, stored checkbox state and unchanged HTTP 200 verified";
 }
 async function ucpMode(page) {
   await page.click("#new-spec"); await page.type("#spec-name", "BrowserUCP"); await page.select("#spec-kind", "ucp");
@@ -122,7 +163,20 @@ async function ucpMode(page) {
   await (await rowButton(page, original.id, 0)).click(); await page.waitForSelector("#source-dialog[open]");
   assert.deepEqual(JSON.parse(await page.$eval("#source-content", (pre) => pre.textContent)), oldDocument);
   await close(page, "#source-dialog");
-  return "UCP 2026-08-25 import/refetch succeeded: checkout GET grows to checkout/cart/order, warnings shown, bound revision advances, old compiled snapshot retained";
+  await filterFlow(page, updated, bound.id);
+  return "UCP import/refetch: GET checkout/cart/order, warnings and old snapshots retained; disabling saved filter does not expand adapter subset or refetch";
+}
+async function notifications(page) {
+  await page.evaluate(() => { notify("Dismiss while busy"); state.busy = true; });
+  await page.click("#dismiss-notice");
+  assert.equal(await page.$eval("#notice", (notice) => notice.hidden), true);
+  await page.evaluate(() => { state.busy = false; });
+  await page.click("#new-spec"); await page.evaluate(() => notify("Keep this inline validation error", true));
+  await page.waitForFunction(() => document.querySelector("#notice").hidden, { timeout: 12000 });
+  assert.equal(await page.$eval("#notice-text", (notice) => notice.textContent), "");
+  assert.equal(await page.$eval("#spec-dialog .dialog-message", (message) => message.textContent), "Keep this inline validation error");
+  await close(page, "#spec-dialog");
+  return "SVG notification dismiss works while busy; real ten-second expiry clears toast while inline dialog error survives";
 }
 async function main(input) {
   const browser = await puppeteer.launch({ headless: true }); const report = []; const faults = []; const external = [];
@@ -136,7 +190,7 @@ async function main(input) {
     report.push(await icons(page, 1400)); report.push(await icons(page, 390));
     await page.click('[data-page="specs"]'); await modes(page); report.push("all source modes and dialog width verified on 390px mobile");
     await page.setViewport({ width: 1400, height: 1000 }); await modes(page);
-    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page));
+    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page)); report.push(await notifications(page));
     assert.deepEqual(faults, []); assert.deepEqual(external, []);
     report.push("file/URL refresh and source dialogs fit both 390px and 1400px viewports");
     report.push("zero uncaught browser exceptions; zero external browser requests; real cookies/CSRF requests used");

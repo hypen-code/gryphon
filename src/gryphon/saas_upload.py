@@ -42,7 +42,9 @@ def _validate(content: str, config: GryphonConfig, limit: int) -> dict[str, Any]
     return _inspect(content, config, limit, "uploaded").document
 
 
-def _inspect(content: str, config: GryphonConfig, limit: int, name: str, origin: str | None = None) -> SpecImport:
+def _inspect(
+    content: str, config: GryphonConfig, limit: int, name: str, origin: str | None = None, read_only_filter: bool = True
+) -> SpecImport:
     """Measure the actual parser result, including method-policy exclusions, before publication."""
     document = _document(content, limit)
     if origin is not None:
@@ -50,7 +52,7 @@ def _inspect(content: str, config: GryphonConfig, limit: int, name: str, origin:
     with TemporaryDirectory(prefix="gryphon-upload-") as directory:
         path = Path(directory) / "spec.json"
         path.write_text(json.dumps(document), encoding="utf-8")
-        source = SwaggerSource(name=name, swagger_url=str(path), is_read_only=True)
+        source = SwaggerSource(name=name, swagger_url=str(path), is_read_only=read_only_filter)
         parsed = asyncio.run(SwaggerParser(source, max_spec_size_bytes=limit * 2, config=config).parse())
     methods = {"get", "head", "options", "post", "put", "patch", "delete"}
     total = sum(method.lower() in methods for item in document.get("paths", {}).values() for method in item)
@@ -64,9 +66,11 @@ def _inspect(content: str, config: GryphonConfig, limit: int, name: str, origin:
         warnings.append(
             "Non-read methods are filtered unless the operator explicitly approves exact read-only POST routes."
         )
+    if not read_only_filter:
+        warnings.append("All supported operations are included in discovery; execution permissions are unchanged.")
     if not parsed.endpoints:
-        warnings.append("No callable operations are available under the current read-only policy.")
-    return SpecImport(document=document, diagnostics=diagnostics, warnings=warnings)
+        warnings.append("No operations are included in this catalog.")
+    return SpecImport(document=document, read_only_filter=read_only_filter, diagnostics=diagnostics, warnings=warnings)
 
 
 def _remote_servers(document: dict[str, Any], origin: str) -> None:
@@ -99,10 +103,18 @@ def _remote_servers(document: dict[str, Any], origin: str) -> None:
 
 
 async def inspect_upload(
-    content: str, config: GryphonConfig, limit: int, name: str, *, origin: str | None = None
+    content: str,
+    config: GryphonConfig,
+    limit: int,
+    name: str,
+    *,
+    origin: str | None = None,
+    read_only_filter: bool = True,
 ) -> SpecImport:
     """Offload bounded validation and return a snapshot with honest operation counts."""
-    return await finish_cleanup(asyncio.to_thread(_inspect, content, config, limit, name, origin))
+    if type(read_only_filter) is not bool:
+        raise InputValidationError("Read-only filter must be a boolean")
+    return await finish_cleanup(asyncio.to_thread(_inspect, content, config, limit, name, origin, read_only_filter))
 
 
 async def validate_upload(content: str, config: GryphonConfig, limit: int) -> dict[str, Any]:
