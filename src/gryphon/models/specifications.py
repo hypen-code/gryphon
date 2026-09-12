@@ -50,3 +50,23 @@ class SaaSSpec(SpecImport):
     sha256: str
     created_at: float
     parent_id: str | None = None
+
+
+class SpecDeletionChannel(BaseModel):
+    """Public impact summary for a channel whose bindings will change."""
+
+    id: str
+    name: str
+    revision: int
+
+
+class SpecDeletionPreview(BaseModel):
+    """Whole-lineage deletion impact and a non-secret compare-and-swap digest."""
+
+    name: str
+    specification_id: str
+    spec_id: str
+    version_ids: list[str]
+    version_count: int
+    channels: list[SpecDeletionChannel]
+    confirmation_token: str = Field(pattern=r"^[0-9a-f]{64}$")

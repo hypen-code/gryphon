@@ -342,8 +342,8 @@ def test_admin_discovery_checkboxes_defaults_and_automatic_post_explanation() ->
     script = _SPECIFICATIONS.read_text()
     assert 'snapshot.filterOnly ? "filter" : "refresh"' in script
     assert "if (!snapshot.filterOnly && !remote(spec))" in script
-    assert "input.checked = spec.read_only_filter ?? true" in script
-    assert "input.disabled = superseded" in script
+    assert 'button.setAttribute("aria-pressed", String(enabled))' in script
+    assert 'icon("filter",' in script
     assert 'include_function_summaries: $("channel-function-summaries").checked' in _SCRIPT.read_text()
 
 
@@ -390,3 +390,10 @@ def test_admin_manual_post_controls_absent_and_actor_column_preserved() -> None:
     assert "<th>Actor</th>" in _TEMPLATE.read_text()
     assert "Unknown / legacy actor" in script
     assert "Account subject:" in script
+    specs = _SPECIFICATIONS.read_text()
+    assert '"DELETE", { confirm_name, confirmation_token }' in specs
+    assert "confirm_name !== snapshot.preview.name" in specs
+    assert 'document.createElementNS("http://www.w3.org/2000/svg", "svg")' in specs
+    assert ".slice(0, 100)" in specs
+    assert ".spec-action:focus-visible::after" in _STYLE.read_text()
+    assert "min-height: 44px" in _STYLE.read_text()

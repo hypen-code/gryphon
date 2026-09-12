@@ -55,7 +55,7 @@ const isAdmin = () => state.me?.role === "platform_admin";
 function clearPasswords(root = document) { root.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; }); }
 function clearDialog(dialog) { clearPasswords(dialog); if (dialog.id === "key-dialog") clearKey(); }
 function signedOut() {
-  analytics.reset();
+  analytics.reset(); specifications.resetDeletion();
   state.epoch += 1; state.csrf = ""; state.tenant = ""; state.tenants = []; state.channels = []; state.specs = []; state.settings = null; state.source = null; state.confirm = null;
   state.me = null; state.users = []; state.userOffset = 0; state.userNext = null; state.editing = null; state.editingUser = null; state.passwordUser = null;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); clearKey(); clearPasswords();
@@ -130,7 +130,7 @@ async function refresh() {
   finally { $("loading").hidden = true; $("main").removeAttribute("aria-busy"); }
 }
 async function loadTenant() {
-  analytics.selectTenant(state.tenant);
+  analytics.selectTenant(state.tenant); specifications.resetDeletion(); if ($("spec-delete-dialog").open) $("spec-delete-dialog").close();
   state.specs = []; state.channels = []; renderSpecs(); renderChannels(); renderUsage([]);
   if (!state.tenant) return;
   $("loading").hidden = false;
@@ -214,7 +214,7 @@ function renderAudit(items) {
   $("audit-rows").replaceChildren();
   items.forEach((item) => {
     const row = node("tr"); const date = new Date(typeof item.created_at === "number" ? item.created_at * 1000 : item.created_at);
-    const event = node("td", item.event); const subject = item.subject || {};
+    const event = node("td", item.event); const subject = item.subject || {}; if (item.spec_id) event.append(node("small", `Specification: ${item.spec_id}`));
     const subjectId = subject.id || item.subject_id || item.user_id; const subjectName = subject.name || subject.username || item.subject_name || item.subject_username;
     if (subjectId || subjectName) event.append(node("small", `Account subject: ${subjectName || subjectId}${subjectName && subjectId ? ` · ${subjectId}` : ""}`));
     row.append(event, auditActor(item), node("td", state.tenants.find((tenant) => tenant.id === item.tenant_id)?.name || item.tenant_id || "—"), node("td", item.channel_id || "—"), node("td", Number.isNaN(date.getTime()) ? "—" : date.toLocaleString())); $("audit-rows").append(row);
@@ -257,7 +257,7 @@ async function saveChannel() {
   $("channel-dialog").close(); await refresh(); notify("Channel saved. Rotate its key when you are ready to connect a client.");
 }
 async function viewSource(spec) {
-  const source = await api(tenantPath(`/specs/${segment(spec.id)}`));
+  const snapshot = { tenant: state.tenant, epoch: state.epoch, csrf: state.csrf }; specifications.current(snapshot); const source = await api(tenantPath(`/specs/${segment(spec.id)}`)); specifications.current(snapshot);
   state.source = { name: source.name, text: JSON.stringify(source.document, null, 2) };
   $("source-title").textContent = `${source.name} · ${spec.id}`; $("source-metadata").textContent = specifications.sourceMetadata(source).join(" · "); $("source-content").textContent = state.source.text; showDialog("source-dialog");
 }

@@ -10,10 +10,20 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from gryphon.errors import SaaSDisabledError, SaaSValidationError
-from gryphon.models import AdminAudit, AuditEvent, Channel, ChannelUsage, SaaSSpec, SpecImport, Tenant
+from gryphon.models import (
+    AdminAudit,
+    AuditEvent,
+    Channel,
+    ChannelUsage,
+    SaaSSpec,
+    SpecDeletionPreview,
+    SpecImport,
+    Tenant,
+)
 from gryphon.saas_audit import current_actor
 from gryphon.saas_database import SaaSDatabase, SQLValue
 from gryphon.saas_records import SaaSRecords
+from gryphon.saas_spec_delete import delete_spec, preview_spec_deletion
 from gryphon.saas_spec_versions import insert_spec, new_spec, refresh_spec
 
 TOOLS = frozenset(
@@ -85,12 +95,20 @@ class SaaSStore(SaaSRecords):
             raise SaaSDisabledError("Tenant is disabled")
         return tenant
 
-    async def _audit(self, tenant_id: str, event: AuditEvent, channel_id: str | None = None) -> None:
+    async def _audit(
+        self,
+        tenant_id: str,
+        event: AuditEvent,
+        channel_id: str | None = None,
+        *,
+        spec_id: str | None = None,
+    ) -> None:
         """Append static metadata and the verified actor snapshot in the mutation transaction."""
         item = AdminAudit(
             id=str(uuid4()),
             tenant_id=tenant_id,
             channel_id=channel_id,
+            spec_id=spec_id,
             event=event,
             created_at=time.time(),
             actor=current_actor(),
@@ -163,6 +181,16 @@ class SaaSStore(SaaSRecords):
     ) -> tuple[SaaSSpec, list[Channel]]:
         """Create an immutable successor and optionally advance exact channel bindings atomically."""
         return await refresh_spec(self, tenant_id, spec_id, imported, update_channels=update_channels)
+
+    async def preview_spec_deletion(self, tenant_id: str, spec_id: str) -> SpecDeletionPreview:
+        """Preview deletion of all retained versions and affected channel bindings."""
+        return await preview_spec_deletion(self, tenant_id, spec_id)
+
+    async def delete_spec(
+        self, tenant_id: str, spec_id: str, confirm_name: object, confirmation_token: object
+    ) -> tuple[SpecDeletionPreview, list[Channel]]:
+        """Delete a confirmed lineage atomically, returning channels requiring runtime cleanup."""
+        return await delete_spec(self, tenant_id, spec_id, confirm_name, confirmation_token)
 
     async def get_spec(self, tenant_id: str, spec_id: str) -> SaaSSpec:
         """Load an immutable specification only from its owning tenant."""

@@ -12,14 +12,13 @@ async function submit(page, form, suffix, status = 201, method = "POST") {
   assert.equal(response.status(), status, `Unexpected status for ${suffix}`); await idle(page);
   return response.json();
 }
-async function rowButton(page, id, index) {
-  const handle = await page.evaluateHandle((id, index) => [...document.querySelectorAll("#spec-rows tr")].find((row) => row.dataset.specId === id).querySelectorAll("button")[index], id, index);
-  return handle.asElement();
+async function rowButton(page, id, action) {
+  return page.$(`#spec-rows tr[data-spec-id="${id}"] [data-spec-action="${action}"]`);
 }
 async function historySource(page, latest, previous) {
-  await (await rowButton(page, latest, 2)).click(); await page.waitForSelector("#spec-history-dialog[open]");
+  await (await rowButton(page, latest, "history")).click(); await page.waitForSelector("#spec-history-dialog[open]");
   await dialogSizes(page, "#spec-history-dialog");
-  const source = await page.$(`#spec-history-rows tr[data-spec-id="${previous}"] button`);
+  const source = await page.$(`#spec-history-rows tr[data-spec-id="${previous}"] [data-spec-action="source"]`);
   assert.ok(source); await source.click(); await page.waitForSelector("#source-dialog[open]");
 }
 async function pinnedEdit(page, channelId, older, latest) {
@@ -87,7 +86,7 @@ async function editSummaries(page, channel) {
   assert.match(await page.$eval("#channel-list", (list) => list.textContent), /Compact server summaries/);
 }
 async function refreshFile(page, root, spec, version, update) {
-  await (await rowButton(page, spec, 1)).click(); await dialogSizes(page, "#spec-refresh-dialog");
+  await (await rowButton(page, spec, "refresh")).click(); await dialogSizes(page, "#spec-refresh-dialog");
   assert.equal(await page.$eval("#spec-update-channels", (input) => input.checked), true);
   assert.equal(await page.$eval("#spec-replacement", (input) => input.required && !input.disabled), true);
   if (!update) await page.click("#spec-update-channels");
@@ -103,7 +102,7 @@ async function fileFlow(page, root) {
   await (await page.$("#spec-file")).uploadFile(join(root, "spec-1.json"));
   const original = await submit(page, "#spec-form", "/specs");
   assert.deepEqual(original.diagnostics, { total_operations: 2, available_operations: 1, filtered_operations: 1, unsupported_operations: 0 });
-  assert.match(await page.$eval("#spec-rows", (rows) => rows.textContent), /1 included in discovery · 1 filtered/);
+  assert.match(await page.$eval("#spec-rows", (rows) => rows.textContent), /1 available/);
   const bound = await channel(page, original.id, "File channel");
   const second = await refreshFile(page, root, original.id, 2, true); await binding(page, bound.id, second.id);
   const third = await refreshFile(page, root, second.id, 3, false); await binding(page, bound.id, second.id);
@@ -111,9 +110,16 @@ async function fileFlow(page, root) {
   await page.reload(); await idle(page); await page.waitForSelector(`#spec-rows tr[data-spec-id="${third.id}"]`);
   assert.equal(await page.$$eval("#spec-rows tr", (rows) => rows.length), 1);
   await pinnedEdit(page, bound.id, second.id, third.id);
-  await historySource(page, third.id, original.id);
+  await (await rowButton(page, third.id, "history")).click();
+  for (const version of [original, second]) {
+    await page.click(`#spec-history-rows tr[data-spec-id="${version.id}"] [data-spec-action="details"]`);
+    const body = await page.$eval("#spec-details-content", (body) => body.textContent); assert.ok(body.includes(version.id)); assert.ok(body.includes(version.sha256));
+    if (version === second) assert.match(body, /Pinned channels: File channel/);
+    await close(page, "#spec-details-dialog");
+  }
+  await close(page, "#spec-history-dialog"); await historySource(page, third.id, original.id);
   assert.equal(await page.$$eval("#spec-history-rows tr", (rows) => rows.length), 3);
-  assert.match(await page.$eval("#spec-history-rows", (rows) => rows.textContent), /Pinned channels: File channel/);
+  assert.match(await page.$eval("#spec-history-rows", (rows) => rows.textContent), /1 bound channel/);
   await dialogSizes(page, "#source-dialog");
   const source = JSON.parse(await page.$eval("#source-content", (pre) => pre.textContent));
   assert.equal(source.paths["/data"].get.operationId, "read_v1");
@@ -127,14 +133,11 @@ async function fileFlow(page, root) {
   await binding(page, bound.id, second.id);
   return "one lineage row after repeated refresh/filter changes and reload; History downloads and pinned channel edits preserved; POST inclusion persists with no manual controls or requests; retired route returns 404; channel summaries POST/PATCH persisted";
 }
-async function savedFilter(page, id) {
-  const handle = await page.evaluateHandle((id) => [...document.querySelectorAll("#spec-rows tr")].find((row) => row.dataset.specId === id).querySelector('input[type="checkbox"]'), id);
-  return handle.asElement();
-}
+async function savedFilter(page, id) { return rowButton(page, id, "filter"); }
 async function filterFlow(page, original, channelId) {
-  const filter = await savedFilter(page, original.id); assert.equal(await filter.evaluate((input) => input.checked), true);
+  const filter = await savedFilter(page, original.id); assert.equal(await filter.evaluate((input) => input.getAttribute("aria-pressed") === "true"), true);
   await filter.click(); await dialogSizes(page, "#spec-refresh-dialog");
-  assert.equal(await filter.evaluate((input) => input.checked), true);
+  assert.equal(await filter.evaluate((input) => input.getAttribute("aria-pressed") === "true"), true);
   assert.equal(await page.$eval("#spec-refresh-read-only-filter", (input) => input.checked), false);
   assert.equal(await page.$eval("#spec-replacement", (input) => input.disabled && !input.required), true);
   assert.match(await page.$eval("#spec-refresh-help", (p) => p.textContent), /No URL refetch or replacement upload/);
@@ -144,10 +147,10 @@ async function filterFlow(page, original, channelId) {
   assert.equal(changed.diagnostics.available_operations, original.source_type === "ucp_url" ? original.diagnostics.available_operations : 2);
   await binding(page, channelId, changed.id);
   assert.equal(await page.$(`#spec-rows tr[data-spec-id="${original.id}"]`), null);
-  await (await rowButton(page, changed.id, 2)).click();
-  assert.match(await page.$eval(`#spec-history-rows tr[data-spec-id="${original.id}"]`, (row) => row.textContent), /Read-only filter: on/);
+  await (await rowButton(page, changed.id, "history")).click();
+  assert.match(await page.$eval(`#spec-history-rows tr[data-spec-id="${original.id}"]`, (row) => row.textContent), /Filter on/);
   await close(page, "#spec-history-dialog");
-  const next = await savedFilter(page, changed.id); assert.equal(await next.evaluate((input) => input.checked), false);
+  const next = await savedFilter(page, changed.id); assert.equal(await next.evaluate((input) => input.getAttribute("aria-pressed") === "true"), false);
   await next.click(); await page.click("#spec-refresh-read-only-filter");
   const same = await submit(page, "#spec-refresh-form", "/filter", 200); assert.equal(same.id, changed.id);
   await (await savedFilter(page, changed.id)).click(); await page.click("#spec-update-channels");
@@ -175,7 +178,7 @@ async function automaticPOSTFlow(page, spec, channelId) {
   await binding(page, channelId, included.id);
   await page.reload(); await idle(page); await page.waitForSelector(`#spec-rows tr[data-spec-id="${included.id}"]`);
   assert.equal(await page.$$eval("#spec-rows tr", (rows) => rows.length), 1);
-  assert.equal(await (await savedFilter(page, included.id)).evaluate((input) => input.checked), false);
+  assert.equal(await (await savedFilter(page, included.id)).evaluate((input) => input.getAttribute("aria-pressed") === "true"), false);
   assert.deepEqual(requests, []); page.off("request", watch);
   await retiredPOSTRoute(page, included.id);
 }
@@ -183,11 +186,11 @@ async function urlFlow(page) {
   await page.click("#new-spec"); await page.type("#spec-name", "BrowserURL"); await page.select("#spec-kind", "openapi");
   await page.type("#spec-url", "https://example.com/openapi.json"); const original = await submit(page, "#spec-form", "/specs");
   assert.equal(original.source_type, "openapi_url"); const bound = await channel(page, original.id, "URL channel");
-  await (await rowButton(page, original.id, 1)).click(); await dialogSizes(page, "#spec-refresh-dialog");
+  await (await rowButton(page, original.id, "refresh")).click(); await dialogSizes(page, "#spec-refresh-dialog");
   assert.equal(await page.$eval("#spec-replacement", (input) => input.disabled && !input.required), true);
   const updated = await submit(page, "#spec-refresh-form", "/refresh"); await binding(page, bound.id, updated.id);
   assert.equal(updated.source_url, original.source_url); assert.equal(updated.parent_id, original.id);
-  await (await rowButton(page, updated.id, 1)).click(); const same = await submit(page, "#spec-refresh-form", "/refresh", 200);
+  await (await rowButton(page, updated.id, "refresh")).click(); const same = await submit(page, "#spec-refresh-form", "/refresh", 200);
   assert.equal(same.id, updated.id); assert.match(await page.$eval("#notice-text", (notice) => notice.textContent), /unchanged/);
   await filterFlow(page, updated, bound.id);
   return "OpenAPI URL import/refetch uses synthetic pinned HTTP; saved filter changes do not refetch; bindings, stored checkbox state and unchanged HTTP 200 verified";
@@ -199,19 +202,20 @@ async function ucpMode(page) {
   assert.equal(original.diagnostics.available_operations, 1);
   assert.ok(original.warnings.some((warning) => warning.includes("Non-GET")));
   assert.ok(original.warnings.some((warning) => warning.includes("UCP-Agent")));
-  assert.match(await page.$eval("#spec-rows", (rows) => rows.textContent), /UCP-Agent/);
+  assert.doesNotMatch(await page.$eval("#spec-rows", (rows) => rows.textContent), /UCP-Agent/);
+  await (await rowButton(page, original.id, "details")).click(); assert.match(await page.$eval("#spec-details-content", (body) => body.textContent), /UCP-Agent/); await close(page, "#spec-details-dialog");
   const bound = await channel(page, original.id, "UCP channel");
-  await (await rowButton(page, original.id, 0)).click(); await page.waitForSelector("#source-dialog[open]");
+  await (await rowButton(page, original.id, "source")).click(); await page.waitForSelector("#source-dialog[open]");
   const oldDocument = JSON.parse(await page.$eval("#source-content", (pre) => pre.textContent));
   assert.deepEqual(Object.keys(oldDocument.paths), ["/checkout-sessions/{id}"]);
   await close(page, "#source-dialog");
-  await (await rowButton(page, original.id, 1)).click(); await dialogSizes(page, "#spec-refresh-dialog");
+  await (await rowButton(page, original.id, "refresh")).click(); await dialogSizes(page, "#spec-refresh-dialog");
   assert.equal(await page.$eval("#spec-replacement", (input) => input.disabled), true);
   const updated = await submit(page, "#spec-refresh-form", "/refresh"); await binding(page, bound.id, updated.id);
   assert.equal(updated.source_type, "ucp_url"); assert.equal(updated.source_url, original.source_url);
   assert.equal(updated.parent_id, original.id); assert.equal(updated.diagnostics.available_operations, 3);
   assert.equal(await page.evaluate((id) => state.channels.find((channel) => channel.id === id).revision, bound.id), bound.revision + 1);
-  await (await rowButton(page, updated.id, 0)).click(); await page.waitForSelector("#source-dialog[open]");
+  await (await rowButton(page, updated.id, "source")).click(); await page.waitForSelector("#source-dialog[open]");
   const compiled = JSON.parse(await page.$eval("#source-content", (pre) => pre.textContent));
   assert.deepEqual(Object.values(compiled.paths).map((path) => path.get.operationId).sort(), ["get_cart", "get_checkout", "get_order"]);
   await close(page, "#source-dialog");
@@ -227,7 +231,7 @@ async function ucpMCPMode(page) {
   await page.type("#spec-url", source); const original = await submit(page, "#spec-form", "/specs");
   assert.equal(original.source_url, source); assert.equal(original.diagnostics.available_operations, 1);
   assert.ok(original.warnings.some((warning) => /unsupported MCP tool schema/i.test(warning)));
-  await (await rowButton(page, original.id, 0)).click(); await page.waitForSelector("#source-dialog[open]");
+  await (await rowButton(page, original.id, "source")).click(); await page.waitForSelector("#source-dialog[open]");
   const compiled = JSON.parse(await page.$eval("#source-content", (pre) => pre.textContent));
   assert.equal(compiled["x-gryphon-ucp"].transport, "mcp"); assert.equal(compiled.servers[0].url, endpoint);
   assert.match(await page.$eval("#source-metadata", (p) => p.textContent), /Resolved UCP transport: mcp/);
@@ -239,7 +243,7 @@ async function ucpMCPMode(page) {
   await (await savedFilter(page, original.id)).click(); const included = await submit(page, "#spec-refresh-form", "/filter");
   assert.equal(included.diagnostics.available_operations, 2); assert.equal(included.read_only_filter, false);
   await binding(page, bound.id, included.id);
-  await (await rowButton(page, included.id, 1)).click(); const same = await submit(page, "#spec-refresh-form", "/refresh", 200);
+  await (await rowButton(page, included.id, "refresh")).click(); const same = await submit(page, "#spec-refresh-form", "/refresh", 200);
   assert.equal(same.id, included.id);
   for (const [index, url] of ["https://shop.example.com", "https://shop.example.com/.well-known/ucp"].entries()) {
     await page.click("#new-spec"); await page.type("#spec-name", `BrowserMCPProfile${index}`); await page.select("#spec-kind", "ucp");
@@ -275,6 +279,53 @@ async function tenantIdentityAndAudit(page, password) {
   await page.click('[data-page="specs"]');
   return "tenant has no manual POST controls and retired route returns 404; no user-list requests; named actor is escaped and distinct from account subject; bootstrap actor is explicit";
 }
+async function specIcons(page) {
+  for (const width of [390, 1400]) {
+    await page.setViewport({ width, height: 1000 });
+    const controls = await page.$$eval('#spec-rows [data-spec-action]', (buttons) => buttons.map((button) => ({ label: button.getAttribute("aria-label"), title: button.title, tooltip: button.dataset.tooltip, svg: button.querySelector("svg").getAttribute("aria-hidden"), width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })));
+    for (const button of controls) { assert.equal(button.label, button.title); assert.equal(button.title, button.tooltip); assert.equal(button.svg, "true"); assert.ok(button.width >= (width === 390 ? 44 : 32)); assert.ok(button.height >= (width === 390 ? 44 : 32)); }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  }
+  await page.focus('#spec-rows [data-spec-action="details"]'); await page.keyboard.press("Enter"); await page.waitForSelector("#spec-details-dialog[open]");
+  await dialogSizes(page, "#spec-details-dialog"); await page.keyboard.press("Escape"); await page.waitForSelector("#spec-details-dialog[open]", { hidden: true });
+  await page.waitForFunction(() => document.activeElement.dataset.specAction === "details");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement, "::after").opacity), "1");
+}
+async function deletionFlow(page, root) {
+  const before = await page.evaluate(() => state.specs.map((spec) => spec.id)); const deletes = []; const watch = (request) => { if (request.method() === "DELETE") deletes.push(request.url()); }; page.on("request", watch);
+  await page.click("#new-spec"); await page.type("#spec-name", "BrowserDelete"); await (await page.$("#spec-file")).uploadFile(join(root, "spec-1.json"));
+  const original = await submit(page, "#spec-form", "/specs"); const first = await channel(page, original.id, "Delete older binding");
+  const latest = await refreshFile(page, root, original.id, 2, false); const second = await channel(page, latest.id, "Delete latest binding");
+  await (await rowButton(page, latest.id, "download")).click(); await idle(page);
+  for (let tries = 0; tries < 50; tries++) { if (await stat(join(root, "BrowserDelete.json")).catch(() => null)) break; await delay(50); }
+  assert.equal(JSON.parse(await readFile(join(root, "BrowserDelete.json"), "utf8")).paths["/data"].get.operationId, "read_v2");
+  await (await rowButton(page, latest.id, "delete")).click(); await page.waitForSelector("#spec-delete-dialog[open]"); await idle(page);
+  await page.type("#spec-delete-name", "BrowserDelete"); await page.keyboard.press("Escape");
+  assert.equal(await page.$eval("#spec-delete-name", (input) => input.value), "");
+  await (await rowButton(page, latest.id, "delete")).click(); await idle(page); await dialogSizes(page, "#spec-delete-dialog");
+  assert.match(await page.$eval("#spec-delete-impact", (body) => body.textContent), /2 saved versions.*2 channels/s);
+  for (const name of ["", "browserdelete", " BrowserDelete", "BrowserDelete "]) {
+    await page.$eval("#spec-delete-name", (input, value) => { input.value = value; input.dispatchEvent(new Event("input")); }, name);
+    assert.equal(await page.$eval("#spec-delete-submit", (button) => button.disabled), true);
+    await page.$eval("#spec-delete-form", (form) => form.dispatchEvent(new Event("submit", { cancelable: true }))); await idle(page);
+  }
+  assert.equal(deletes.length, 0); await page.$eval("#spec-delete-name", (input) => { input.value = "BrowserDelete"; input.dispatchEvent(new Event("input")); });
+  await page.evaluate(async (id) => { const { spec_ids, sandbox_mode, allowed_imports, enabled } = state.channels.find((channel) => channel.id === id); await api(tenantPath(`/channels/${id}`), "PATCH", { name: "Changed binding channel", spec_ids, sandbox_mode, allowed_imports, enabled }); }, first.id);
+  await submit(page, "#spec-delete-form", `/specs/${latest.id}`, 409, "DELETE");
+  assert.equal(await page.$eval("#spec-delete-submit", (button) => button.disabled), true);
+  assert.match(await page.$eval("#spec-delete-dialog .dialog-message", (body) => body.textContent), /fresh preview/);
+  await page.$eval("#spec-delete-form", (form) => form.dispatchEvent(new Event("submit", { cancelable: true }))); await idle(page);
+  assert.equal(deletes.length, 1); await close(page, "#spec-delete-dialog"); await (await rowButton(page, latest.id, "delete")).click(); await idle(page);
+  await page.type("#spec-delete-name", "BrowserDelete"); const result = await submit(page, "#spec-delete-form", `/specs/${latest.id}`, 200, "DELETE");
+  assert.equal(deletes.length, 2); page.off("request", watch); assert.equal(result.deleted, true); assert.deepEqual(result.deleted_spec_ids.sort(), [original.id, latest.id].sort());
+  assert.equal(await page.$eval("#spec-delete-name", (input) => input.value), "");
+  const retained = await page.evaluate((ids) => ({ specs: state.specs.map((spec) => spec.id), channels: state.channels.filter((channel) => ids.includes(channel.id)).map((channel) => channel.spec_ids) }), [first.id, second.id]);
+  assert.deepEqual(retained.specs.sort(), before.sort()); assert.deepEqual(retained.channels, [[], []]);
+  assert.equal(await page.$(`#spec-rows tr[data-spec-id="${latest.id}"]`), null);
+  assert.deepEqual(await page.evaluate(async (ids) => Promise.all(ids.map(async (id) => (await fetch(tenantPath(`/specs/${id}`))).status)), [original.id, latest.id]), [404, 404]);
+  await page.click('[data-page="audit"]'); assert.match(await page.$$eval("#audit-rows tr", (rows) => rows.find((row) => row.children[0].textContent.startsWith("spec_deleted")).children[1].textContent), /browser.tenant/); await page.click('[data-page="specs"]');
+  return "throwaway lineage deleted by exact typed name; Escape clears; stale preview returns 409 without retry; older/latest bindings detach while channels and other APIs remain";
+}
 async function notifications(page) {
   await page.evaluate(() => { notify("Dismiss while busy"); state.busy = true; });
   await page.click("#dismiss-notice");
@@ -299,7 +350,7 @@ async function main(input) {
     report.push(await icons(page, 1400)); report.push(await icons(page, 390));
     await page.click('[data-page="specs"]'); await modes(page); report.push("all source modes and dialog width verified on 390px mobile");
     await page.setViewport({ width: 1400, height: 1000 }); await modes(page);
-    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page)); report.push(await ucpMCPMode(page)); report.push(await tenantIdentityAndAudit(page, input.password)); report.push(await notifications(page));
+    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page)); report.push(await ucpMCPMode(page)); await specIcons(page); report.push(await tenantIdentityAndAudit(page, input.password)); report.push(await deletionFlow(page, input.root)); report.push(await notifications(page));
     assert.deepEqual(faults, []); assert.deepEqual(external, []);
     report.push("file/URL refresh and source dialogs fit both 390px and 1400px viewports");
     report.push("zero uncaught browser exceptions; zero external browser requests; real cookies/CSRF requests used");

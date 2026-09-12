@@ -14,6 +14,7 @@ from gryphon.saas_access import AccessControl, account, platform_admin
 from gryphon.saas_analytics import AnalyticsStore
 from gryphon.saas_auth import COOKIE_NAME, AdminSessions, RateLimiter
 from gryphon.saas_http import admin_endpoint, failure, fields, read_object
+from gryphon.saas_spec_delete_api import SpecDeletionAPI
 from gryphon.saas_spec_import import SpecImporter
 from gryphon.saas_user_api import UserAPI
 from gryphon.saas_users import UserStore
@@ -70,6 +71,7 @@ class AdminAPI:
         self.user_api = UserAPI(self.users, self.access, self.sessions, config)
         self.analytics = analytics if analytics is not None else AnalyticsStore(store._db)
         self.importer = SpecImporter(base, config.max_spec_bytes)
+        self.spec_deletion = SpecDeletionAPI(store, self.access, runtimes)
 
     def routes(self) -> list[Route]:
         """Register the closed administrator API; only login is unauthenticated."""
@@ -81,7 +83,8 @@ class AdminAPI:
             ("/api/tenants", self.tenants, ["GET", "POST"]),
             (prefix, self.tenant, ["PATCH"]),
             (prefix + "/specs", self.specs, ["GET", "POST"]),
-            (prefix + "/specs/{spec_id}", self.spec, ["GET"]),
+            (prefix + "/specs/{spec_id}", self.spec, ["GET", "DELETE"]),
+            (prefix + "/specs/{spec_id}/deletion", self.spec_deletion.preview, ["GET"]),
             (prefix + "/specs/{spec_id}/refresh", self.refresh_spec, ["POST"]),
             (prefix + "/specs/{spec_id}/filter", self.filter_spec, ["POST"]),
             (prefix + "/channels", self.channels, ["GET", "POST"]),
@@ -262,7 +265,9 @@ class AdminAPI:
         return item
 
     async def spec(self, request: Request) -> Response:
-        """Read an immutable specification using both tenant and spec identity."""
+        """Read one immutable revision or dispatch explicit whole-specification deletion."""
+        if request.method == "DELETE":
+            return await self.spec_deletion.delete(request)
         item = await self.store.get_spec(request.path_params["tenant_id"], request.path_params["spec_id"])
         return JSONResponse(item.model_dump())
 

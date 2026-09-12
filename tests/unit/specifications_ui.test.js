@@ -23,7 +23,8 @@ function setup() {
   const state = { tenant: "tenant-a", epoch: 1, csrf: "test-session", settings: { max_spec_bytes: 128 }, specs: [], channels: [], me: { role: "platform_admin" } };
   const sandbox = { $, state, URL, TextEncoder, count: String, segment: encodeURIComponent, node: element, isAdmin: () => state.me?.role === "platform_admin",
     tenantPath: (tail) => `/api/tenants/${state.tenant}${tail}`, bind: (id, fn) => { handlers[id] = fn; },
-    action: (label, fn) => ({ textContent: label, click: fn }), emptyRow: () => {}, viewSource: () => {},
+    document: { createElementNS: (_, tag) => element(tag), querySelectorAll: () => [] },
+    action: (label, fn) => Object.assign(element("button", label), { click: () => sandbox.run(fn) }), emptyRow: () => {}, viewSource: () => {},
     run: async (fn) => { if (!state.busy) await fn(); },
     showDialog: (id) => { $(id).opened = true; }, notify: (text) => messages.push(text), refresh: async () => {},
     api: async (path, method, payload) => { calls.push({ path, method, payload }); return sandbox.result; },
@@ -32,21 +33,24 @@ function setup() {
   runInNewContext(`${script}\nspecifications.wire(); globalThis.render = specifications.render; globalThis.specifications = specifications;`, sandbox);
   const open = () => { handlers["new-spec"](); $("spec-name").value = "Example"; };
   const file = (content = "{}", name = "source.yaml") => ({ name, size: content.length, text: async () => content });
-  const edit = (spec) => { state.specs = [spec]; sandbox.render(); $("spec-rows").children[0].children[2].children[1].click(); };
+  const edit = (spec) => { state.specs = [spec]; sandbox.render(); specAction($("spec-rows").children[0], "refresh").click(); };
   return { $, state, sandbox, handlers, calls, messages, open, file, edit };
 }
 function text(node) { return [node.textContent, ...(node.children || []).map(text)].join(" "); }
+function specAction(row, kind) { return row.children[2].children.find((button) => button.dataset.specAction === kind); }
+function rowAction(ui, kind) { return specAction(ui.$("spec-rows").children[0], kind); }
 
 test("one logical row retains ordered history and exact pinned channel information", () => {
   const ui = setup(); ui.state.specs = [{ id: "new", name: "Example", parent_id: "old" }, { id: "old", name: "Example" }];
   ui.state.channels = [{ name: "Pinned channel", spec_ids: ["old"] }];
   ui.sandbox.render(); const rows = ui.$("spec-rows").children;
   assert.equal(rows.length, 1); assert.equal(rows[0].dataset.specificationId, "old"); assert.equal(rows[0].dataset.specId, "new");
-  assert.match(text(rows[0]), /Older versions are pinned/);
-  rows[0].children[2].children[3].click(); const history = ui.$("spec-history-rows").children;
+  assert.match(text(rows[0]), /2 versions/);
+  rowAction(ui, "history").click(); const history = ui.$("spec-history-rows").children;
   assert.equal(history.length, 2); assert.equal(history[1].dataset.specId, "old");
-  assert.match(text(history[1]), /Pinned channels: Pinned channel/);
-  assert.equal(history[1].children[2].children[0].textContent, "View source / download");
+  assert.match(text(history[1]), /1 bound channel/);
+  specAction(history[1], "details").click(); assert.match(text(ui.$("spec-details-content")), /Pinned channels: Pinned channel/);
+  assert.equal(specAction(history[1], "source")["aria-label"], "View source");
   assert.equal(JSON.stringify(ui.state.channels[0].spec_ids), '["old"]');
 });
 
@@ -92,9 +96,10 @@ test("refresh permits snapshot-only opt-out and reports unchanged responses", as
 test("URL, names and warnings render only as inert text and zero availability is visible", () => {
   const ui = setup(); const attack = '<img src=x onerror="alert(1)">';
   ui.edit({ id: "id", name: attack, source_type: "ucp_url", source_url: attack, warnings: [attack], diagnostics: { total_operations: 2, available_operations: 0, filtered_operations: 1, unsupported_operations: 1 } });
-  assert.match(text(ui.$("spec-rows")), /0 included in discovery · 1 filtered · 1 unsupported/);
+  assert.match(text(ui.$("spec-rows")), /0 available/); assert.doesNotMatch(text(ui.$("spec-rows")), /filtered|unsupported/);
+  rowAction(ui, "details").click(); assert.match(text(ui.$("spec-details-content")), /0 included in discovery · 1 filtered · 1 unsupported/);
   assert.equal(ui.$("spec-refresh-source").textContent, `${attack} · UCP URL: ${attack}`);
-  assert.equal(ui.$("spec-rows").children[0].children[1].children[0].className, "spec-diagnostics negative");
+  assert.equal(ui.$("spec-rows").children[0].children[1].children[1].className, "badge negative");
   assert.ok(text(ui.$("spec-rows")).includes(attack));
 });
 
@@ -136,12 +141,12 @@ for (const kind of ["file", "openapi", "ucp"]) test(`${kind} import can include 
   ui.open(); assert.equal(ui.$("spec-read-only-filter").checked, true);
 });
 
-function rowFilter(ui) { return ui.$("spec-rows").children[0].children[2].children[2].children[0]; }
+function rowFilter(ui) { return rowAction(ui, "filter"); }
 for (const source_type of ["file", "openapi_url", "ucp_url"]) test(`${source_type} row filter confirms saved-document successor without upload or refetch`, async () => {
   const ui = setup(); ui.edit({ id: "saved/id", name: "Example", source_type, read_only_filter: true });
   ui.$("spec-refresh-dialog").close(); const filter = rowFilter(ui);
-  assert.equal(filter.checked, true); filter.checked = false; await filter.events.change();
-  assert.equal(filter.checked, true); assert.equal(ui.calls.length, 0);
+  assert.equal(filter["aria-pressed"], "true"); await filter.click();
+  assert.equal(filter["aria-pressed"], "true"); assert.equal(ui.calls.length, 0);
   assert.equal(ui.$("spec-refresh-read-only-filter").checked, false);
   assert.equal(ui.$("spec-replacement").disabled, true); assert.equal(ui.$("spec-replacement").required, false);
   assert.match(ui.$("spec-refresh-help").textContent, /No URL refetch or replacement upload/);
@@ -152,24 +157,24 @@ for (const source_type of ["file", "openapi_url", "ucp_url"]) test(`${source_typ
 
 test("stored false filter is displayed and refresh preserves it by default", async () => {
   const ui = setup(); ui.edit({ id: "saved", name: "Example", source_type: "openapi_url", read_only_filter: false });
-  assert.equal(rowFilter(ui).checked, false); assert.equal(ui.$("spec-refresh-read-only-filter").checked, false);
+  assert.equal(rowFilter(ui)["aria-pressed"], "false"); assert.equal(ui.$("spec-refresh-read-only-filter").checked, false);
   await ui.handlers["spec-refresh-form"](); assert.equal(ui.calls[0].payload.read_only_filter, false);
 });
 
 test("busy and cancellation cannot change a saved filter; successors replace main rows", async () => {
   const ui = setup(); ui.edit({ id: "old", name: "Example" }); ui.$("spec-refresh-dialog").close();
-  ui.state.busy = true; const filter = rowFilter(ui); filter.checked = false; await filter.events.change();
-  assert.equal(filter.checked, true); assert.equal(ui.$("spec-refresh-dialog").opened, false);
-  ui.state.busy = false; filter.checked = false; await filter.events.change(); ui.$("spec-refresh-dialog").close();
+  ui.state.busy = true; const filter = rowFilter(ui); await filter.click();
+  assert.equal(filter["aria-pressed"], "true"); assert.equal(ui.$("spec-refresh-dialog").opened, false);
+  ui.state.busy = false; await filter.click(); ui.$("spec-refresh-dialog").close();
   await assert.rejects(ui.handlers["spec-refresh-form"](), /Workspace changed/);
   ui.state.specs.push({ id: "new", name: "Example", parent_id: "old" }); ui.sandbox.render();
   assert.equal(ui.$("spec-rows").children.length, 1); assert.equal(ui.$("spec-rows").children[0].dataset.specId, "new");
-  assert.equal(rowFilter(ui).disabled, false); assert.equal(rowFilter(ui).checked, true); assert.equal(ui.calls.length, 0);
+  assert.ok(!rowFilter(ui).disabled); assert.equal(rowFilter(ui)["aria-pressed"], "true"); assert.equal(ui.calls.length, 0);
 });
 
 for (const change of ["tenant", "epoch", "csrf"]) test(`stale ${change} blocks saved filter changes`, async () => {
   const ui = setup(); ui.edit({ id: "old", name: "Example" }); const filter = rowFilter(ui);
-  filter.checked = false; await filter.events.change(); ui.state[change] = change === "epoch" ? 2 : change === "tenant" ? "tenant-b" : "";
+  await filter.click(); ui.state[change] = change === "epoch" ? 2 : change === "tenant" ? "tenant-b" : "";
   await assert.rejects(ui.handlers["spec-refresh-form"](), /Workspace changed/); assert.equal(ui.calls.length, 0);
 });
 
@@ -196,22 +201,22 @@ test("repeated saved filter updates target latest IDs and survive workspace relo
   for (let index = 1; index <= 3; index++) {
     ui.sandbox.render(); const previous = index === 1 ? "root" : `version-${index - 1}`;
     ui.sandbox.result = { id: `version-${index}`, parent_id: previous, name: "Example", read_only_filter: index % 2 === 0 };
-    const filter = rowFilter(ui); filter.checked = !filter.checked; await filter.events.change(); await ui.handlers["spec-refresh-form"]();
+    const filter = rowFilter(ui); await filter.click(); await ui.handlers["spec-refresh-form"]();
     assert.equal(ui.calls.at(-1).path, `/api/tenants/tenant-a/specs/${previous}/filter`);
     assert.equal(ui.$("spec-rows").children.length, 1); assert.equal(ui.$("spec-rows").children[0].dataset.specificationId, "root");
   }
   const reloaded = setup(); reloaded.state.specs = JSON.parse(JSON.stringify(ui.state.specs)); reloaded.sandbox.render();
-  assert.equal(reloaded.$("spec-rows").children.length, 1); reloaded.$("spec-rows").children[0].children[2].children[3].click();
+  assert.equal(reloaded.$("spec-rows").children.length, 1); rowAction(reloaded, "history").click();
   assert.equal(reloaded.$("spec-history-rows").children.length, 4);
 });
 
 for (const role of ["platform_admin", "tenant_user"]) test(`${role} has no manual POST permission controls or requests`, async () => {
   const ui = setup(); ui.state.me.role = role;
   ui.edit({ id: "snapshot/id", name: "Example", approved_post_reads: [{ function_name: "example.legacy" }] });
-  assert.equal(ui.$("spec-rows").children[0].children[2].children.length, 4);
+  assert.equal(ui.$("spec-rows").children[0].children[2].children.length, 7);
   assert.doesNotMatch(text(ui.$("spec-rows")), /POST read|permission|approval|attest/i);
   assert.ok(Object.keys(ui.handlers).every((id) => !id.includes("permissions")));
-  const filter = rowFilter(ui); filter.checked = false; await filter.events.change();
+  const filter = rowFilter(ui); await filter.click();
   assert.match(ui.$("spec-refresh-help").textContent, /Included POST operations execute automatically and may have side effects/);
   await ui.handlers["spec-refresh-form"]();
   assert.deepEqual(JSON.parse(JSON.stringify(ui.calls)), [{ path: "/api/tenants/tenant-a/specs/snapshot%2Fid/filter", method: "POST", payload: { update_channels: true, read_only_filter: false } }]);
@@ -232,21 +237,66 @@ for (const fields of [
   { ucp_transport: "mcp", resolved_url: "https://shop.myshopify.com/api/ucp/mcp" },
   { source_transport: "mcp", resolved_endpoint: "https://shop.myshopify.com/api/ucp/mcp" },
   { document: { "x-gryphon-ucp": { transport: "mcp", endpoint: "https://shop.myshopify.com/api/ucp/mcp" } } },
-]) test("resolved UCP metadata renders in rows and retained history", () => {
+]) test("resolved UCP metadata is available only in version details", () => {
   const ui = setup(); ui.edit({ id: "saved", name: "Example", source_type: "ucp_url", ...fields });
-  assert.match(text(ui.$("spec-rows")), /Resolved UCP transport: mcp/);
-  assert.match(text(ui.$("spec-rows")), /Resolved endpoint: https:\/\/shop.myshopify.com\/api\/ucp\/mcp/);
-  ui.$("spec-rows").children[0].children[2].children[3].click();
-  assert.match(text(ui.$("spec-history-rows")), /Resolved UCP transport: mcp/);
+  assert.doesNotMatch(text(ui.$("spec-rows")), /Resolved endpoint|Resolved UCP/);
+  rowAction(ui, "history").click(); assert.doesNotMatch(text(ui.$("spec-history-rows")), /Resolved UCP/);
+  specAction(ui.$("spec-history-rows").children[0], "details").click();
+  assert.match(text(ui.$("spec-details-content")), /Resolved UCP transport: mcp/);
+  assert.match(text(ui.$("spec-details-content")), /Resolved endpoint: https:\/\/shop.myshopify.com\/api\/ucp\/mcp/);
   assert.deepEqual(ui.calls, []);
 });
 
 test("optional UCP metadata is inert, absent on legacy snapshots and never browser fetched", () => {
   const ui = setup(); const attack = '<img src=x onerror="alert(1)">';
   ui.edit({ id: "saved", name: "Example", source_type: "ucp_url", ucp_transport: attack, resolved_url: attack });
-  assert.ok(text(ui.$("spec-rows")).includes(attack));
+  assert.ok(!text(ui.$("spec-rows")).includes(attack)); rowAction(ui, "details").click();
+  assert.ok(text(ui.$("spec-details-content")).includes(attack));
   assert.equal(ui.sandbox.specifications.sourceMetadata({ source_type: "ucp_url" }).length, 0);
   assert.doesNotMatch(script, /fetch\(|post-reads|permissions|attest/);
+});
+
+for (const phase of ["preview", "delete"]) test(`workspace drift during ${phase} cannot retain a token or mutate another workspace`, async () => {
+  const ui = await deletionUI(); ui.type(ui.sandbox.result.name); let refreshes = 0; ui.sandbox.refresh = async () => { refreshes++; };
+  ui.sandbox.api = async () => { ui.state.epoch++; return ui.sandbox.result; };
+  await assert.rejects(phase === "preview" ? rowAction(ui, "delete").click() : ui.remove(), /Workspace changed/);
+  assert.equal(refreshes, 0); assert.equal(ui.$("spec-delete-name").value, ""); assert.equal(ui.$("spec-delete-submit").disabled, true);
+});
+async function deletionUI() {
+  const ui = setup(); ui.edit({ id: "latest/id", name: "Not authoritative" }); ui.$("spec-refresh-dialog").close();
+  ui.sandbox.result = { name: '<img src=x> Exact Name', confirmation_token: "preview-token", version_count: 3, channels: [{ name: "Bound <channel>", revision: 2 }] };
+  ui.remove = () => ui.$("spec-delete-form").events.submit({ preventDefault() {} });
+  ui.type = (value) => { ui.$("spec-delete-name").value = value; ui.$("spec-delete-name").events.input(); };
+  await rowAction(ui, "delete").click(); return ui;
+}
+test("deletion uses server preview, exact inert names, and clears on cancellation and success", async () => {
+  const ui = await deletionUI(); assert.equal(ui.calls[0].path, "/api/tenants/tenant-a/specs/latest%2Fid/deletion");
+  assert.equal(ui.$("spec-delete-name").value, ""); assert.equal(ui.$("spec-delete-submit").disabled, true);
+  assert.match(text(ui.$("spec-delete-impact")), /Bound <channel>|3 saved versions/);
+  for (const name of ["", "wrong", ui.sandbox.result.name.toLowerCase(), ` ${ui.sandbox.result.name}`]) {
+    ui.type(name); assert.equal(ui.$("spec-delete-submit").disabled, true); await assert.rejects(ui.remove(), /exact specification name/);
+  }
+  ui.type(ui.sandbox.result.name); assert.equal(ui.$("spec-delete-submit").disabled, false);
+  ui.$("spec-delete-dialog").close(); assert.equal(ui.$("spec-delete-name").value, ""); await assert.rejects(ui.remove(), /Workspace changed/);
+  await rowAction(ui, "delete").click(); ui.type(ui.sandbox.result.name); await ui.remove();
+  assert.equal(ui.calls.length, 3); assert.deepEqual(JSON.parse(JSON.stringify(ui.calls[2].payload)), { confirm_name: ui.sandbox.result.name, confirmation_token: "preview-token" });
+  assert.equal(ui.calls[2].method, "DELETE"); assert.equal(ui.$("spec-delete-name").value, ""); assert.equal(ui.$("spec-delete-dialog").opened, false);
+});
+for (const change of ["tenant", "epoch", "csrf", "409"]) test(`deletion ${change} requires explicit fresh confirmation, never retries`, async () => {
+  const ui = await deletionUI(); ui.type(ui.sandbox.result.name);
+  if (change === "409") ui.sandbox.api = async () => { ui.calls.push({ method: "DELETE" }); throw new Error("Conflict (HTTP 409)"); };
+  else ui.state[change] = change === "epoch" ? 2 : "changed";
+  await assert.rejects(ui.remove()); const sent = ui.calls.length; await assert.rejects(ui.remove()); assert.equal(ui.calls.length, sent);
+  assert.equal(ui.$("spec-delete-submit").disabled, true);
+  if (change === "409") { assert.equal(ui.$("spec-delete-name").value, ui.sandbox.result.name); assert.equal(ui.$("spec-delete-dialog").opened, true); }
+  else assert.equal(ui.$("spec-delete-name").value, "");
+});
+test("root and middle details reveal all 100 warnings, metadata and accessible icon actions", () => {
+  const ui = setup(); const warnings = Array.from({ length: 100 }, (_, n) => `warning-${n}`);
+  ui.state.specs = [{ id: "root-uuid", name: "Example", warnings }, { id: "middle-uuid", parent_id: "root-uuid", name: "Example", warnings, sha256: "full-sha" }, { id: "latest-uuid", parent_id: "middle-uuid", name: "Example" }];
+  ui.sandbox.render(); assert.doesNotMatch(text(ui.$("spec-rows")), /warning-99|latest-uuid/); rowAction(ui, "history").click();
+  for (const row of ui.$("spec-history-rows").children.slice(1)) { specAction(row, "details").click(); assert.match(text(ui.$("spec-details-content")), /warning-99/); assert.ok(text(ui.$("spec-details-content")).includes(row.dataset.specId)); assert.equal(specAction(row, "delete"), undefined); }
+  for (const button of ui.$("spec-rows").children[0].children[2].children) { assert.equal(button.title, button["aria-label"]); assert.equal(button.dataset.tooltip, button.title); assert.equal(button.children[0].tag, "svg"); assert.equal(button.children[0]["aria-hidden"], "true"); }
 });
 
 function adminSetup() {
@@ -262,7 +312,7 @@ function adminSetup() {
   runInNewContext(`${admin}\nglobalThis.state = state;`, sandbox);
   sandbox.request = sandbox.api; sandbox.refresh = async () => {}; sandbox.api = async (path, method, payload) => { calls.push({ path, method, payload }); };
   sandbox.audit = sandbox.renderAudit;
-  sandbox.specifications = { bindingChoices: () => [] };
+  sandbox.specifications = { bindingChoices: () => [], resetDeletion() {} };
   sandbox.renderUsers = sandbox.renderIdentity = sandbox.renderTenants = sandbox.renderSpecs = sandbox.renderChannels = sandbox.renderUsage = sandbox.renderAudit = () => {};
   sandbox.state.tenant = "tenant"; sandbox.state.settings = { docker_enabled: false, allowed_imports: [] };
   sandbox.wireActions();
@@ -290,14 +340,14 @@ test("inline action buttons prevent label activation from reversing explicit bin
 test("audit actor names are inert and separate from account subjects and event scope", () => {
   const ui = adminSetup(); const attack = '<img src=x onerror="alert(1)">';
   ui.sandbox.audit([
-    { event: "user.created", actor: { id: "actor-id", name: attack, username: "admin", display_source: "current" }, subject: { id: "subject-id", name: "New user" }, tenant_id: "tenant-id", channel_id: "channel-id" },
+    { event: "user.created", spec_id: "spec-id", actor: { id: "actor-id", name: attack, username: "admin", display_source: "current" }, subject: { id: "subject-id", name: "New user" }, tenant_id: "tenant-id", channel_id: "channel-id" },
     { event: "tenant.created", actor_id: "bootstrap", actor_name: "Bootstrap" },
     { event: "legacy" }, { event: "channel.updated", actor_id: "fallback-id", actor_username: "fallback" },
   ]);
   const rows = ui.$("audit-rows").children; assert.equal(rows[0].children.length, 5);
   assert.equal(rows[0].children[1].textContent, attack); assert.match(text(rows[0].children[1]), /Actor ID: actor-id/);
   assert.match(text(rows[0].children[1]), /Current account name/);
-  assert.match(text(rows[0].children[0]), /Account subject: New user · subject-id/);
+  assert.match(text(rows[0].children[0]), /Account subject: New user · subject-id/); assert.match(text(rows[0].children[0]), /Specification: spec-id/);
   assert.equal(rows[0].children[2].textContent, "tenant-id"); assert.equal(rows[0].children[3].textContent, "channel-id");
   assert.match(text(rows[1].children[1]), /Bootstrap administrator.*Actor ID: bootstrap/);
   assert.equal(rows[2].children[1].textContent, "Unknown / legacy actor"); assert.equal(rows[3].children[1].textContent, "fallback");

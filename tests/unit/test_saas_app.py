@@ -250,7 +250,10 @@ async def test_saas_tenant_channel_revisions_and_key_lifecycle(
     assert (await admin.get(prefix + "/usage")).json() == {"items": []}
     audit = (await admin.get("/api/audit")).json()["items"]
     assert {"key_rotated", "key_revoked", "tenant_disabled", "tenant_enabled"} <= {item["event"] for item in audit}
-    assert all(set(item) == {"id", "tenant_id", "channel_id", "event", "created_at", "actor"} for item in audit)
+    assert all(
+        set(item) == {"id", "tenant_id", "channel_id", "spec_id", "event", "created_at", "actor"} for item in audit
+    )
+    assert all(item["spec_id"] is None for item in audit)
     assert all(
         item["actor"]
         == {"id": "bootstrap", "username": None, "name": None, "kind": "bootstrap", "display_source": "snapshot"}

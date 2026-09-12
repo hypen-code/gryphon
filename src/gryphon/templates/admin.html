@@ -123,6 +123,17 @@
     <p id="spec-binding-warning" class="security-note">Confirm replacing bindings on every channel currently using this exact old version. Old snapshots are retained. Updating bindings invalidates running work and cached recipes may fail on catalog drift. Uncheck to create only a snapshot and leave all channel bindings unchanged.</p>
     <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="spec-refresh-submit" class="primary" type="submit">Confirm update / refresh</button></div>
   </form></dialog>
+  <dialog id="spec-details-dialog" class="wide-dialog" aria-labelledby="spec-details-title">
+    <div class="dialog-heading"><h2 id="spec-details-title">Version details</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="spec-details-content" class="source-location"></div><p class="dialog-message" role="status"></p>
+  </dialog>
+  <dialog id="spec-delete-dialog" aria-labelledby="spec-delete-title"><form method="post" id="spec-delete-form" autocomplete="off">
+    <div class="dialog-heading"><h2 id="spec-delete-title">Delete specification</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="spec-delete-impact" class="source-location"></div>
+    <p id="spec-delete-warning" class="security-note">This is irreversible: every saved version and its history will be gone. All channel bindings to these versions are detached. Affected running work is invalidated; cached recipes may be stale. Channels, their keys, and other APIs are not deleted.</p>
+    <label for="spec-delete-name">Exact specification name</label><input id="spec-delete-name" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="spec-delete-warning" autofocus>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="spec-delete-submit" class="danger" type="submit" disabled>Delete all versions</button></div>
+  </form></dialog>
   <dialog id="spec-history-dialog" class="wide-dialog" aria-labelledby="spec-history-title">
     <div class="dialog-heading"><h2 id="spec-history-title">Version history</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
     <p class="hint">Retained immutable snapshots, newest first. Viewing or downloading a version never changes channel bindings. Update and filter actions use the latest version in the main list.</p>

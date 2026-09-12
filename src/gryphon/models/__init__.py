@@ -13,6 +13,8 @@ from gryphon.models.audit import AuditEvent as AuditEvent
 from gryphon.models.mcp import MCPBinding as MCPBinding
 from gryphon.models.operation_policy import ReadOnlyPostOperation as ReadOnlyPostOperation
 from gryphon.models.specifications import SaaSSpec as SaaSSpec
+from gryphon.models.specifications import SpecDeletionChannel as SpecDeletionChannel
+from gryphon.models.specifications import SpecDeletionPreview as SpecDeletionPreview
 from gryphon.models.specifications import SpecDiagnostics as SpecDiagnostics
 from gryphon.models.specifications import SpecImport as SpecImport
 from gryphon.models.users import UserAccount as UserAccount
