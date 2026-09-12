@@ -32,6 +32,7 @@ _SAFE_ERRORS = frozenset(
         "sandbox_unavailable",
         "not_found",
         "execution",
+        "upstream",
         "internal",
         "cancelled",
     }

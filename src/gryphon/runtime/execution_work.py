@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from gryphon.errors import ConflictError
 from gryphon.models import ExecutionResult
+from gryphon.runtime.artifact_projection import guard_projection, offline_sandbox, projection_inputs
 from gryphon.runtime.execution_cleanup import SlotLease, finish_cleanup
 from gryphon.runtime.execution_metrics import current_measurements, observe
 from gryphon.runtime.execution_results import failure
@@ -40,13 +41,10 @@ async def work(
         await slots.acquire_local(scope.deadline)
         await executor._runs.start(record.id, record.owner)
         await slots.acquire_shared(scope.deadline)
-        if identity != executor._fingerprint():
-            raise ConflictError("Catalog or execution profile changed after admission")
-        duration = executor._config.execution_timeout_seconds
-        duration = min(duration, _RESTRICTED_SECONDS) if executor._config.sandbox_mode == "restricted" else duration
-        scope.deadline = time.monotonic() + duration
-        executor._guard(code)
+        artifact_id = _prepare(executor, code, scope, identity)
         async with asyncio.timeout_at(scope.deadline):
+            if artifact_id is not None:
+                inputs = await projection_inputs(executor, artifact_id, inputs, scope)
             result = await _backend(executor, source, inputs, scope, state)
             result.run_id, result.tool_calls = record.id, scope.calls
             result.execution_time_ms = int((time.monotonic() - started) * 1000)
@@ -72,6 +70,20 @@ async def work(
     return result
 
 
+def _prepare(executor: CodeExecutor, code: str, scope: ExecutionScope, identity: str) -> str | None:
+    """Recheck authority after admission and start the bounded execution deadline."""
+    if identity != executor._fingerprint():
+        raise ConflictError("Catalog or execution profile changed after admission")
+    duration = executor._config.execution_timeout_seconds
+    duration = min(duration, _RESTRICTED_SECONDS) if executor._config.sandbox_mode == "restricted" else duration
+    scope.deadline = time.monotonic() + duration
+    executor._guard(code)
+    artifact_id = executor._projections.get(scope.run_id)
+    if artifact_id is not None:
+        guard_projection(code)
+    return artifact_id
+
+
 async def _cache_success(
     executor: CodeExecutor,
     result: ExecutionResult,
@@ -83,7 +95,7 @@ async def _cache_success(
 ) -> None:
     """Preserve success-only recipe persistence after bounded output and shared-slot release."""
     # Cache on success
-    if result.success and executor._config.cache_enabled:
+    if result.success and executor._config.cache_enabled and record.id not in executor._projections:
         result.cache_id = await executor._cache.store(
             code,
             description,
@@ -105,7 +117,8 @@ async def _backend(
     if state is not None:
         state.backend_start = time.monotonic()
     try:
-        result = await executor._sandbox.run(source, inputs, scope)
+        sandbox = offline_sandbox(executor) if scope.run_id in executor._projections else executor._sandbox
+        result = await sandbox.run(source, inputs, scope)
     finally:
         if state is not None:
             state.backend_end = time.monotonic()

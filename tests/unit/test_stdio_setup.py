@@ -182,7 +182,7 @@ async def test_stdio_real_client_environment_only_computation_and_discovery(tmp_
         command=sys.executable, args=["-m", "gryphon", "stdio"], env=environment, cwd=str(tmp_path), keep_alive=False
     )
     async with Client(transport, timeout=60, init_timeout=60) as client:
-        assert len(await client.list_tools()) == 10
+        assert len(await client.list_tools()) == 11
         servers = await client.call_tool("list_servers", {})
         assert len(servers.data["servers"]) == int(with_sources)
         result = await client.call_tool(

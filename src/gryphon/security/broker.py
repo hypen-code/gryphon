@@ -16,6 +16,7 @@ from gryphon.security.mcp_client import invoke_tool
 from gryphon.security.network import NetworkClient, decode_json
 from gryphon.security.policies import check_domain_allowed, enforce_read_only, validated_url
 from gryphon.security.response import validate_response
+from gryphon.security.ucp_identity import effective_profile, prepare_arguments
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -80,7 +81,7 @@ class ToolBroker:
         manifest = self._registry.get_manifest(server_name)
         endpoint = self._registry.get_endpoint(server_name, function_name)
         self._authorize(manifest, endpoint, server_name, function_name)
-        normalized = validate_arguments(endpoint, arguments)
+        normalized = validate_arguments(endpoint, prepare_arguments(endpoint, arguments, self._config))
         headers: dict[str, str]
         if endpoint.mcp_binding is not None:
             url, headers, body = endpoint.mcp_binding.endpoint, {}, normalized.get("json_body", {})
@@ -180,6 +181,7 @@ class ToolBroker:
             binding.tool_name,
             body,
             expected_fingerprint=binding.tool_fingerprint,
+            ucp_agent_profile=effective_profile(endpoint, body, self._config),
             check_active=lambda: self._check_scope(scope),
             timeout=scope.deadline - time.monotonic(),
             max_bytes=self._config.max_response_size_bytes,

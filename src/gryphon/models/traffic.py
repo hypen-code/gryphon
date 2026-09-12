@@ -19,6 +19,7 @@ type ToolName = Literal[
     "cancel_run",
     "list_recipes",
     "read_artifact",
+    "transform_artifact",
     "list_skills",
     "get_server_skills",
 ]

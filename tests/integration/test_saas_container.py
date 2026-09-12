@@ -311,7 +311,7 @@ async def _admin(http: httpx.AsyncClient, deployment: _Deployment) -> tuple[str,
 async def _mcp(endpoint: str, token: SecretStr) -> None:
     """Discover the uploaded weather catalog and execute/replay actual Monty code without upstream calls."""
     async with Client(endpoint, auth=token.get_secret_value()) as client:
-        assert len(await client.list_tools()) == 10
+        assert len(await client.list_tools()) == 11
         assert client.server_capabilities is not None and client.server_capabilities.tasks is None
         catalog = _object((await client.call_tool("list_servers")).structured_content)
         assert [_object(item)["name"] for item in _items(catalog["servers"])] == ["weather"]

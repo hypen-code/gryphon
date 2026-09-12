@@ -11,12 +11,7 @@ Gryphon is the legendary guardian between agent-generated programs and API capab
 The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings use `GRYPHON_`. Checkout/local-wheel installation works without a claimed PyPI release. Only after verified publication document public-index installation as available. Keep `https://github.com/hypen-code/gryphon`.
 Release workflow `.github/workflows/publish.yml` accepts published releases or explicit version-tag dispatch, never branch pushes; tag `vX.Y.Z` must match both package versions. Keep full quality gates and wheel smoke checks before the separate OIDC publish job. PyPI publisher identity is `hypen-code` / `gryphon` / `publish.yml` / `pypi`, project `gryphon-runtime`; maintainers configure protected-environment reviewers. Never commit publishing tokens or automatically commit/tag/push/publish.
 
-Deployments include **local stdio, operator-token HTTP, and admin-managed hosted
-tenants/channels**. Hosted mode has exactly one active worker per control database,
-enforced by a lease; it is not horizontal/HA SaaS, billing, SSO, or user invitations.
-PostgreSQL holds control metadata, key hashes, aggregate usage, and audit only;
-per-channel recipes/receipts/artifacts remain on private local persistent storage.
-Persistent receipts are not exactly-once effects or a resumable workflow engine.
+Deployments include **local stdio, operator-token HTTP, and admin-managed hosted tenants/channels**. Hosted mode has exactly one active worker per control database, enforced by a lease; it is not horizontal/HA SaaS, billing, SSO, or user invitations. PostgreSQL holds control metadata, key hashes, aggregate usage, and audit only; per-channel recipes/receipts/artifacts remain on private local persistent storage. Persistent receipts are not exactly-once effects or a resumable workflow engine.
 
 ## 2. Locked technology and reproducibility
 
@@ -73,7 +68,7 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/runtime/docker_sandbox.py` | Optional networkless CPython transport and cleanup |
 | `src/gryphon/runtime/cache.py` | Owner-scoped recipes, exact-source identity, TTL/LRU |
 | `src/gryphon/runtime/runs.py`, `recovery_lease.py` | Durable receipts/idempotency and exclusive recovery ownership |
-| `src/gryphon/runtime/artifacts.py` | Owner-scoped, bounded, integrity-checked artifact storage |
+| `src/gryphon/runtime/artifacts.py`, `artifact_projection.py`, `models/artifacts.py`, `server_artifacts.py` | Owned integrity-checked storage, offline projection, bounded shape metadata and thin MCP adapter |
 | `src/gryphon/security/broker.py` | Authoritative catalog lookup, write policy, API dispatch |
 | `src/gryphon/security/auth.py`, `vault.py` | Host-only credential resolution and refresh |
 | `src/gryphon/security/network.py`, `policies.py`, `mcp_client.py`, `mcp_protocol.py` | Pinned egress/DNS/TLS, native sessions/JSON/SSE, fingerprint checks and bounded cleanup |
@@ -91,9 +86,7 @@ Keep shared domain models in `models/`, exported from `models/__init__.py`, and 
 
 ## 4. Public contracts
 
-The ten core tools are `list_servers`, `search_functions`, `get_functions`,
-`execute_code`, `run_cached_code`, `submit_code`, `get_run`, `cancel_run`,
-`list_recipes`, and `read_artifact`. The prompt is `reusable_code_guide`.
+The eleven core tools are `list_servers`, `search_functions`, `get_functions`, `execute_code`, `run_cached_code`, `submit_code`, `get_run`, `cancel_run`, `list_recipes`, `read_artifact`, and `transform_artifact`. The prompt is `reusable_code_guide`.
 `GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and
 `get_server_skills`; their guides are bounded, untrusted, and on demand.
 
@@ -102,9 +95,8 @@ The ten core tools are `list_servers`, `search_functions`, `get_functions`,
 - Discovery and inspection must fit byte budgets, expose truncation, and carry the catalog fingerprint. Inspect 1–5 functions per `get_functions` request.
 - Channel `include_function_summaries` defaults false, accepts optional strict booleans on create/PATCH, preserves omitted PATCH values, and overrides operator base config. It is never MCP caller-selected. Enabled `list_servers` includes all names/descriptions when they fit; larger catalogs need reachable bounded pages, not a fixed sample. Pass `next_cursor`/`next_function_cursor` as `cursor`/`function_cursor` together; compact mode requires function cursor zero. Mark text truncation and restart on fingerprint drift; `limit` counts servers.
 - UI notices must have close and 10-second auto-dismiss with timer reset on replacement and stale-timer protection. Banner dismissal must preserve inline dialog errors; quiet sign-out clears notices/timers.
-- Return native structured MCP results. Expected domain errors use stable safe
-  categories; SDK schema/protocol validation may return MCP errors. Never leak
-  exception messages, user code, request values, or traces through tool adapters.
+- Return native structured MCP results. Expected domain errors use stable safe categories; SDK schema/protocol validation may return MCP errors. `models.diagnostics.canonical_failure` selects finite Gryphon-owned messages; `public_result` preserves these and freshly validated diagnostics, never blind `error` passthrough. Revalidate bypassed model instances and reject forged extras; never leak exception messages, user code, request values or traces.
+- Local missing/invalid native profiles and exact known RPC conditions yield `error_type:upstream` with static configuration guidance and `{kind:upstream,phase:discovery|invoke,upstream_code:invalid_profile_url}`. Unknown well-formed RPC errors retain phase only; raw message/data.content/continue_url/numeric codes/private bodies never pass through. `ASTViolationError` yields `error_type:security` and only `{kind:ast,violation_type:<closed enum>,line:1..1000000}`; no detail/source/traces, including receipts.
 - `inputs` and replay `params` are complete structured JSON objects. Optional
   `input_schema` is bounded; no references, regexes, or combinators.
 - Never interpolate inputs, prepend parameter assignments, or use regex/string
@@ -171,6 +163,8 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 5. Bound output at production and serialization boundaries. Omit raw prints,
    stderr, upstream failure bodies, and traces. Artifacts must remain bounded
    and owner-scoped; chunks cannot exceed 8192 bytes.
+6. `transform_artifact(artifact_id,code,description,inputs?)` loads bounded owned integrity-checked JSON off-loop as `inputs['artifact']`, caller parameters as `inputs['params']`. Reuse AST/resource limits, admission, local/shared slots, deadline/cancellation and run ledger. Fresh Monty has no external functions, broker reference or network; reject `call_tool` references/aliases. Docker config rejects, never downgrade. Results may artifact again; receipts remain, but no replayable projection `cache_id`. Normal `run_cached_code` still reruns/refetches recipes.
+7. Use `models.artifacts.artifact_shape` for result/receipt summaries: `json_type`; objects add complete `top_level_keys` ≤32/512 serialized bytes (fewer under small budgets), `key_count`, `keys_truncated`; arrays add `length`, never values. Large-artifact `next` recommends `transform_artifact`, not upstream replay.
 
 ### Broker and credentials
 
@@ -240,8 +234,7 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
   decoded canonical API JSON before user reduction versus **full final JSON**,
   including artifact content. “Original” is not raw HTTP or a no-framework LLM
   counterfactual. Signed weighted reduction permits expansion; no baseline is N/A.
-- Count fixed allowlisted `tools/call` names (ten core/two optional), including
-  SDK-rejected known names, discovery, polls and artifact reads, separately from runs.
+- Count fixed allowlisted `tools/call` names (eleven core/two optional), including SDK-rejected known names, discovery, polls, artifact reads and transformations, separately from runs. Projection is execute-origin pure compute, not replay or a new API-backed reduction baseline.
   Exclude initialization, `tools/list`/SDK negotiation, HTTP headers and agent
   context. Wire bytes retain duplicate text/structured representations; only
   `structured_payload_bytes` counts the canonical structured payload once.
@@ -283,6 +276,8 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 - Diagnostics mean total/available/filtered/unsupported, not permission for every HTTP method. Ordinary OpenAPI unsupported request schemas reject; native MCP unsupported tools omit with warnings, never weakened validation. One active import, no queue, 25-second deadline and cancellation-owned cleanup. UCP errors use HTTP 400 `ucp_discovery`, not obsolete approval advice; normal validation stays separate.
 - UCP accepts published 2026-01-11/01-23/04-08/08-25 profiles. Root or explicit `/mcp` first probes same-origin `/.well-known/ucp`; prefer matching advertised REST, else MCP; malformed advertised contracts fail closed. Only explicit MCP routes fall back directly if profile unavailable. Never arbitrary redirect/HTML-follow; public advertised delegations pass allowedDomains and pinned DNS/TLS policy at every step. Original `source_url` stays separate from `resolved_profile_url`, `resolved_endpoint`, `source_transport`.
 - Preserve REST advertised schema-path GET subset: checkout; April/August cart/order too. Required auth/signing (canonical January) rejects; UCP-Agent/Request-Id stay caller-supplied, no real platform identity. Unsupported REST response schemas omit with warnings, not claimed validation. No broad REST writes/extension composition or arbitrary callback/capability fetches. Max 32 schema documents, approved same-origin refs (profile origin/ucp.dev/operator-approved), structural/expansion bounds.
+- `GRYPHON_UCP_AGENT_PROFILE` is optional (`None`, `repr=False`): require a REAL fetchable public HTTPS PLATFORM profile from the operator, never fabricate one/use merchant identity as default or edit real env. Enforce ≤2048 characters, no userinfo/query/fragment/quotes/control/unsafe escapes/interpolation/meta or prohibited IPs; validate structure/current exact-domain policy at init/use and ALL DNS answers public at use, even if private networks enabled, without fetching the profile. Include configured URI in policy fingerprint; `doctor` exposes only configured boolean.
+- Bound native MCP alone fills omitted `json_body.meta.ucp-agent.profile`/containers only when the whole path is required in schema. Explicit empty/invalid values never overwritten; valid explicit body wins with matching fixed `UCP-Agent: profile="URI"` on session init/discovery/invocation/owned cleanup as applicable, never ordinary OpenAPI. `get_functions` parent `ucp_agent_profile` is `{required,operator_configured,input_path,guidance}` with generic `call_tool('shop.search_catalog', {'json_body': inputs})`; never leak configured URL or suggest empty profile.
 - Native import runs initialize/notifications/initialized/paginated tools/list, never business tools/call. Known reads: get_checkout/get_cart/get_order/search_catalog/lookup_catalog/get_product (catalog.lookup). Filter true hides unknown/non-read; false includes supported native non-read tools for automatic execution, **potentially mutating**. Unsupported patterns/combinators/refs/input/output semantics omit the tool with warnings. Preserve descriptions and all required native inputs (including meta.ucp-agent.profile) inside `json_body`; no generated identity or inherited secrets.
 - Save trusted native endpoint/name/raw input/output schema fingerprint in `mcp_bindings` outside untrusted OpenAPI; synthetic `/__mcp__/...` POST paths NEVER actual routes. Fresh invocation reinitializes and rediscovers metadata, checks fingerprint BEFORE one tools/call; stale `conflict` requires refresh, no side-effect retries. Metadata-only filter changes remain network-free; endpoint/raw schema drift must change refresh identity even if normalized OpenAPI is unchanged.
 - Native JSON/SSE must match request IDs, bound notifications/session headers and reject protocol drift. Prefer structuredContent; decode one finite JSON text block; retain non-JSON/multimodal blocks without fetching resources. SDK handshake negotiation (2025-11-25 proposal/2025-03-26 compatible selection) is not Tasks/modern server-discovery/auth-platform completion. Discovery: max 1000 tools / 100 pages / 5 MiB aggregate within configured/hosted caps and min(HTTP timeout, 30s), outer 25s. Invocation init/list/call share caller deadline/response cap; only validated owned sessions get fixed-endpoint DELETE cleanup under a separate 2s / 1 KiB nonfatal budget; cancellation awaits local cleanup. Not arbitrary DELETE authority.
@@ -338,6 +333,7 @@ node --check tests/integration/browser_ui.cjs
 uv run --frozen --extra saas python tests/integration/browser_ui_fixture.py
 ```
 The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It covers mobile/desktop compact rows, full latest/middle-version details, accessible action icons/tooltips/focus, read-only grouped History, typed-name whole-lineage deletion/fresh-preview stale-context guards, absence of POST approval controls and preserved actors, import/refresh/filter choices, no-fetch saved filter changes, exact/pinned bindings, warnings, retained downloads, channel summary create/edit and notification close/expiry. Puppeteer is an optional external prerequisite, not a Python runtime dependency. Node also checks notice expiry, manual close while busy, replacement/stale timers, inline errors and quiet sign-out cleanup.
+UCP search/diagnostic/projection acceptance: `uv run --frozen --extra saas pytest tests/integration/test_ucp_search_workflow.py tests/integration/test_ucp_identity_broker.py tests/unit/test_ucp_identity.py tests/unit/test_safe_diagnostics.py tests/unit/test_ast_diagnostics.py tests/unit/test_artifact_projection.py`. Use synthetic peers/temporary stores, not live business calls or operator env. README must show real operator-provided profile setup (placeholder explicitly labeled), search with catalog-only inputs, then projection using returned artifact ID/actual shape metadata; no second upstream call or 21-chunk assembly. Do not assume universal `products`/`title` shape. User-reported fetchable-profile success is not our live-search verification or authority to default to merchant identity; preserve earlier metadata-only evidence. Run full gates too; never claim pending tests passed.
 Targeted suites: `tests/unit/test_ucp*.py`, `test_mcp_client*.py`, `test_mcp_shopify.py`, `test_saas_post_reads.py`, `test_saas_audit.py`, `test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`, `test_discovery_summaries.py`; integration `tests/integration/test_saas_automatic_posts.py`, `test_saas_post_read_api.py`, `test_saas_post_read_runtime.py`, `test_saas_audit_actor.py`, `test_saas_spec_refresh.py`, `test_saas_ucp_http.py`, `test_saas_spec_filter.py`, `test_saas_discovery_summaries.py`. Run selected paths with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—full gates. Verify route404, no-fetch filtering, raw-schema/endpoint drift, native dispatch/cleanup and all remaining method/channel/schema/network denials; never claim pending gates passed.
 
 Local pre-commit hooks invoke locked `uv run --frozen` commands; mypy and pytest

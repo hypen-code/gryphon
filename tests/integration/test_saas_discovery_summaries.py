@@ -50,7 +50,7 @@ async def _listing(channel: dict[str, str], summaries: bool) -> dict[str, Any]:
     """Read actual MCP metadata and prove no client-selected mode or endpoint tools are advertised."""
     async with Client(channel["url"], auth=channel["token"]) as client:
         tools = await client.list_tools()
-        assert len(tools) == 10
+        assert len(tools) == 11
         discovery = next(tool for tool in tools if tool.name == "list_servers")
         assert "include_function_summaries" not in discovery.input_schema["properties"]
         assert ("with function names and descriptions" in str(discovery.description)) is summaries

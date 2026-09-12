@@ -122,7 +122,7 @@ async def test_protocol_tool_schemas_exclude_authority_arguments(protocol_config
     """Native MCP schemas describe structured inputs and never expose write/owner approval flags."""
     async with Client(create_server(protocol_config)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
-        assert len(tools) == 10 and tools["execute_code"].output_schema["type"] == "object"
+        assert len(tools) == 11 and tools["execute_code"].output_schema["type"] == "object"
         for tool in tools.values():
             assert tool.output_schema and tool.output_schema["type"] == "object"
             assert not {"owner", "allow_writes", "approved", "approval"} & tool.input_schema["properties"].keys()

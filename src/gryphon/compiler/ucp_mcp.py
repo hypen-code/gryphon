@@ -90,7 +90,7 @@ def tools_to_openapi(
     paths: dict[str, Any] = {}
     bindings: dict[str, MCPBinding] = {}
     warnings = {
-        "MCP arguments use the json_body wrapper; caller must supply required UCP agent metadata.",
+        "MCP arguments use json_body; required UCP profile omissions can use GRYPHON_UCP_AGENT_PROFILE.",
         "MCP schema format values are annotations, not URI or other format validation.",
         "Profile extension declarations do not compose or relax native tool schemas.",
     }
@@ -133,8 +133,10 @@ def _operation(tool: dict[str, Any], alias: str) -> dict[str, Any]:
         "operationId": alias,
         "summary": (str(tool.get("description", "")).strip().split("\n", 1)[0] or f"MCP {tool['name']}")[:200],
         "description": (
-            "Pass native arguments inside json_body. Supply your real UCP platform profile when meta.ucp-agent.profile "
-            "is required; Gryphon does not generate that identity. " + str(tool.get("description", ""))
+            "Pass native arguments inside json_body. Required meta.ucp-agent.profile omissions may use operator "
+            "GRYPHON_UCP_AGENT_PROFILE. Explicit profiles must be public HTTPS and match domain policy; "
+            "the UCP-Agent header matches the effective identity. Gryphon never generates an identity or "
+            "fetches the profile. " + str(tool.get("description", ""))
         )[:1000],
         "requestBody": {"required": True, "content": {"application/json": {"schema": request}}},
         "responses": {

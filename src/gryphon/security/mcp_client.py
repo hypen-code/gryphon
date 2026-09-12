@@ -13,7 +13,7 @@ from uuid import uuid4
 import httpx
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, LATEST_HANDSHAKE_VERSION
 
-from gryphon.errors import ConflictError, ExecutionError, SecurityViolationError
+from gryphon.errors import ConflictError, ExecutionError, SecurityViolationError, UpstreamDiagnosticError
 from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.security.mcp_protocol import (
     MAX_NOTIFICATIONS,
@@ -25,12 +25,14 @@ from gryphon.security.mcp_protocol import (
 )
 from gryphon.security.network import NetworkClient
 from gryphon.security.response import validate_response
+from gryphon.security.ucp_identity import configured_profile, validate_profile_addresses
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from gryphon.config import GryphonConfig
+    from gryphon.models.diagnostics import DiagnosticPhase
 
 MAX_TOOLS = 1000
 MAX_PAGES = 100
@@ -81,7 +83,14 @@ def _validate_tool(tool: Any) -> None:
 class _Session:
     """Own one endpoint, ephemeral protocol/session state, and an aggregate byte budget."""
 
-    def __init__(self, client: NetworkClient, endpoint: str, max_bytes: int, deadline: float) -> None:
+    def __init__(
+        self,
+        client: NetworkClient,
+        endpoint: str,
+        max_bytes: int,
+        deadline: float,
+        ucp_agent_profile: str | None = None,
+    ) -> None:
         """Keep session authority local to a single discovery or invocation."""
         self.client, self.endpoint = client, endpoint
         self.remaining, self.deadline = max_bytes, deadline
@@ -89,10 +98,13 @@ class _Session:
         self.session_id: str | None = None
         self.initialized = False
         self.notifications = 0
+        self.ucp_agent_profile = ucp_agent_profile
 
     def _headers(self) -> dict[str, str]:
         """Build only native endpoint-local protocol headers, never inherited authority."""
         headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": self.protocol}
+        if self.ucp_agent_profile is not None:
+            headers["UCP-Agent"] = f'profile="{self.ucp_agent_profile}"'
         if self.session_id is not None:
             headers["Mcp-Session-Id"] = self.session_id
         return headers
@@ -127,13 +139,17 @@ class _Session:
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Match one fresh request identity and reject non-JSON or unowned results."""
         response_id = uuid4().hex
-        response = await self._post(
-            {"jsonrpc": "2.0", "id": response_id, "method": method, "params": params}, response_id
-        )
+        phase: DiagnosticPhase = "invoke" if method == "tools/call" else "discovery"
+        try:
+            response = await self._post(
+                {"jsonrpc": "2.0", "id": response_id, "method": method, "params": params}, response_id
+            )
+        except UpstreamDiagnosticError as exc:
+            raise UpstreamDiagnosticError(exc.diagnostic.model_copy(update={"phase": phase})) from None
         media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
             raise ExecutionError("Remote MCP returned an unsupported response type")
-        record = rpc_record(parse_json(response.content), response_id)
+        record = rpc_record(parse_json(response.content), response_id, phase=phase)
         if record is None:
             raise ExecutionError("Remote MCP returned no matching response")
         result: dict[str, Any] = record["result"]
@@ -223,14 +239,27 @@ class _Session:
 
 
 @asynccontextmanager
-async def _session(config: GryphonConfig, endpoint: str, max_bytes: int, timeout: float) -> AsyncIterator[_Session]:
+async def _session(
+    config: GryphonConfig,
+    endpoint: str,
+    max_bytes: int,
+    timeout: float,
+    ucp_agent_profile: str | None = None,
+    *,
+    phase: DiagnosticPhase = "invoke",
+    check_active: Callable[[], None] | None = None,
+) -> AsyncIterator[_Session]:
     """Bound protocol work; separately allow owned cleanup after completion or cancellation."""
     if type(max_bytes) is not int or max_bytes <= 0 or not math.isfinite(timeout) or timeout <= 0:
         raise ExecutionError("Remote MCP session budget is invalid")
     deadline = asyncio.get_running_loop().time() + timeout
-    session = _Session(NetworkClient(config), endpoint, max_bytes, deadline)
+    session = _Session(NetworkClient(config), endpoint, max_bytes, deadline, ucp_agent_profile)
     try:
         async with asyncio.timeout_at(deadline):
+            if ucp_agent_profile is not None:
+                await validate_profile_addresses(ucp_agent_profile, config, phase=phase)
+            if check_active is not None:
+                check_active()
             await session.initialize()
             yield session
     except (TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError, RecursionError):
@@ -253,7 +282,8 @@ async def discover_tools(config: GryphonConfig, endpoint: str, max_bytes: int) -
     """
     limit = min(max_bytes, config.max_spec_size_bytes, MAX_DISCOVERY_BYTES)
     timeout = min(config.http_timeout_seconds, MAX_DISCOVERY_SECONDS)
-    async with _session(config, endpoint, limit, timeout) as session:
+    profile = configured_profile(config, phase="discovery")
+    async with _session(config, endpoint, limit, timeout, profile, phase="discovery") as session:
         return await session.tools()
 
 
@@ -285,6 +315,7 @@ async def invoke_tool(
     timeout: float,
     max_bytes: int,
     check_active: Callable[[], None] | None = None,
+    ucp_agent_profile: str | None = None,
 ) -> Any:
     """Initialize a fresh session, check metadata drift, and call exactly once.
 
@@ -297,6 +328,7 @@ async def invoke_tool(
         timeout: Absolute total-operation duration, including DNS and metadata discovery.
         max_bytes: Aggregate response byte limit across initialization, listing, and call.
         check_active: Optional broker-owned revocation check between protocol stages.
+        ucp_agent_profile: Effective public UCP identity; fixed header only, never host credentials.
 
     Returns:
         Structured content, one finite JSON text value, or unchanged native content blocks.
@@ -310,7 +342,7 @@ async def invoke_tool(
         raise ExecutionError("Remote MCP invocation is invalid")
     check = check_active if check_active is not None else lambda: None
     check()
-    async with _session(config, endpoint, max_bytes, timeout) as session:
+    async with _session(config, endpoint, max_bytes, timeout, ucp_agent_profile, check_active=check) as session:
         check()
         tools = await session.tools()
         check()

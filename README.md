@@ -156,9 +156,11 @@ Navigation uses consistent outlined icons. **API specifications** shows **one co
 - Exact name and current fingerprint are checked **before mutation in a serialized SQL transaction**. All lineage rows/bindings are removed atomically; each affected channel revision advances once with audit, then owned `finish_cleanup` drains affected runtimes before **200** `{deleted:true,specification_id,deleted_spec_ids,updated_channel_ids}`. Unrelated same-name roots, channel IDs/keys/other bindings/settings, usage, receipts and artifacts remain; no host-file/cache purge. Stale recipes reject catalog drift; receipts remain under normal retention. `spec_deleted` records the verified actor and root through optional `AdminAudit.spec_id` (legacy default `None`); old audits remain subject to **normal bounded retention**, not an unlimited archive. This explicit confirmed deletion is the sole exception to snapshot retention; refresh/filter still never overwrite history. No migration or development deletion of operator data; tests use temporary stores.
 Notifications have a close button and **10-second auto-dismiss**; replacement messages restart the timer. Inline dialog errors remain after banner dismissal; quiet sign-out clears pending notifications.
 
-**UCP is a bounded REST/native MCP adapter, not full commerce or platform identity support.** Published **2026-01-11, 2026-01-23, 2026-04-08 and 2026-08-25** profile shapes are recognized. Supply a root, JSON profile URL, or explicit `/mcp` endpoint. Roots and explicit MCP routes probe the **same-origin `/.well-known/ucp` first**; a matching advertised shopping REST binding is preferred, otherwise MCP; malformed advertised contracts fail closed. Only explicit MCP routes fall back directly when the profile is unavailable. No arbitrary redirects or HTML links are followed. Public profile-advertised delegations are allowed subject to `GRYPHON_ALLOWED_DOMAINS` and DNS/TLS policy at every step.
+**UCP is a bounded REST/native MCP adapter, not full commerce or a platform identity provider.** Published **2026-01-11, 2026-01-23, 2026-04-08 and 2026-08-25** profile shapes are recognized. Supply a root, JSON profile URL, or explicit `/mcp` endpoint. Roots and explicit MCP routes probe the **same-origin `/.well-known/ucp` first**; a matching advertised shopping REST binding is preferred, otherwise MCP; malformed advertised contracts fail closed. Only explicit MCP routes fall back directly when the profile is unavailable. No arbitrary redirects or HTML links are followed. Public profile-advertised delegations are allowed subject to `GRYPHON_ALLOWED_DOMAINS` and DNS/TLS policy at every step.
 REST remains the original subset: matching advertised GET IDs `get_checkout`, `get_cart`, `get_order` (January: checkout only), with schema-defined paths. Required **UCP-Agent/Request-Id** remain caller-supplied; required auth/signing rejects, including canonical January signing. Unsupported REST response schemas are omitted with explicit warnings, not claimed validation. No broad REST write adaptation or extension composition is added.
 Native MCP import performs **initialize → notifications/initialized → paginated tools/list**, never business `tools/call`. The filter recognizes six read methods: `get_checkout`, `get_cart`, `get_order`, `search_catalog`, `lookup_catalog`, `get_product` (catalog.lookup). Unknown/non-read tools are hidden with filtering on; off includes **supported** native non-read tools for automatic execution, potentially with side effects. Unsupported native schema constraints (including patterns, combinators and refs) omit the entire tool with warnings rather than silently weaken validation. Preserve all required arguments, including `meta.ucp-agent.profile`, inside **`json_body`**; Gryphon does not generate a real platform identity or inherit auth secrets.
+For native MCP, the operator may set **`GRYPHON_UCP_AGENT_PROFILE`** (default unset/`None`) to their **real, publicly fetchable platform profile**, not a fabricated URL or the merchant's profile as default. It must be public HTTPS, at most 2048 characters, without userinfo/query/fragment, quotes/control/unsafe escapes, interpolation or prohibited IP/metadata addresses. Structure/current `GRYPHON_ALLOWED_DOMAINS` policy are checked at initialization/use, and **all DNS answers must be public at use**, even if private networks are enabled. Gryphon does not fetch this identity document or prove it works; the operator must verify it. Never overwrite an existing real operator environment during setup/development.
+Only bound native tools with the **entire profile path required in schema** receive omitted `meta`/`ucp-agent`/`profile` defaults. Explicit empty/invalid values are **never overwritten**; a valid explicit body profile wins with a matching `UCP-Agent: profile="URI"` header on native session requests, including initialization/discovery/owned cleanup as applicable. Ordinary OpenAPI receives no injection. `get_functions` adds parent `ucp_agent_profile` metadata (`required`, `operator_configured`, `input_path`, `guidance`) and an input-based usage example, never the configured URI or an empty-profile example. Changing the configured URI changes policy identity for recipes/receipts.
 Saved `source_url` remains the original input; `resolved_profile_url`, `resolved_endpoint` and `source_transport` record resolution separately. Trusted `mcp_bindings` store the native name, endpoint and raw input/output schema fingerprint **outside the untrusted OpenAPI document**. View/download is the compiled catalog document, not a portable transport authorization: synthetic `/__mcp__/...` POST paths are **never actual upstream routes**. Refresh rediscovers metadata; saved filter changes need no remote fetch.
 Each native invocation starts a fresh session, rediscovers tools and checks the raw name/input/output fingerprint **before one `tools/call`**; stale bindings return `conflict` and require refresh. No side-effect retries. JSON/SSE replies must match request IDs, with notification/session bounds. `structuredContent` is preferred; one finite JSON text block is decoded, while non-JSON/multimodal content blocks are retained without resource fetching. Known SDK handshake versions are negotiated (2025-11-25 proposal, compatible 2025-03-26 selection), not a claim of Tasks, modern server discovery or complete authentication support.
 Discovery permits at most **1000 tools / 100 pages**, **32 REST schema documents**, and aggregate raw response bytes bounded by hosted/configured spec limits and **5 MiB**. MCP discovery has a **min(HTTP timeout, 30 seconds)** deadline within the outer **25-second** import limit; invocation initialize/list/call share the caller deadline and response-byte cap. Verified owned sessions may receive one fixed-endpoint cleanup DELETE under a separate **2-second / 1-KiB** nonfatal budget; cancellation awaits owned local cleanup. This protocol cleanup is not authorization for arbitrary DELETE operations. REST refs stay on the approved schema origin (profile origin, `https://ucp.dev`, or operator-approved), with structural/expansion limits.
@@ -206,17 +208,9 @@ see only their enabled tenant. Channel keys cannot read this API.
 | Token equivalents | UI separates **ESTIMATED** wire and structured-payload equivalents: `ceil(UTF-8 bytes / 4)`, not a tokenizer. Round per observed request field / comparable run then sum; reused-source estimate rounds the total. |
 | Timing | UI shows queue/backend averages and **response-production latency**, excluding its own observation persistence—not client end-to-end latency. Response-production/run histogram p50/p95 are **upper bounds**, not exact percentiles. Wall times overlap, not CPU/time saved; backend includes network; broker wraps credentials/dispatch/response checks, not earlier argument/policy guards; queue includes preparation. |
 
-“Original”/“raw API” here means broker-accepted, validated, decoded canonical JSON,
-**not raw HTTP response bodies or an LLM-without-Gryphon counterfactual**.
-Traffic allowlists 12 tool names (ten core/two optional); SDK-rejected known names can count as errors.
-Discovery, metadata, `get_run` polls and artifact reads count; exclusions include initialization,
-`tools/list`/SDK negotiation, HTTP headers and agent context. Response wire bytes
-include any duplicate structured/text representations; only the structured-payload
-counter counts that payload once. Wire token estimates are not actual model tokens.
-Tool definitions and all client context are **not** claimed to fit or be counted
-by Gryphon's response/context budgets. Actual model context, generation, reasoning
-and billing are unobservable (**null / N/A**); no dollar, CPU, time or round-trip
-savings are guaranteed. Request count is not run count.
+“Original”/“raw API” means broker-accepted, validated, decoded canonical JSON, **not raw HTTP response bodies or an LLM-without-Gryphon counterfactual**.
+Traffic allowlists **13 tool names (eleven core/two optional)**; SDK-rejected known names can count as errors. Discovery, metadata, `get_run` polls, artifact reads and transformations count; exclusions include initialization, `tools/list`/SDK negotiation, HTTP headers and agent context. Wire bytes include duplicate structured/text representations; only the structured-payload counter counts that payload once. Artifact projection is execute-origin pure compute, not replay or a new API-backed reduction baseline.
+Tool definitions and all client context are **not** claimed to fit or be counted by Gryphon's response/context budgets. Wire token estimates are not actual model tokens. Actual model context, generation, reasoning and billing are unobservable (**null / N/A**); no dollar, CPU, time or round-trip savings are guaranteed. Request count is not run count.
 
 Terminal observation includes background submissions when they finish, even without
 polling; failures/cancellations remain separate. Observation is **best effort**:
@@ -254,14 +248,7 @@ python -m pip install /absolute/path/to/gryphon/dist/gryphon_runtime-2.0.0-py3-n
 python -m pip install '/absolute/path/to/gryphon/dist/gryphon_runtime-2.0.0-py3-none-any.whl[saas]'
 ```
 
-The distribution is **`gryphon-runtime`**, not `gryphon`. **Only after version
-2.0.0 has actually been published to PyPI**, the no-checkout stdio command is
-`uvx --from gryphon-runtime==2.0.0 gryphon stdio`, or install with
-`python -m pip install gryphon-runtime==2.0.0`. An MCP entry can then use your
-absolute `uvx` executable, args `["--from", "gryphon-runtime==2.0.0", "gryphon", "stdio"]`,
-and the same `GRYPHON_SWAGGERS` environment (provide your own spec file or public
-HTTPS spec URL). Hosted package installs use `gryphon-runtime[saas]==2.0.0`.
-These are conditional instructions, **not a publication claim**.
+The distribution is **`gryphon-runtime`**, not `gryphon`. **Only after version 2.0.0 has actually been published to PyPI**, use `uvx --from gryphon-runtime==2.0.0 gryphon stdio` or `python -m pip install gryphon-runtime==2.0.0`. An MCP entry can then use your absolute `uvx` executable, args `["--from", "gryphon-runtime==2.0.0", "gryphon", "stdio"]`, and the same `GRYPHON_SWAGGERS` environment (provide your own spec file or public HTTPS spec URL). Hosted package installs use `gryphon-runtime[saas]==2.0.0`. These are conditional instructions, **not a publication claim**.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for maintainer release setup and quality gates.
 
 ## The MCP interface
@@ -277,6 +264,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for maintainer release setup and quality 
 | `get_run` / `cancel_run` | Poll caller-owned work / revoke and await cleanup |
 | `list_recipes` | Search caller-owned cached recipe summaries |
 | `read_artifact` | Read caller-owned JSON in bounded chunks |
+| `transform_artifact` | Reduce an owned saved artifact offline; no upstream calls or replayable recipe |
 
 `reusable_code_guide` explains execution on demand. Optional `GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and `get_server_skills` in local/operator mode. Guides are bounded, untrusted data, not write approval. Discovery includes fingerprints/truncation; follow continuation or narrow searches. MCP `readOnlyHint` is **not authorization**.
 `list_servers` stays compact by default. Hosted channels choose `include_function_summaries`; local/operator config uses `GRYPHON_INCLUDE_FUNCTION_SUMMARIES=true`. When enabled, server rows include `functions` with names/descriptions, all when they fit—not a fixed sample. Larger collections paginate within response budgets: pass **both** `next_cursor` and `next_function_cursor` back as `cursor` and `function_cursor`; a nonzero function cursor continues the same server. `limit` counts servers, not functions; compact mode requires `function_cursor=0`. Oversized text is marked truncated. Restart pagination if the registry fingerprint changes; use `get_functions` for schemas.
@@ -307,20 +295,31 @@ Optional bounded `input_schema` rejects references, regexes and combinators
 source, schema and catalog/policy digest; replay revalidates and rejects drift.
 Reordering/duplicating exact write permits does not change identity; changing the set does.
 
+### UCP search, then reduce the saved result
+
+Before launching/restarting Gryphon, have the operator supply their real fetchable **platform** profile. The following URL is a **placeholder**, not a working identity; replace it, and preserve any existing real setting:
+```bash
+export PUBLIC_PROFILE='https://your-platform.example/.well-known/ucp'
+export GRYPHON_UCP_AGENT_PROFILE="$PUBLIC_PROFILE"
+```
+After importing/binding the merchant UCP source as `shop`, inspect `shop.search_catalog` with `get_functions`; confirm the actual native schema and `ucp_agent_profile.operator_configured` (no URI is exposed). `doctor` also reports only `ucp_agent_profile_configured`, not fetchability.
+1. Send `execute_code` with catalog inputs only; omitted required identity is filled by the broker:
+```json
+{"code":"result = await call_tool('shop.search_catalog', {'json_body': inputs})","description":"Search catalog","inputs":{"catalog":{"query":"bedsheets"}}}
+```
+2. If `response.truncated` and `response.artifact_id` are present, inspect `response.data.json_type` / `top_level_keys` and send `transform_artifact` using that returned ID. This **synthetic shape example** assumes an object with `products` containing `title`; adapt to the actual inspected shape, not every merchant's response:
+```json
+{"artifact_id":"<response.artifact_id>","code":"products = inputs['artifact']['products']\nresult = {'count': len(products), 'titles': [p['title'] for p in products[:inputs['params']['take']]]}","description":"Summarize saved search","inputs":{"take":5}}
+```
+This reduces already saved JSON without a second upstream call or assembling, for example, 21 `read_artifact` chunks. Normal `run_cached_code` is different: it reruns the original recipe and refetches. `tests/integration/test_ucp_search_workflow.py` exercises this with a synthetic peer, not a live merchant search verified this cycle. The user's report that a fetchable profile worked does not make the merchant profile our configured platform identity; earlier live evidence above remains metadata-only.
+
 ### Results, receipts and cancellation
 
-Native structured results contain `success`, result `data`, available handles,
-and stable `error_type` categories, including `sandbox_unavailable`. Raw prints,
-stderr, upstream errors and traces are omitted. Large permitted JSON becomes
-owner-scoped artifacts: follow `read_artifact`'s `next_offset` to `eof` in chunks
-of at most **8192 bytes**, still subject to context and full-result limits.
-`submit_code` returns an `id`; poll `get_run(run_id=...)`. States are `queued`,
-`running`, `succeeded`, `failed`, `cancelled`, `interrupted`. Optional owner-scoped
-`idempotency_key` deduplicates matching requests only while retained; conflicts fail.
-Restart marks queued/running work **interrupted**, with **no automatic replay,
-crash resume or exactly-once effects**. Inspect upstream state before retrying.
-Cancellation revokes authority and awaits cleanup, but cannot undo accepted API
-actions. Receipts/artifacts are not a workflow engine or permanent audit archive.
+Native structured results contain `success`, result `data`, available handles and stable `error_type` categories, including `sandbox_unavailable`. Failure messages come from a finite Gryphon-owned catalog; public results and nested receipts preserve only freshly validated diagnostics, never raw error text or forged extra fields. Missing/invalid native profiles and the exact known RPC condition return `error_type:"upstream"`, static configuration guidance and `diagnostic:{kind:"upstream",phase:"discovery"|"invoke",upstream_code:"invalid_profile_url"}`. Other well-formed RPC errors expose phase only, never raw messages, `data.content`, `continue_url`, numeric codes or private bodies.
+AST rejection remains `error_type:"security"`, with `diagnostic:{kind:"ast",violation_type:<closed enum>,line:1..1000000}`; imports/calls/attributes/global/nonlocal remain guarded. No source, detail, prints, stderr or traces are exposed.
+Large permitted JSON becomes owner-scoped artifacts. Summary `data` includes `json_type`; objects add `top_level_keys` (at most 32 complete keys / 512 serialized bytes, fewer under small budgets), `key_count`, `keys_truncated`; arrays add `length`, never value previews. Prefer `transform_artifact` for local reduction. `read_artifact` remains available: follow `next_offset` to `eof`, at most **8192 bytes** per chunk, subject to context/full-result limits.
+`transform_artifact` exposes saved JSON as `inputs['artifact']` and caller parameters as `inputs['params']`. It uses a fresh restricted Monty VM with **no external functions, broker reference or network**; `call_tool` references/aliases and imports are blocked. Owned integrity-checked loading is bounded/off-loop, with normal AST/resource limits, admission, local/shared slots, deadline, cancellation and run ledger. Docker configurations reject without downgrade. Results can become artifacts again; receipts remain, but projections return **no replayable `cache_id`**.
+`submit_code` returns an `id`; poll `get_run(run_id=...)`. States: `queued`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. Optional owner-scoped `idempotency_key` deduplicates matching requests only while retained; conflicts fail. Restart marks queued/running work **interrupted**, with **no automatic replay, crash resume or exactly-once effects**. Inspect upstream state before retrying. Cancellation revokes authority and awaits cleanup but cannot undo accepted API actions. Receipts/artifacts are not a workflow engine or permanent audit archive.
 
 ## Configure APIs and policy
 
@@ -375,7 +374,7 @@ Connect to `http://127.0.0.1:8000/mcp` with `Authorization: Bearer <your-token>`
 Public exposure requires TLS and operator controls. After preparing file-based config/token, `docker compose up --build -d gryphon` starts legacy HTTP:
 loopback port 8000, private named volumes, read-only config, no Docker socket. Its TCP check is not authenticated readiness or hosted `/health`.
 
-`gryphon --version` reports the version; `doctor` emits read-only safe JSON without compilation, store opens, API calls or Docker probing.
+`gryphon --version` reports the version; `doctor` emits read-only safe JSON, including boolean `ucp_agent_profile_configured`, without compilation, store opens, API calls or Docker probing; it never reports the configured profile URI or proves fetchability.
 `compile --dry-run` validates without output writes but may fetch remote specs. **Stop before `clean --yes`**: it archives recognized compiled output/closed recipe caches to adjacent `.gryphon-archive-...` paths, retaining runs/artifacts/config.
 `clean --yes --dry-run` only validates; `clean compile --yes` archives then compiles. Links, unknown files, overlapping paths and SQLite sidecars are refused.
 Restore manually while stopped without overwriting newer data; this is not arbitrary deletion or hosted backup.

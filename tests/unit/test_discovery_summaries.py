@@ -161,13 +161,13 @@ def test_compact_rejects_nonzero_function_cursor(gryphon_config: GryphonConfig) 
 
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_summary_mcp_schema_is_server_owned(gryphon_config: GryphonConfig, enabled: bool) -> None:
-    """Only pagination is client-controlled and real MCP exposes exactly the same ten meta-tools."""
+    """Only pagination is client-controlled and real MCP exposes exactly the same eleven meta-tools."""
     gryphon_config.include_function_summaries = enabled
     registry = _registry([20])
     mcp = create_server(gryphon_config, registry, MagicMock(), MagicMock())
     async with Client(mcp) as client:
         tools = await client.list_tools()
-        assert len(tools) == 10
+        assert len(tools) == 11
         discovery = next(tool for tool in tools if tool.name == "list_servers")
         assert set(discovery.input_schema["properties"]) == {"cursor", "limit", "function_cursor"}
         assert ("with function names and descriptions" in str(discovery.description)) is enabled

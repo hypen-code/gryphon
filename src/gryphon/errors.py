@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gryphon.models.diagnostics import ASTViolationType, ExecutionDiagnostic
+
 
 class GryphonError(Exception):
     """Base error for all Gryphon exceptions."""
@@ -19,6 +24,22 @@ class SecurityViolationError(GryphonError):
     """Code failed security scan."""
 
 
+class ASTViolationError(SecurityViolationError):
+    """Static AST category and bounded source line without offending source text."""
+
+    def __init__(self, violation_type: ASTViolationType, line: int) -> None:
+        """Validate the closed diagnostic before storing or formatting any metadata."""
+        from gryphon.models.diagnostics import ExecutionDiagnostic
+
+        self._diagnostic = ExecutionDiagnostic(kind="ast", violation_type=violation_type, line=line)
+        super().__init__(f"Security violation ({self._diagnostic.violation_type})")
+
+    @property
+    def diagnostic(self) -> ExecutionDiagnostic:
+        """Return immutable metadata; public boundaries must still revalidate it."""
+        return self._diagnostic
+
+
 class LintError(GryphonError):
     """Code has syntax/lint issues."""
 
@@ -34,6 +55,25 @@ class ExecutionError(GryphonError):
         super().__init__(message)
         self.stderr = stderr
         self.exit_code = exit_code
+
+
+class UpstreamDiagnosticError(ExecutionError):
+    """Trusted upstream failure carrying only closed, validated diagnostic metadata."""
+
+    def __init__(self, diagnostic: ExecutionDiagnostic) -> None:
+        """Accept only upstream metadata; never accept a raw message or response body."""
+        from gryphon.models.diagnostics import ExecutionDiagnostic, upstream_message
+
+        safe = ExecutionDiagnostic.model_validate(diagnostic)
+        if safe.kind != "upstream":
+            raise ValueError("Invalid upstream diagnostic kind")
+        self._diagnostic = safe
+        super().__init__(upstream_message(safe))
+
+    @property
+    def diagnostic(self) -> ExecutionDiagnostic:
+        """Return immutable metadata; public boundaries must still revalidate it."""
+        return self._diagnostic
 
 
 class ExecutionTimeoutError(ExecutionError):

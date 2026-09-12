@@ -7,9 +7,13 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from gryphon.models.analytics import RunMetrics as RunMetrics
+from gryphon.models.artifacts import artifact_shape as artifact_shape
 from gryphon.models.audit import AdminAudit as AdminAudit
 from gryphon.models.audit import AuditActor as AuditActor
 from gryphon.models.audit import AuditEvent as AuditEvent
+from gryphon.models.diagnostics import ASTViolationType as ASTViolationType
+from gryphon.models.diagnostics import DiagnosticPhase as DiagnosticPhase
+from gryphon.models.diagnostics import ExecutionDiagnostic as ExecutionDiagnostic
 from gryphon.models.mcp import MCPBinding as MCPBinding
 from gryphon.models.operation_policy import ReadOnlyPostOperation as ReadOnlyPostOperation
 from gryphon.models.specifications import SaaSSpec as SaaSSpec
@@ -240,9 +244,13 @@ class ExecutionResult(BaseModel):
     cache_id: str | None = None
     run_id: str | None = None
     error_type: str | None = None
+    diagnostic: ExecutionDiagnostic | None = None
     artifact_id: str | None = None
     truncated: bool = False
     tool_calls: int = 0
+
+
+ExecutionResult.model_rebuild(_types_namespace={"ExecutionDiagnostic": ExecutionDiagnostic})
 
 
 # ---------------------------------------------------------------------------

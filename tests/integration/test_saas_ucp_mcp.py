@@ -93,6 +93,13 @@ class NativePeer:
     clients: list[NetworkClient] = field(default_factory=list)
     failure: str = ""
     structured: bool = False
+    profile_addresses: list[str] = field(default_factory=lambda: ["93.184.216.34"])
+    profile_dns: list[tuple[str, int]] = field(default_factory=list)
+
+    def assert_headers(self, start: int, profile: str | None) -> None:
+        """Check the entire metadata/invocation phase, not just the business call header."""
+        expected = None if profile is None else f'profile="{profile}"'
+        assert all(request.headers.get("ucp-agent") == expected for request in self.seen[start:])
 
     def methods(self) -> list[str]:
         """Return native RPC methods separately from profile GETs."""
@@ -104,13 +111,18 @@ class NativePeer:
         host = "coolbudget.lk" if request.method == "GET" else "merchant.myshopify.com"
         assert request.url.host == "93.184.216.34"
         assert request.headers["host"] == host and request.extensions["sni_hostname"] == host
-        assert not {"authorization", "cookie", "ucp-agent", "x-api-key"} & set(request.headers)
+        assert not {"authorization", "cookie", "x-api-key"} & set(request.headers)
+        assert request.headers.get("ucp-agent") in {None, f'profile="{AGENT}"'}
         if request.method == "GET":
+            assert "ucp-agent" not in request.headers
             assert request.url.path in {"/.well-known/ucp", "/custom/profile.json"}
             return httpx.Response(200, json=native_profile(), headers={"Set-Cookie": "ignored=fixture"})
         assert request.method == "POST" and request.url.path == "/api/ucp/mcp"
         body = json.loads(request.content)
         assert body["jsonrpc"] == "2.0"
+        if body["method"] == "tools/call":
+            profile = body["params"]["arguments"]["meta"]["ucp-agent"]["profile"]
+            assert request.headers["ucp-agent"] == f'profile="{profile}"'
         if body["method"] == "notifications/initialized":
             assert "id" not in body
             return httpx.Response(200, json={})
@@ -155,12 +167,20 @@ def native_peer(monkeypatch: pytest.MonkeyPatch) -> NativePeer:
         assert host in {"coolbudget.lk", "merchant.myshopify.com"} and port == 443
         return ["93.184.216.34"]
 
+    async def resolve_profile(host: str, port: int) -> list[str]:
+        """Validate identity DNS independently; never fetch or claim profile fetchability."""
+        assert host == "caller.example" and port == 443
+        peer.profile_dns.append((host, port))
+        return peer.profile_addresses
+
     def factory(config: GryphonConfig) -> NetworkClient:
         """Build independently owned production network clients for metadata and invocation."""
+        assert config.ucp_agent_profile is None
         client = NetworkClient(config, resolver=resolve, transport=httpx.MockTransport(peer.handle))
         peer.clients.append(client)
         return client
 
+    monkeypatch.setattr("gryphon.security.network.resolve_addresses", resolve_profile)
     for module in ("saas_spec_import", "security.mcp_client", "security.broker"):
         monkeypatch.setattr("gryphon." + module + ".NetworkClient", factory)
     return peer
@@ -231,6 +251,8 @@ async def test_native_ucp_entrypoints_import_six_reads_without_business_calls(
     async with Client(channel["url"], auth=channel["token"]) as client:
         await inspect_catalog(client, READS)
     assert native_peer.methods() == SEQUENCE
+    native_peer.assert_headers(0, None)
+    assert native_peer.profile_dns == []
 
 
 @pytest.mark.parametrize("structured", [False, True])
@@ -243,6 +265,9 @@ async def test_native_ucp_hosted_executes_json_product_reduction_and_replays(
     await import_bound(http, channel)
     native_peer.structured = structured
     assert native_peer.methods() == SEQUENCE
+    native_peer.assert_headers(0, None)
+    assert native_peer.profile_dns == []
+    before = len(native_peer.seen)
     async with Client(channel["url"], auth=channel["token"]) as client:
         await inspect_catalog(client, READS)
         result = await execute(client)
@@ -250,6 +275,8 @@ async def test_native_ucp_hosted_executes_json_product_reduction_and_replays(
         replay = await _data(client, "run_cached_code", {"cache_id": result["cache_id"], "params": arguments(1)})
         assert replay["success"] and replay["data"] == 3, replay
     assert native_peer.methods() == SEQUENCE + (SEQUENCE + ["tools/call"]) * 2
+    native_peer.assert_headers(before, AGENT)
+    assert native_peer.profile_dns == [("caller.example", 443)] * 2
     assert all(peer._client.is_closed for peer in native_peer.clients[-2:])
 
 

@@ -123,7 +123,7 @@ async def _workflow(client: Client[Any]) -> dict[str, Any]:
     assert client.server_capabilities is not None and client.server_capabilities.tasks is None
     assert not any("tasks" in name.lower() for name in (client.server_capabilities.extensions or {}))
     tools = await client.list_tools()
-    assert len(tools) == 10 and all(tool.output_schema for tool in tools)
+    assert len(tools) == 11 and all(tool.output_schema for tool in tools)
     executed = await _data(
         client, "execute_code", {"code": 'result = inputs["n"] * 2', "description": "Double", "inputs": {"n": 21}}
     )

@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from gryphon.models import ReadOnlyPostOperation, SwaggerSource
+from gryphon.security.ucp_identity import validate_profile
 
 # Resolve .env with a fallback chain:
 #   1. CWD/.env      — works when the server is launched from the project root
@@ -84,6 +85,7 @@ class GryphonConfig(BaseSettings):
 
     # Security
     allowed_domains: list[str] = Field(default_factory=list)
+    ucp_agent_profile: str | None = Field(default=None, repr=False)
     max_code_size_bytes: int = Field(default=65536, ge=1, le=262144)  # 64KB default
     allow_private_networks: bool = False
     allow_writes: bool = False
@@ -99,6 +101,13 @@ class GryphonConfig(BaseSettings):
 
     # Optional tools — disabled by default; set GRYPHON_ENABLE_ADDITIONAL_TOOLS=true to enable
     enable_additional_tools: bool = False
+
+    @model_validator(mode="after")
+    def _validate_ucp_agent_profile(self) -> GryphonConfig:
+        """Require an explicit public HTTPS profile under the operator domain policy."""
+        if self.ucp_agent_profile is not None:
+            validate_profile(self.ucp_agent_profile, self.allowed_domains)
+        return self
 
     @field_validator("swaggers", mode="before")
     @classmethod

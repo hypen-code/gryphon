@@ -12,6 +12,7 @@ from fastmcp.server.dependencies import get_access_token
 from pydantic import BaseModel, TypeAdapter
 
 from gryphon.errors import (
+    ASTViolationError,
     CacheError,
     CapacityError,
     ConflictError,
@@ -23,7 +24,10 @@ from gryphon.errors import (
     LintError,
     SecurityViolationError,
     ServerNotFoundError,
+    UpstreamDiagnosticError,
 )
+from gryphon.models.artifacts import artifact_shape, projection_hint
+from gryphon.models.diagnostics import canonical_failure
 from gryphon.runtime.cache import CacheStore
 from gryphon.runtime.executor import CodeExecutor
 from gryphon.runtime.registry import Registry
@@ -51,6 +55,7 @@ _ERROR_TYPES: tuple[tuple[type[Exception], str], ...] = (
     (ConflictError, "conflict"),
     (LintError, "lint"),
     (DockerUnavailableError, "sandbox_unavailable"),
+    (UpstreamDiagnosticError, "upstream"),
     (ExecutionError, "execution"),
     (CacheError, "cache"),
     (ServerNotFoundError, "server_not_found"),
@@ -69,6 +74,7 @@ _ENVELOPE_KEYS = frozenset(
         "success",
         "error",
         "error_type",
+        "diagnostic",
         "cache_id",
         "run_id",
         "artifact_id",
@@ -80,6 +86,7 @@ _ENVELOPE_KEYS = frozenset(
         "total",
         "offset",
         "next_offset",
+        "next",
     }
 )
 
@@ -153,7 +160,8 @@ def safe_error(error: Exception | str) -> dict[str, Any]:
     )
     kind = kind if kind in _SAFE_ERROR_TYPES else "internal"
     logger.warning("tool_operation_failed", error_type=kind)
-    return {"success": False, "error": "Request failed; check the arguments and server policy.", "error_type": kind}
+    diagnostic = error.diagnostic if isinstance(error, (ASTViolationError, UpstreamDiagnosticError)) else None
+    return canonical_failure(kind, diagnostic)
 
 
 def trusted_owner() -> str:
@@ -303,7 +311,7 @@ def validate_page(cursor: int, limit: int) -> None:
 
 
 def public_result(result: BaseModel) -> dict[str, Any]:
-    """Serialize model-backed execution receipts without internal authority or diagnostics.
+    """Serialize model-backed receipts without internal authority or raw diagnostics.
 
     Args:
         result: ExecutionResult or RunRecord from the execution engine.
@@ -311,16 +319,18 @@ def public_result(result: BaseModel) -> dict[str, Any]:
     Returns:
         Public JSON data with sanitized failure details and a reuse hint.
     """
-    dump = result.model_dump(mode="json", exclude_none=True, exclude={"owner", "request_hash", "traceback"})
-    if "result" in dump and isinstance(dump["result"], dict):
-        nested = getattr(result, "result", None)
-        if isinstance(nested, BaseModel):
-            dump["result"] = public_result(nested)
+    excluded = {"owner", "request_hash", "traceback", "error", "diagnostic", "result"}
+    if result.__dict__.get("success") is False:
+        excluded.update({"prints", "data"})
+    dump = result.model_dump(mode="json", exclude_none=True, exclude=excluded, warnings=False)
+    nested = result.__dict__.get("result")
+    if isinstance(nested, BaseModel):
+        dump["result"] = public_result(nested)
     if dump.get("success") is False:
-        dump.update(safe_error(dump.get("error_type") or "execution"))
-        dump.pop("prints", None)
-        dump.pop("data", None)
-    if dump.get("success") and dump.get("cache_id"):
+        dump.update(canonical_failure(dump.get("error_type") or "execution", result.__dict__.get("diagnostic")))
+    if dump.get("success") and dump.get("artifact_id"):
+        dump["next"] = projection_hint(dump["artifact_id"])
+    elif dump.get("success") and dump.get("cache_id"):
         dump["next"] = {"tool": "run_cached_code", "cache_id": dump["cache_id"], "params": "structured inputs"}
     return dump
 
@@ -347,9 +357,13 @@ async def bounded_receipt(record: RunRecord, artifacts: ArtifactStore, owner: st
     if isinstance(result, dict) and result.get("success"):
         if not result.get("artifact_id"):
             artifact = await artifacts.put(result.get("data"), owner=owner)
+            shape = artifact_shape(result.get("data"), key_budget=budget // 8)
             result["artifact_id"] = artifact.id
-        result["data"] = {"summary": "Result stored as a JSON artifact"}
+            result["data"] = {"summary": "Result stored as a JSON artifact", "size_bytes": artifact.size_bytes, **shape}
+        else:
+            result["data"] = {"summary": "Result stored as a JSON artifact", "shape_truncated": True}
         result["truncated"] = True
+        result["next"] = {"tool": "transform_artifact", "artifact_id": result["artifact_id"]}
     return bounded_json(payload, budget)
 
 

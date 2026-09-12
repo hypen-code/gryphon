@@ -9,13 +9,17 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from gryphon.errors import ExecutionError
+from gryphon.errors import ExecutionError, UpstreamDiagnosticError
+from gryphon.models import DiagnosticPhase, ExecutionDiagnostic
+from gryphon.models.diagnostics import MAX_UPSTREAM_CODE_LENGTH
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 MAX_NOTIFICATIONS = 100
 MAX_SESSION_ID_BYTES = 256
+_MIN_RPC_ERROR_CODE = -(2**31)
+_MAX_RPC_ERROR_CODE = 2**31 - 1
 _LINE_END = re.compile(rb"\r\n|\r|\n")
 
 
@@ -73,7 +77,31 @@ def normalize_content(content: list[dict[str, Any]]) -> Any:
         return content
 
 
-def rpc_record(value: Any, response_id: str) -> dict[str, Any] | None:
+def _rpc_failure(error: object, phase: DiagnosticPhase) -> ExecutionError:
+    """Classify valid RPC failures by phase, retaining only explicitly known UCP codes."""
+    if (
+        not isinstance(error, dict)
+        or type(error.get("code")) is not int
+        or not _MIN_RPC_ERROR_CODE <= error["code"] <= _MAX_RPC_ERROR_CODE
+        or not isinstance(error.get("message"), str)
+        or phase not in ("discovery", "invoke")
+    ):
+        return ExecutionError("Remote MCP request failed")
+    data = error.get("data")
+    code = data.get("code") if isinstance(data, dict) else None
+    if (
+        type(code) is str
+        and len(code) <= MAX_UPSTREAM_CODE_LENGTH
+        and re.fullmatch(r"[a-z][a-z0-9_]*", code, flags=re.ASCII)
+        and code == "invalid_profile_url"
+    ):
+        return UpstreamDiagnosticError(
+            ExecutionDiagnostic(kind="upstream", upstream_code="invalid_profile_url", phase=phase)
+        )
+    return UpstreamDiagnosticError(ExecutionDiagnostic(kind="upstream", phase=phase))
+
+
+def rpc_record(value: Any, response_id: str, *, phase: DiagnosticPhase = "invoke") -> dict[str, Any] | None:
     """Accept only owned responses or inert notifications; never dispatch requests."""
     if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
         raise ExecutionError("Remote MCP returned an invalid protocol record")
@@ -92,7 +120,7 @@ def rpc_record(value: Any, response_id: str) -> dict[str, Any] | None:
     if type(value.get("id")) is not str or value["id"] != response_id or ("result" in value) == ("error" in value):
         raise ExecutionError("Remote MCP returned an invalid response identity")
     if "error" in value:
-        raise ExecutionError("Remote MCP request failed")
+        raise _rpc_failure(value["error"], phase) from None
     if not isinstance(value["result"], dict):
         raise ExecutionError("Remote MCP returned an invalid result")
     return value
@@ -116,9 +144,10 @@ def session_header(headers: httpx.Headers) -> str | None:
 class SSEDecoder:
     """Incrementally parse bounded SSE events without buffering until stream EOF."""
 
-    def __init__(self, response_id: str) -> None:
+    def __init__(self, response_id: str, *, phase: DiagnosticPhase = "invoke") -> None:
         """Bind this parser to one host-generated JSON-RPC response identity."""
         self.response_id = response_id
+        self.phase = phase
         self.pending = bytearray()
         self.data: list[bytes] = []
         self.event = b""
@@ -161,7 +190,7 @@ class SSEDecoder:
             return
         if self.event not in (b"", b"message"):
             raise ExecutionError("Remote MCP returned an unsupported SSE event")
-        record = rpc_record(parse_json(b"\n".join(self.data)), self.response_id)
+        record = rpc_record(parse_json(b"\n".join(self.data)), self.response_id, phase=self.phase)
         if record is None:
             self.notifications += 1
             if self.notifications > MAX_NOTIFICATIONS:
@@ -172,9 +201,11 @@ class SSEDecoder:
             self.result = record
 
 
-async def consume_sse(response: httpx.Response, limit: int, response_id: str) -> httpx.Response:
+async def consume_sse(
+    response: httpx.Response, limit: int, response_id: str, *, phase: DiagnosticPhase = "invoke"
+) -> httpx.Response:
     """Read bounded raw chunks, returning as soon as an owned response completes."""
-    decoder = SSEDecoder(response_id)
+    decoder = SSEDecoder(response_id, phase=phase)
     consumed = 0
     chunks = _single_chunk(response.content) if response.is_stream_consumed else response.aiter_raw()
     async for chunk in chunks:

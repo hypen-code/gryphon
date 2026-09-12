@@ -12,8 +12,9 @@ import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
-from gryphon.errors import CacheError, CapacityError, ConflictError, ExecutionError
+from gryphon.errors import CacheError, CapacityError, ConflictError, ExecutionError, InputValidationError
 from gryphon.models import ExecutionResult, ExecutionScope, RunRecord
+from gryphon.runtime.artifact_projection import await_record, projection_profile
 from gryphon.runtime.artifacts import ArtifactStore
 from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.runtime.execution_metrics import RunMeasurements
@@ -87,6 +88,7 @@ class CodeExecutor:
         self._execution_slots = execution_slots
         self._analytics = analytics
         self._measurements: dict[str, RunMeasurements] = {}
+        self._projections: dict[str, str] = {}
         self._admission = asyncio.Lock()
         self._jobs: dict[str, asyncio.Task[ExecutionResult]] = {}
         self._scopes: dict[str, ExecutionScope] = {}
@@ -172,6 +174,7 @@ class CodeExecutor:
         idempotency_key: str | None = None,
         *,
         _origin: RunOrigin = "execute",
+        _artifact_id: str | None = None,
     ) -> ExecutionResult:
         """Submit and await one result without exposing raw traces.
 
@@ -188,27 +191,31 @@ class CodeExecutor:
         """
         record: RunRecord | None = None
         try:
-            if self._analytics is None:
+            if _artifact_id is not None:
+                record = await self.submit(
+                    code, description, inputs, input_schema, owner, _artifact_id=_artifact_id, _origin="execute"
+                )
+            elif self._analytics is None:
                 record = await self.submit(code, description, inputs, input_schema, owner, idempotency_key)
             else:
                 record = await self.submit(
                     code, description, inputs, input_schema, owner, idempotency_key, _origin=_origin
                 )
-            if record.result is not None:
-                return record.result
-            job = self._jobs.get(record.id)
-            if job is not None:
-                return (await asyncio.shield(job)).model_copy(deep=True)
-            latest = await self._runs.get(record.id, owner)
-            if latest is not None and latest.result is not None:
-                return latest.result
-            raise ExecutionError("Run has no active execution in this process")
+            return await await_record(self, record, owner)
         except asyncio.CancelledError:
             if record is not None:
                 await self.cancel(record.id, owner)
             raise
         except Exception as exc:
             return _failure(exc, record.id if record else None)
+
+    async def transform_artifact(
+        self, artifact_id: str, code: str, description: str, inputs: dict[str, Any] | None = None, owner: str = "local"
+    ) -> ExecutionResult:
+        """Project owned JSON offline with inputs['artifact'] and inputs['params']; never cache source."""
+        if not isinstance(artifact_id, str):
+            return _failure(InputValidationError("Invalid artifact identifier"))
+        return await self.execute(code, description, inputs, owner=owner, _artifact_id=artifact_id)
 
     async def submit(
         self,
@@ -220,6 +227,7 @@ class CodeExecutor:
         idempotency_key: str | None = None,
         *,
         _origin: RunOrigin = "submit",
+        _artifact_id: str | None = None,
     ) -> RunRecord:
         """Validate before bounded admission; arguments have the execute contract.
 
@@ -232,7 +240,10 @@ class CodeExecutor:
         """
         source, values, schema = self._validate(code, description, inputs, input_schema, owner, idempotency_key)
         identity = self._fingerprint()
-        digest = request_digest(code, values, schema, identity, self._config.sandbox_mode)
+        profile: str = self._config.sandbox_mode
+        if _artifact_id is not None:
+            profile = projection_profile(self, code, owner, _artifact_id)
+        digest = request_digest(code, values, schema, identity, profile)
         key = (owner, hashlib.sha256(idempotency_key.encode()).hexdigest()) if idempotency_key is not None else None
         if key is not None and key in self._keys:
             run_id, previous = self._keys[key]
@@ -250,6 +261,8 @@ class CodeExecutor:
                     raise ExecutionError("CodeExecutor.startup() has not completed")
                 record, created = await self._runs.create(owner, digest, idempotency_key)
                 if created:
+                    if _artifact_id is not None:
+                        self._projections[record.id] = _artifact_id
                     self._launch(record, key, code, source, description, values, schema, identity, _origin)
                 return record
         finally:
@@ -279,7 +292,7 @@ class CodeExecutor:
             state = RunMeasurements.create(scope, origin, code, inputs, self._config)
             if state is not None:
                 self._measurements[record.id] = state
-        job = asyncio.create_task(self._work(record, scope, code, source, description, inputs, schema, identity))
+        job = asyncio.create_task(work(self, record, scope, code, source, description, inputs, schema, identity))
         self._jobs[record.id] = job
         if key is not None:
             self._keys[key] = (record.id, record.request_hash)
@@ -355,20 +368,6 @@ class CodeExecutor:
             code, additional_allowed_modules=modules, allowed_modules=effective_imports(self._config)
         )
 
-    async def _work(
-        self,
-        record: RunRecord,
-        scope: ExecutionScope,
-        code: str,
-        source: str,
-        description: str,
-        inputs: dict[str, Any],
-        schema: dict[str, Any],
-        identity: str,
-    ) -> ExecutionResult:
-        """Bound queue wait, execute once, and durably persist a terminal receipt."""
-        return await work(self, record, scope, code, source, description, inputs, schema, identity)
-
     async def _bound_result(self, result: ExecutionResult, owner: str) -> ExecutionResult:
         """Hand bounded output to this executor's owner-scoped artifact service."""
         return await bound_result(result, owner, self._config, self.artifacts)
@@ -388,6 +387,7 @@ class CodeExecutor:
         """Release all per-job indexes and retrieve errors without leaking their text."""
         self._jobs.pop(run_id, None)
         self._scopes.pop(run_id, None)
+        self._projections.pop(run_id, None)
         if key is not None:
             self._keys.pop(key, None)
         if not job.cancelled() and job.exception() is not None:

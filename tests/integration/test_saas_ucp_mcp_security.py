@@ -161,9 +161,12 @@ async def test_native_ucp_tool_error_is_safe_and_does_not_mutate_snapshot(
     assert native_peer.methods() == SEQUENCE * 2 + ["tools/call"]
 
 
-@pytest.mark.parametrize("invalid", ["missing_agent", "unknown_nested", "missing_wrapper"])
+@pytest.mark.parametrize(
+    ("invalid", "error_type"),
+    [("missing_agent", "upstream"), ("unknown_nested", "validation"), ("missing_wrapper", "validation")],
+)
 async def test_native_ucp_requires_caller_metadata_and_closed_wrapped_arguments(
-    hosted: tuple[httpx.AsyncClient, Starlette], native_peer: NativePeer, invalid: str
+    hosted: tuple[httpx.AsyncClient, Starlette], native_peer: NativePeer, invalid: str, error_type: str
 ) -> None:
     """Neither Gryphon nor the native provider generates missing caller identity or relaxes nested input."""
     http, _ = hosted
@@ -180,8 +183,36 @@ async def test_native_ucp_requires_caller_metadata_and_closed_wrapped_arguments(
     before = len(native_peer.seen)
     async with Client(channel["url"], auth=channel["token"]) as client:
         result = await _data(client, "execute_code", {"code": code, "description": "Invalid input", "inputs": supplied})
-        assert not result["success"] and result["error_type"] == "validation", result
+        assert not result["success"] and result["error_type"] == error_type, result
+        if invalid == "missing_agent":
+            assert result["diagnostic"] == {
+                "kind": "upstream",
+                "phase": "invoke",
+                "upstream_code": "invalid_profile_url",
+            }
+        else:
+            assert "diagnostic" not in result
     assert len(native_peer.seen) == before
+    assert native_peer.profile_dns == []
+
+
+@pytest.mark.parametrize("addresses", [[], ["127.0.0.1"], ["93.184.216.34", "10.0.0.1"]])
+async def test_native_ucp_profile_dns_denied_before_protocol_dispatch(
+    hosted: tuple[httpx.AsyncClient, Starlette], native_peer: NativePeer, addresses: list[str]
+) -> None:
+    """A syntactically public identity must independently pass every DNS answer, without fetching it."""
+    http, _ = hosted
+    channel = await _channel(http, "weather")
+    await import_bound(http, channel)
+    native_peer.profile_addresses = addresses
+    before = len(native_peer.seen)
+    async with Client(channel["url"], auth=channel["token"]) as client:
+        result = await execute(client)
+    assert not result["success"] and result["error_type"] == "upstream", result
+    assert result["diagnostic"] == {"kind": "upstream", "phase": "invoke", "upstream_code": "invalid_profile_url"}
+    assert native_peer.profile_dns == [("caller.example", 443)]
+    assert len(native_peer.seen) == before
+    assert native_peer.clients[-1]._client.is_closed
 
 
 @pytest.mark.parametrize("field", ["mcp_bindings", "source_transport", "resolved_endpoint"])

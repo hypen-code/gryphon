@@ -22,6 +22,8 @@ from gryphon.runtime.context import (
     validate_page,
 )
 from gryphon.runtime.discovery import list_servers_description, list_servers_page
+from gryphon.security.ucp_identity import invocation_metadata
+from gryphon.server_artifacts import ArtifactTools
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -44,12 +46,13 @@ _CORE_TOOLS = (
     "cancel_run",
     "list_recipes",
     "read_artifact",
+    "transform_artifact",
 )
-_EXECUTION_TOOLS = frozenset({"execute_code", "run_cached_code"})
+_EXECUTION_TOOLS = frozenset({"execute_code", "run_cached_code", "transform_artifact"})
 _STATEFUL_TOOLS = _EXECUTION_TOOLS | {"submit_code", "cancel_run"}
 
 
-class _Tools:
+class _Tools(ArtifactTools):
     """Thin tool adapters; the executor and broker remain the only execution authority."""
 
     def __init__(self, config: GryphonConfig, deps: ServerDependencies) -> None:
@@ -121,6 +124,8 @@ class _Tools:
                         "arguments": "schema-validated object",
                     },
                 )
+                if endpoint.mcp_binding is not None:
+                    data.update(invocation_metadata(f"{fn.server_name}.{fn.function_name}", endpoint, self.config))
                 results.append(data)
             except Exception as exc:
                 results.append(safe_error(exc))

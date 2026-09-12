@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from gryphon.errors import SecurityViolationError
+from gryphon.errors import ASTViolationError, SecurityViolationError
 from gryphon.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from gryphon.models import ASTViolationType
 
 logger = get_logger(__name__)
 
@@ -232,8 +235,8 @@ class ASTGuard:
         visitor.visit(tree)
         if visitor.violations:
             violation = visitor.violations[0]
-            logger.warning("security_violation_blocked", violation_type=violation["type"])
-            raise SecurityViolationError(f"Security violation ({violation['type']}): {violation['detail']}")
+            logger.warning("security_violation_blocked", violation_type=violation.diagnostic.violation_type)
+            raise violation
 
 
 class _SecurityVisitor(ast.NodeVisitor):
@@ -241,62 +244,63 @@ class _SecurityVisitor(ast.NodeVisitor):
 
     def __init__(self, allowed_modules: frozenset[str]) -> None:
         """Collect only sanitized static violation descriptions."""
-        self.violations: list[dict[str, Any]] = []
+        self.violations: list[ASTViolationError] = []
         self._allowed_modules = allowed_modules
 
-    def _add_violation(self, violation_type: str, detail: str) -> None:
-        """Store a nonsecret, fixed description of the blocked operation."""
-        self.violations.append({"type": violation_type, "detail": detail})
+    def _add_violation(self, violation_type: ASTViolationType, node: ast.stmt | ast.expr) -> None:
+        """Store only the first allowlisted category and its bounded source line."""
+        if not self.violations:
+            self.violations.append(ASTViolationError(violation_type, node.lineno))
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         """Check top-level import statements."""
         for alias in node.names:
             module = alias.name
             if module.split(".")[0] in _BLOCKED_MODULES:
-                self._add_violation("blocked_import", "module is not permitted")
+                self._add_violation("blocked_import", node)
             elif module not in self._allowed_modules:
                 # Server function modules must be replaced with broker tool_call capabilities
                 # Deny anything else not in allowlist
-                self._add_violation("blocked_import", "module is not permitted")  # Fail closed on unknown imports
+                self._add_violation("blocked_import", node)  # Fail closed on unknown imports
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         """Check from X import Y statements."""
         module = node.module or ""
         if node.level or module not in self._allowed_modules or module.split(".")[0] in _BLOCKED_MODULES:
-            self._add_violation("blocked_import", "module is not permitted")
+            self._add_violation("blocked_import", node)
         if any(alias.name.startswith("_") or alias.name in _BLOCKED_ATTRIBUTES for alias in node.names):
-            self._add_violation("blocked_import", "private or unsafe import is not permitted")
+            self._add_violation("blocked_import", node)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         """Check function call nodes."""
         # Direct function calls: eval(), exec(), etc.
         if isinstance(node.func, ast.Name) and node.func.id in _BLOCKED_CALLS:
-            self._add_violation("blocked_call", f"call to {node.func.id}()")
+            self._add_violation("blocked_call", node)
         # Method calls: obj.method()
         if isinstance(node.func, ast.Attribute) and node.func.attr in _BLOCKED_ATTRIBUTES:
-            self._add_violation("blocked_attribute_call", f"call to .{node.func.attr}()")
+            self._add_violation("blocked_attribute_call", node)
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         """Check attribute access nodes."""
         if node.attr in _BLOCKED_ATTRIBUTES or node.attr.startswith("_"):
-            self._add_violation("blocked_attribute", "private or unsafe attribute access")
+            self._add_violation("blocked_attribute", node)
         self.generic_visit(node)
 
     def visit(self, node: ast.AST) -> Any:
         """Prevent builtin aliasing before dispatching ordinary node visitors."""
         if isinstance(node, ast.Name) and (node.id in _BLOCKED_CALLS or node.id.startswith("__")):
-            self._add_violation("blocked_call", "unsafe builtin reference")
+            self._add_violation("blocked_call", node)
         return super().visit(node)
 
     def visit_Global(self, node: ast.Global) -> None:  # noqa: N802
         """Block global statement usage."""
-        self._add_violation("blocked_global", "global statement not allowed")
+        self._add_violation("blocked_global", node)
         self.generic_visit(node)
 
     def visit_Nonlocal(self, node: ast.Nonlocal) -> None:  # noqa: N802
         """Block nonlocal statement usage."""
-        self._add_violation("blocked_nonlocal", "nonlocal statement not allowed")
+        self._add_violation("blocked_nonlocal", node)
         self.generic_visit(node)
