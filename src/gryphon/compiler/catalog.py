@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator
 from gryphon.compiler.schemas import check_schema
 from gryphon.errors import CompileError
 from gryphon.models import EndpointManifest, EndpointSpec, ParamSchema, ServerManifest
+from gryphon.security.form_encoding import check_form_schema
 from gryphon.security.schema import validate_contract
 
 if TYPE_CHECKING:
@@ -161,6 +162,15 @@ def validate_endpoint(endpoint: EndpointSpec | EndpointManifest) -> None:
         raise CompileError("Name collides with a generated SDK import")
     if any(p.name == "json_body" and p.location != "body" for p in endpoint.parameters):
         raise CompileError("json_body is reserved for request bodies")
+    if endpoint.read_only_post and endpoint.method != "POST":
+        raise CompileError("Read-only POST classification requires POST")
+    if endpoint.request_body_media_type != "application/json":
+        try:
+            check_form_schema(
+                endpoint.request_body_schema or {}, multipart=endpoint.request_body_media_type == "multipart/form-data"
+            )
+        except ValueError:
+            raise CompileError("Invalid form body contract") from None
     input_schema(endpoint)
     output = endpoint.response_json_schema if isinstance(endpoint, EndpointSpec) else endpoint.output_schema
     check_schema(output)
@@ -186,7 +196,11 @@ def load_manifest(path: Path) -> ServerManifest:
             validate_base_url(endpoint.base_url)
             if endpoint.function_name in names or endpoint.input_schema != input_schema(endpoint):
                 raise ValueError("duplicate endpoint or inconsistent input schema")
-            if manifest.is_read_only and endpoint.method not in {"GET", "HEAD", "OPTIONS"}:
+            if (
+                manifest.is_read_only
+                and endpoint.method not in {"GET", "HEAD", "OPTIONS"}
+                and not endpoint.read_only_post
+            ):
                 raise ValueError("read-only manifest contains writes")
             names.add(endpoint.function_name)
         return manifest

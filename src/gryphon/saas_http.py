@@ -191,7 +191,10 @@ class HTTPBoundary:
 
     async def _body(self, request: Request, receive: Receive) -> bytes:
         """Bound chunked bodies as well as declared lengths and slow upload duration."""
-        limit = self.config.max_spec_bytes * 2 if request.url.path.endswith("/specs") else 1048576
+        specification = request.url.path.endswith("/specs") or (
+            "/specs/" in request.url.path and request.url.path.endswith("/refresh")
+        )
+        limit = self.config.max_spec_bytes * 2 if specification else 1048576
         content_length = request.headers.get("content-length")
         if content_length is not None and (not content_length.isdigit() or int(content_length) > limit):
             raise InputValidationError("Request too large")

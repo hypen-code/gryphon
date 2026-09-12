@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -150,7 +150,8 @@ class NetworkClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         json_body_present: bool = False,
-        data: dict[str, str] | None = None,
+        data: Mapping[str, str | list[str]] | None = None,
+        content: bytes | None = None,
         timeout: float | None = None,
         max_bytes: int | None = None,
     ) -> httpx.Response:
@@ -162,7 +163,8 @@ class NetworkClient:
             headers: Host-owned request headers.
             json_body: Validated JSON payload.
             json_body_present: Preserve an explicit JSON null rather than omit the body.
-            data: Authentication form payload.
+            data: Validated URL-encoded form payload with scalar or repeated scalar values.
+            content: Broker-encoded bounded multipart bytes, never a file or stream.
             timeout: Optional remaining scope budget.
             max_bytes: Optional response size limit, including compiler document limits.
 
@@ -178,7 +180,9 @@ class NetworkClient:
         )
         if not math.isfinite(duration) or duration <= 0 or limit < 0:
             raise ExecutionError("Upstream request budget is invalid")
-        request = self._build_request(method, checked, headers or {}, json_body, data, duration, json_body_present)
+        request = self._build_request(
+            method, checked, headers or {}, json_body, data, duration, json_body_present, content
+        )
         return await self._send(request, duration, limit)
 
     def _build_request(
@@ -187,19 +191,23 @@ class NetworkClient:
         url: httpx.URL,
         headers: dict[str, str],
         json_body: Any,
-        data: dict[str, str] | None,
+        data: Mapping[str, str | list[str]] | None,
         duration: float,
         json_body_present: bool,
+        content: bytes | None = None,
     ) -> httpx.Request:
         """Preserve explicit null bodies and case-insensitive cookies without ambient state."""
         try:
-            if len({name.lower() for name in headers}) != len(headers) or (json_body_present and data is not None):
+            encodings = (json_body_present or json_body is not None, data is not None, content is not None)
+            if len({name.lower() for name in headers}) != len(headers) or sum(encodings) > 1:
                 raise ValueError("Ambiguous request encoding")
+            if content is not None and not isinstance(content, bytes):
+                raise ValueError("Raw request content must be broker-encoded bytes")
             explicit = httpx.Headers(headers)
             request_headers = httpx.Headers({"Accept": "application/json", "Accept-Encoding": "identity"})
             request_headers.update(explicit)
-            content = b"null" if json_body_present and json_body is None else None
-            if content is not None:
+            if json_body_present and json_body is None:
+                content = b"null"
                 request_headers["Content-Type"] = "application/json"
             request = self._client.build_request(
                 method,

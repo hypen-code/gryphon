@@ -12,7 +12,7 @@ from gryphon.compiler.documents import fetch_document, fetch_local, fetch_remote
 from gryphon.compiler.schemas import SchemaParser, validate_document_tree
 from gryphon.config import GryphonConfig
 from gryphon.errors import CompileError
-from gryphon.models import EndpointSpec, ParamSchema, ServerSpec, SwaggerSource
+from gryphon.models import EndpointSpec, ParamSchema, RequestBodyMediaType, ServerSpec, SwaggerSource
 from gryphon.utils.hashing import hash_content
 from gryphon.utils.logging import get_logger
 
@@ -182,7 +182,8 @@ class SwaggerParser(SchemaParser):
     ) -> EndpointSpec | None:
         """Normalize one route, enforcing source read-only policy before parsing its schemas."""
         # Skip read-only violations
-        if self._source.is_read_only and method.lower() in _MUTATING_METHODS:
+        read_only_post = self._read_only_post(path, method, operation, path_level_servers or [])
+        if self._source.is_read_only and method.lower() in _MUTATING_METHODS and not read_only_post:
             logger.debug("skipped_readonly_method", method=method)
             return None
         if not isinstance(operation, dict):
@@ -191,7 +192,7 @@ class SwaggerParser(SchemaParser):
             operation.get("operationId") or self._generate_operation_id(method, path)
         )
         raw_params = list(path_level_params) + list(operation.get("parameters", []))
-        body_schema, parameters = self._operation_inputs(operation, raw_params)
+        body_schema, parameters, media_type = self._operation_inputs(operation, raw_params)
         # Auto-detect path params from URL template not explicitly declared in spec
         declared = {param.name for param in parameters if param.location == "path"}
         for name in re.findall(r"\{([^}]+)\}", path):
@@ -209,6 +210,8 @@ class SwaggerParser(SchemaParser):
             description=str(operation.get("description", ""))[:1000],
             parameters=parameters,
             request_body_schema=body_schema,
+            request_body_media_type=media_type,
+            read_only_post=read_only_post,
             response_schema=self._schema_to_fields(response, 0),
             response_json_schema=response,
             tags=operation.get("tags", []),
@@ -217,17 +220,31 @@ class SwaggerParser(SchemaParser):
         validate_endpoint(endpoint)
         return endpoint
 
+    def _read_only_post(self, path: str, method: str, operation: dict[str, Any], servers: list[Any]) -> bool:
+        """Consult only trusted operator permits against the effective destination."""
+        if method != "POST" or not self._config.allowed_read_only_post_operations:
+            return False
+        if not isinstance(operation, dict):
+            raise CompileError("Invalid operation object")
+        base = self._source.base_url or self._resolve_endpoint_base_url(operation, servers) or self._resolve_base_url()
+        base = validate_base_url(base)
+        return any(
+            permit.matches(module_name(self._source.name), method, base, path)
+            for permit in self._config.allowed_read_only_post_operations
+        )
+
     def _operation_inputs(
         self,
         operation: dict[str, Any],
         raw_params: list[Any],
-    ) -> tuple[dict[str, Any] | None, list[ParamSchema]]:
-        """Normalize JSON bodies with explicit requiredness and native schema metadata."""
+    ) -> tuple[dict[str, Any] | None, list[ParamSchema], RequestBodyMediaType]:
+        """Normalize structured bodies with explicit requiredness and wire media type."""
         body = operation.get("requestBody", {})
         if "$ref" in body:
             body = self._resolve_ref(body["$ref"]) or {}
             if not body:
                 raise CompileError("Unsupported request body reference")
+        media_type = self._request_body_media_type(body)
         schema = self._parse_request_body(body)
         ordinary: list[Any] = []
         for raw in raw_params:
@@ -250,11 +267,11 @@ class SwaggerParser(SchemaParser):
                     location="body",
                     param_type=self._extract_type(schema),
                     required=bool(body.get("required", False)),
-                    description="JSON request body",
+                    description=f"Structured request body encoded as {media_type}",
                     json_schema=schema,
                 )
             )
-        return schema, params
+        return schema, params, media_type
 
     def _generate_operation_id(self, method: str, path: str) -> str:
         """Generate a stable identifier when operationId is absent."""

@@ -12,6 +12,7 @@ _ROOT = Path(__file__).resolve().parents[2] / "src" / "gryphon"
 _TEMPLATE = _ROOT / "templates" / "admin.html"
 _SCRIPT = _ROOT / "static" / "admin.js"
 _ANALYTICS = _ROOT / "static" / "analytics.js"
+_SPECIFICATIONS = _ROOT / "static" / "specifications.js"
 _STYLE = _ROOT / "static" / "admin.css"
 
 
@@ -42,6 +43,7 @@ def test_admin_template_assets_same_origin_and_external() -> None:
     styles = [attrs for tag, attrs in elements if tag == "link" and attrs.get("rel") == "stylesheet"]
     assert scripts == [
         {"src": "/static/analytics.js", "defer": None},
+        {"src": "/static/specifications.js", "defer": None},
         {"src": "/static/admin.js", "defer": None},
     ]
     assert styles == [{"rel": "stylesheet", "href": "/static/admin.css"}]
@@ -64,7 +66,9 @@ def test_admin_template_ids_unique_and_script_targets_present() -> None:
     """Every literal JavaScript target resolves to one shipped element."""
     identifiers = [attrs["id"] for _, attrs in _document().elements if "id" in attrs]
     assert len(identifiers) == len(set(identifiers))
-    script_targets = set(re.findall(r'\$\("([a-z-]+)"\)', _SCRIPT.read_text() + _ANALYTICS.read_text()))
+    script_targets = set(
+        re.findall(r'\$\("([a-z-]+)"\)', _SCRIPT.read_text() + _ANALYTICS.read_text() + _SPECIFICATIONS.read_text())
+    )
     assert script_targets <= set(identifiers)
 
 
@@ -114,7 +118,7 @@ def test_admin_template_login_no_get_credential_submission() -> None:
 )
 def test_admin_script_unsafe_rendering_and_persistence_absent(forbidden: str) -> None:
     """Untrusted tenant/specification data and keys never use unsafe DOM or browser stores."""
-    assert forbidden not in _SCRIPT.read_text() + _ANALYTICS.read_text()
+    assert forbidden not in _SCRIPT.read_text() + _ANALYTICS.read_text() + _SPECIFICATIONS.read_text()
 
 
 def test_admin_script_api_session_and_csrf_contract() -> None:
@@ -159,7 +163,7 @@ def test_admin_script_key_cleanup_and_secret_free_client_configuration() -> None
 
 def test_admin_script_upload_limits_and_blob_cleanup() -> None:
     """The browser reads bounded local documents and revokes temporary download URLs."""
-    script = _SCRIPT.read_text()
+    script = _SCRIPT.read_text() + _SPECIFICATIONS.read_text()
     file_input = next(attrs for _, attrs in _document().elements if attrs.get("id") == "spec-file")
     assert file_input["accept"] == ".json,.yaml,.yml"
     assert "file.size > state.settings.max_spec_bytes" in script
@@ -170,7 +174,7 @@ def test_admin_script_upload_limits_and_blob_cleanup() -> None:
     assert "URL.revokeObjectURL(url)" in script
 
 
-@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _ANALYTICS, _STYLE])
+@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _ANALYTICS, _SPECIFICATIONS, _STYLE])
 def test_admin_assets_size_limits_respected(path: Path) -> None:
     """All shipped assets remain within the repository file-size constraint."""
     assert len(path.read_text().splitlines()) <= 400
@@ -259,3 +263,55 @@ def test_admin_accounts_validation_matches_named_account_forms() -> None:
     assert 'path.endsWith("/password"))) return errors.invalid_password' in script
     assert "Object.hasOwn(errors, result.error)" in script
     assert "result.message" not in script
+
+
+def test_admin_navigation_icons_consistent_outlined_and_decorative() -> None:
+    """Every main navigation destination uses the same accessible SVG icon family."""
+    template = _TEMPLATE.read_text().split('<nav aria-label="Main navigation">')[1].split("</nav>")[0]
+    links = re.findall(r"<a\b[^>]*>(.*?)</a>", template, re.S)
+    assert len(links) == 6
+    for link in links:
+        document = _Document()
+        document.feed(link)
+        icons = [attrs for tag, attrs in document.elements if tag == "svg"]
+        assert len(icons) == 1
+        assert icons[0] == {
+            "class": "nav-icon",
+            "width": "20",
+            "height": "20",
+            "viewbox": "0 0 24 24",
+            "fill": "none",
+            "stroke": "currentColor",
+            "stroke-width": "1.75",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "aria-hidden": "true",
+            "focusable": "false",
+        }
+    assert ".nav-icon { display: block; width: 20px; height: 20px; flex: 0 0 20px; }" in _STYLE.read_text()
+
+
+def test_admin_specification_source_modes_and_refresh_confirmation() -> None:
+    """Uploads remain supported alongside explicit URL kinds and opt-out channel replacement."""
+    fields = {attrs.get("id"): attrs for _, attrs in _document().elements if "id" in attrs}
+    assert fields["spec-file"]["accept"] == fields["spec-replacement"]["accept"] == ".json,.yaml,.yml"
+    assert fields["spec-url"]["type"] == "url"
+    assert "checked" in fields["spec-update-channels"]
+    template = _TEMPLATE.read_text()
+    for text in (
+        "Old snapshots are retained",
+        "invalidates running work",
+        "catalog drift",
+        "exact old version",
+        "POST read endpoints require exact operator read-only approvals",
+        "Unsupported transports are not callable",
+    ):
+        assert text in template
+    script = _SPECIFICATIONS.read_text()
+    assert '"POST", { name, url, kind }' in script
+    assert 'const payload = { update_channels: $("spec-update-channels").checked }' in script
+    assert "fetch(" not in script
+    for field in ("available_operations", "filtered_operations", "unsupported_operations", "total_operations"):
+        assert field in script
+    assert "snapshot.tenant !== state.tenant" in script and "snapshot.epoch !== state.epoch" in script
+    assert "const content = await file.text(); current(snapshot)" in script

@@ -62,18 +62,17 @@ isolation certification. Native MCP Tasks are disabled and unadvertised.
 
 - Every call resolves an exact registered server/function and validates closed
   request arguments before encoding parameters and JSON bodies.
-- `is_read_only: true` filters write methods during compilation and is checked
-  again at dispatch. Writes otherwise require **both** `GRYPHON_ALLOW_WRITES=true`
-  and the exact `server.function` in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
+- `is_read_only: true` filters write methods during compilation and is checked again at dispatch, except explicitly operator-attested read-only POST routes below. Writes otherwise require **both** `GRYPHON_ALLOW_WRITES=true` and the exact `server.function` in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
+- `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults to `[]`: exact JSON objects with canonical `server_name`, effective `base_url`, literal `path`, `method:"POST"`. No templates/globs; destination matching includes CDN/operation overrides. Both parser and broker enforce this tuple; changed permit sets change compilation and replay/policy identity. A manifest flag alone grants nothing.
+- These permits intentionally apply **deployment-wide**, including hosted catalogs of any tenant matching the exact namespace/base/path. They are operator attestations of read semantics, **not per-tenant authorization, credentials or proof of upstream semantics**. Never auto-enable them, trust uploaded hints, or relax security settings merely to import more endpoints. Ordinary write controls remain separate.
+- URL-encoded and multipart requests use closed `json_body` objects of finite non-null scalars/scalar arrays. Reject nested, open-ended and file/binary contracts; the broker owns Content-Type/boundary. Multipart accepts no caller filenames/part headers or host-file reads; strings resembling paths are literal text. Limits: **1024 parts / 2 MiB**, bounded ASCII field names, plus normal execution/request budgets.
 - Write permits are administrator configuration, not a model-supplied approval
   flag. There is no interactive approval UI. Guides, descriptions, MCP
   `readOnlyHint`, and idempotency keys cannot authorize a write.
 - Scope expiry/cancellation is checked around asynchronous credential resolution
   and request sending. Primary-origin credentials cannot be delegated to a
   different endpoint origin.
-- Read-only classification is based on HTTP method and source policy, not proof
-  of an API's semantics. An upstream GET can still have side effects if the
-  service is designed that way. Review catalogs and grant least privilege.
+- Read-only classification uses HTTP method, source policy and exact operator POST attestations, not proof of API semantics. Even GET or an attested POST can have side effects upstream. Review catalogs and grant least privilege.
 
 ### 3. Broker egress is validated and bounded
 
@@ -205,12 +204,14 @@ must also rotate/revoke exposed shared keys. A browser/platform login grants no
 MCP access without a valid channel key; channel keys grant no browser API authority.
 Keep bootstrap credentials, passwords and session cookies out of MCP clients.
 
-Uploaded JSON/YAML versions are immutable and tenant-bound. External references,
-environment interpolation, and caller-supplied host paths/auth configuration are
-rejected. The compiler constructs **read-only** sources and the channel runtime
-disables writes regardless of base permits. Hosted upstream access is currently
-**public-API-only**: broker host environment credential/header inheritance is
-explicitly disabled. No tenant credential vault or secret manager is implemented.
+File/OpenAPI URL/UCP URL snapshots are immutable and tenant-bound. Ordinary OpenAPI external references, environment interpolation and caller-supplied host paths/auth configuration are rejected. The compiler constructs **read-only** sources; the channel runtime disables writes regardless of write permits, but exact operator-attested read-only POST routes remain available. Hosted upstream access is **public-API-only**: broker host environment credential/header inheritance is disabled. No tenant credential vault or secret manager is implemented.
+URL import accepts at most 2048 characters, without query, userinfo or fragments; UCP requires HTTPS and root URLs resolve to `/.well-known/ucp`. The DNS-pinned bounded network client supplies no host auth, redirects, environment proxies or interpolation. Remote OpenAPI relative server URLs become absolute in the saved self-contained snapshot. Import admits one active request, **no queued imports**, under a **25-second** deadline; cancellation waits for owned cleanup.
+`POST /api/tenants/{tenant_id}/specs/{spec_id}/refresh` takes URL `{}` or file `{content}`, with optional strict boolean `update_channels` (API default false, UI checkbox initially true). It preserves source provenance and old versions. Changed document/diagnostics/warnings creates a successor with `parent_id` (201); opted-in exact old bindings and revisions commit atomically, then affected runtimes drain. Unchanged returns 200 without revisions; superseded refresh is 409. Scope/status is rechecked after import. Legacy spec payloads default to file; no spec schema migration is needed.
+Import diagnostics distinguish total, available and read-policy-filtered operations. Unsupported callable request/schema semantics reject the import rather than silently claiming partial support. UCP counts are for the adapted document; excluded capabilities/transports and omitted response validation remain explicit warnings.
+
+**UCP is a restricted adapter, not a full protocol/identity implementation.** Published January 11/23, April 8 and August 25 2026 profile shapes are recognized. Only advertised, matching shopping REST GET operation IDs are mapped: checkout and (April/August) cart/order; paths come from the advertised schema. Canonical April/August GET contracts compile, not a guarantee of merchant access. Required `UCP-Agent`/`Request-Id` stay caller-supplied; no identity or negotiation is generated. Required auth/signing, including canonical January requirements, rejects import. Optional credential/signing/protected headers are omitted, never exposed as credential authority.
+Unsupported response validation schemas are omitted with explicit warnings; the returned bounded JSON is **not schema-validated** against omitted contracts. No POST shopping/catalog queries, payment actions, checkout updates, non-REST transport or extension composition is supported. Callbacks, arbitrary capability URLs and unused error/signature metadata are not fetched. The saved/viewable/downloadable document is compiled OpenAPI, not raw profile data; refresh refetches profile and needed schemas.
+UCP permits at most **32 fetched schema documents**, an adapter deadline of **min(configured HTTP timeout, 30 seconds)** plus the outer hosted deadline, and aggregate raw profile/schema bytes capped by the hosted spec limit, `GRYPHON_MAX_SPEC_SIZE_BYTES` and **5 MiB**. Schema authority must be the profile origin, `https://ucp.dev`, or explicitly operator-allowed; refs stay on that schema origin. All configured domain/DNS restrictions apply. JSON pointers only; cycles, scope rebasing, dynamic/anchor references and excessive structure/expansion fail closed. This narrow resolver does not enable external refs in normal OpenAPI imports.
 Base AST, execution, egress, output, and ownership restrictions still apply.
 A manager-owned execution budget is shared across channels, including background
 runs and result serialization; independent bounded channel queues remain in place.

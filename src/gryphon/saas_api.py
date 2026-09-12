@@ -8,12 +8,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from gryphon.compiler.catalog import module_name
-from gryphon.errors import InputValidationError
+from gryphon.errors import InputValidationError, SaaSDisabledError
+from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.saas_access import AccessControl, account, platform_admin
 from gryphon.saas_analytics import AnalyticsStore
 from gryphon.saas_auth import COOKIE_NAME, AdminSessions, RateLimiter
 from gryphon.saas_http import admin_endpoint, failure, fields, read_object
-from gryphon.saas_upload import validate_upload
+from gryphon.saas_spec_import import SpecImporter
 from gryphon.saas_user_api import UserAPI
 from gryphon.saas_users import UserStore
 from gryphon.security.ast_guard import available_imports
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from gryphon.config import GryphonConfig
+    from gryphon.models import SaaSSpec, SpecImport
     from gryphon.saas_config import SaaSConfig
     from gryphon.saas_runtime import ChannelRuntimeManager
     from gryphon.saas_store import SaaSStore
@@ -67,6 +69,7 @@ class AdminAPI:
         self.access = AccessControl(self.sessions, self.users, store)
         self.user_api = UserAPI(self.users, self.access, self.sessions, config)
         self.analytics = analytics if analytics is not None else AnalyticsStore(store._db)
+        self.importer = SpecImporter(base, config.max_spec_bytes)
 
     def routes(self) -> list[Route]:
         """Register the closed administrator API; only login is unauthenticated."""
@@ -79,6 +82,7 @@ class AdminAPI:
             (prefix, self.tenant, ["PATCH"]),
             (prefix + "/specs", self.specs, ["GET", "POST"]),
             (prefix + "/specs/{spec_id}", self.spec, ["GET"]),
+            (prefix + "/specs/{spec_id}/refresh", self.refresh_spec, ["POST"]),
             (prefix + "/channels", self.channels, ["GET", "POST"]),
             (prefix + "/channels/{channel_id}", self.channel, ["PATCH"]),
             (prefix + "/channels/{channel_id}/rotate", self.rotate, ["POST"]),
@@ -149,7 +153,7 @@ class AdminAPI:
             {
                 "allowed_imports": available_imports(),
                 "docker_enabled": self.config.docker_enabled,
-                "max_spec_bytes": self.config.max_spec_bytes,
+                "max_spec_bytes": self.importer.limit,
             }
         )
 
@@ -187,14 +191,50 @@ class AdminAPI:
             items = await self.store.list_specs(tenant_id)
             return JSONResponse({"items": [item.model_dump(exclude={"document"}) for item in items]})
         data = await read_object(request, self.config.max_spec_bytes * 2)
-        fields(data, {"name", "content"})
+        fields(data, {"name", "url", "kind"} if "url" in data else {"name", "content"})
         name = _string(data["name"])
-        module_name(name)
-        if not isinstance(data["content"], str):
-            raise InputValidationError("Invalid specification content")
-        document = await validate_upload(data["content"], self.base, self.config.max_spec_bytes)
-        item = await self.store.create_spec(tenant_id, name, document)
+        if not (await self.store.get_tenant(tenant_id)).enabled:
+            raise SaaSDisabledError("Tenant is disabled")
+        imported = await self.importer.load(
+            module_name(name), content=data.get("content"), url=data.get("url"), kind=data.get("kind", "openapi")
+        )
+        denied = await self.access.authorize(request)
+        if denied is not None:
+            return denied
+        item = await self.store.create_spec(tenant_id, name, imported.document, imported=imported)
         return JSONResponse(item.model_dump(exclude={"document"}), status_code=201)
+
+    async def refresh_spec(self, request: Request) -> Response:
+        """Fetch the saved source again or accept replacement bytes, retaining old immutable snapshots."""
+        tenant_id, spec_id = request.path_params["tenant_id"], request.path_params["spec_id"]
+        previous = await self.store.get_spec(tenant_id, spec_id)
+        if not (await self.store.get_tenant(tenant_id)).enabled:
+            raise SaaSDisabledError("Tenant is disabled")
+        data = await read_object(request, self.config.max_spec_bytes * 2)
+        fields(data, {"content"} if previous.source_type == "file" else set(), {"update_channels"})
+        update_channels = data.get("update_channels", False)
+        if type(update_channels) is not bool:
+            raise InputValidationError("Invalid binding update choice")
+        imported = await self.importer.load(
+            module_name(previous.name),
+            content=data.get("content"),
+            url=previous.source_url,
+            kind="ucp" if previous.source_type == "ucp_url" else "openapi",
+        )
+        denied = await self.access.authorize(request)
+        if denied is not None:
+            return denied
+        item = await finish_cleanup(self._publish_spec(tenant_id, spec_id, imported, update_channels))
+        return JSONResponse(item.model_dump(exclude={"document"}), status_code=200 if item.id == spec_id else 201)
+
+    async def _publish_spec(
+        self, tenant_id: str, spec_id: str, imported: SpecImport, update_channels: bool
+    ) -> SaaSSpec:
+        """Complete revision publication and revoke every replaced runtime before returning."""
+        item, channels = await self.store.refresh_spec(tenant_id, spec_id, imported, update_channels=update_channels)
+        for channel in channels:
+            await self.runtimes.invalidate(channel.id, before_revision=channel.revision)
+        return item
 
     async def spec(self, request: Request) -> Response:
         """Read an immutable specification using both tenant and spec identity."""

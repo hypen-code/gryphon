@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import secrets
 import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from gryphon.errors import SaaSDisabledError, SaaSQuotaError, SaaSValidationError
-from gryphon.models import AdminAudit, AuditEvent, Channel, ChannelUsage, SaaSSpec, Tenant
+from gryphon.errors import SaaSDisabledError, SaaSValidationError
+from gryphon.models import AdminAudit, AuditEvent, Channel, ChannelUsage, SaaSSpec, SpecImport, Tenant
 from gryphon.saas_database import SaaSDatabase, SQLValue
 from gryphon.saas_records import SaaSRecords
+from gryphon.saas_spec_versions import insert_spec, new_spec, refresh_spec
 
 TOOLS = frozenset(
     {
@@ -142,31 +142,21 @@ class SaaSStore(SaaSRecords):
             await self._audit(tenant_id, "tenant_enabled" if enabled else "tenant_disabled")
             return item
 
-    async def create_spec(self, tenant_id: str, name: str, document: dict[str, Any]) -> SaaSSpec:
+    async def create_spec(
+        self, tenant_id: str, name: str, document: dict[str, Any], *, imported: SpecImport | None = None
+    ) -> SaaSSpec:
         """Store canonical bounded JSON; API parsing and OpenAPI validation precede this call."""
-        try:
-            canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-            encoded = canonical.encode("utf-8")
-        except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
-            raise SaaSValidationError("Specification must be canonical JSON") from exc
-        if len(encoded) > self._max_spec_bytes:
-            raise SaaSQuotaError("Specification byte quota exceeded")
-        item = SaaSSpec(
-            id=str(uuid4()),
-            tenant_id=tenant_id,
-            name=name,
-            document=json.loads(canonical),
-            sha256=hashlib.sha256(encoded).hexdigest(),
-            created_at=time.time(),
-        )
+        item = new_spec(tenant_id, name, document, self._max_spec_bytes, imported)
         async with self._db.transaction():
             await self._tenant(tenant_id)
-            await self._quota("specs", self._max_specs, tenant_id)
-            await self._db.execute(
-                "INSERT INTO saas_specs VALUES (?,?,?)", (tenant_id, item.id, item.model_dump_json())
-            )
-            await self._audit(tenant_id, "spec_created")
+            await insert_spec(self, item)
         return item
+
+    async def refresh_spec(
+        self, tenant_id: str, spec_id: str, imported: SpecImport, *, update_channels: bool = False
+    ) -> tuple[SaaSSpec, list[Channel]]:
+        """Create an immutable successor and optionally advance exact channel bindings atomically."""
+        return await refresh_spec(self, tenant_id, spec_id, imported, update_channels=update_channels)
 
     async def get_spec(self, tenant_id: str, spec_id: str) -> SaaSSpec:
         """Load an immutable specification only from its owning tenant."""

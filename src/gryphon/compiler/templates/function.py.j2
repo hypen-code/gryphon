@@ -11,6 +11,10 @@ from typing import Any{% if functions | selectattr("typeddict_classes") | list %
 
 
 import httpx
+{% if functions | selectattr("multipart_body") | list %}
+
+from gryphon.security.form_encoding import encode_multipart
+{% endif %}
 
 _BASE_URL: str = os.environ["GRYPHON_{{ server_env_prefix }}_BASE_URL"]
 {% for sv in extra_server_vars %}
@@ -32,6 +36,24 @@ def _headers() -> dict[str, str]:
     return h
 
 
+{% if functions | selectattr("form_body") | list %}
+def _form_data(body: Any) -> dict[str, str | list[str]] | None:
+    """Encode only scalar or repeated scalar fields for standalone SDK form requests."""
+    if body is None:
+        return None
+    if not isinstance(body, dict):
+        raise ValueError("Form bodies require an object")
+    result: dict[str, str | list[str]] = {}
+    for key, value in body.items():
+        values = value if isinstance(value, list) else [value]
+        if not isinstance(key, str) or any(not isinstance(item, (str, bool, int, float)) for item in values):
+            raise ValueError("Form fields require scalar values")
+        encoded = [str(item).lower() if isinstance(item, bool) else str(item) for item in values]
+        result[key] = encoded if isinstance(value, list) else encoded[0]
+    return result
+
+
+{% endif %}
 def _request(
     method: str,
     path: str,
@@ -39,23 +61,10 @@ def _request(
     params: dict[str, Any] | None = None,
     json_body: Any = None,
     headers: dict[str, Any] | None = None,
+    form_body: bool = False,
+    multipart_body: bool = False,
 ) -> Any:
-    """Execute an SDK request with TLS verification and without redirects.
-
-    Args:
-        method: HTTP method.
-        path: Encoded URL path.
-        base_url: Optional environment-backed endpoint destination.
-        params: Optional query parameters.
-        json_body: Optional JSON request body.
-        headers: Optional declared header parameters.
-
-    Returns:
-        Parsed JSON response or response text.
-
-    Raises:
-        httpx.HTTPStatusError: On unsuccessful HTTP status.
-    """
+    """Execute an SDK request with declared body encoding, verified TLS and no redirects."""
     url = f"{base_url or _BASE_URL}{path}"
     filtered = {k: v for k, v in (params or {}).items() if v is not None}
     if filtered:
@@ -68,8 +77,23 @@ def _request(
         url = f"{url}?{urllib.parse.urlencode(pairs)}"
     request_headers = {k: str(v) for k, v in (headers or {}).items() if v is not None}
     request_headers.update(_headers())
+{% if functions | selectattr("form_body") | list %}
+    if form_body:
+        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+{% endif %}
+{% if functions | selectattr("multipart_body") | list %}
+    content = None
+    if multipart_body:
+        request_headers["Content-Type"], content = encode_multipart({} if json_body is None else json_body)
+{% endif %}
     r = httpx.request(
-        method, url, headers=request_headers, json=json_body,
+        method, url, headers=request_headers, json=None if form_body or multipart_body else json_body,
+{% if functions | selectattr("multipart_body") | list %}
+        content=content,
+{% endif %}
+{% if functions | selectattr("form_body") | list %}
+        data=_form_data(json_body) if form_body else None,
+{% endif %}
         timeout=15.0, verify=True, follow_redirects=False, trust_env=False,
     )
     r.raise_for_status()
@@ -109,6 +133,8 @@ def {{ fn.name }}({{ fn.signature }}) -> {{ fn.return_type }}:
         {% endif %}
         params={{ "_params" if fn.has_query_params else "None" }},
         json_body={{ "json_body" if fn.has_body else "None" }},
+        form_body={{ fn.form_body | pyrepr }},
+        multipart_body={{ fn.multipart_body | pyrepr }},
         {% if fn.header_params %}
         headers={
             {% for wire, alias in fn.header_params.items() %}

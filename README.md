@@ -33,14 +33,9 @@ cd gryphon
 uv run --frozen gryphon stdio
 ```
 
-That is enough for **empty-catalog offline compute**. The foreground process
-waits for MCP on stdin; it is not a web server or an interactive Python prompt.
-Usually your MCP client launches it instead. Stop this trial with **Ctrl+C**
-before launching another process against the same state.
+That is enough for **empty-catalog offline compute**. The foreground process waits for MCP on stdin; it is not a web server or an interactive Python prompt. Usually your MCP client launches it instead. Stop this trial with **Ctrl+C** before launching another process against the same state.
 
-For API discovery, add the entry below to your MCP client. The first `uv run`
-creates `.venv`; replace both checkout paths with actual absolute paths. No
-`.env`, config copy, or separate `compile` step is needed:
+For API discovery, add the entry below to your MCP client. The first `uv run` creates `.venv`; replace both checkout paths with actual absolute paths. No `.env`, config copy, or separate `compile` step is needed:
 
 ```json
 {
@@ -56,24 +51,11 @@ creates `.venv`; replace both checkout paths with actual absolute paths. No
 }
 ```
 
-Alternatively use your absolute `uv` executable with args
-`["--directory", "/absolute/path/to/gryphon", "run", "--frozen", "gryphon", "stdio"]`
-and the same `env`. Clients may not expand `~`, `$PWD`, or your shell's `PATH`.
-`GRYPHON_SWAGGERS` is **JSON encoded as an environment string**: use absolute
-local OpenAPI paths or policy-approved **public HTTPS specification URLs**.
-The weather file describes Open-Meteo; compiling that local file needs neither
-network access nor auth. Actually executing a weather call needs network access.
-For private/authenticated local-mode APIs, see [credentials and writes](#credentials-and-writes).
+Alternatively use your absolute `uv` executable with args `["--directory", "/absolute/path/to/gryphon", "run", "--frozen", "gryphon", "stdio"]` and the same `env`. Clients may not expand `~`, `$PWD`, or your shell's `PATH`.
+`GRYPHON_SWAGGERS` is **JSON encoded as an environment string**: use absolute local OpenAPI paths or policy-approved **public HTTPS specification URLs**. The weather file describes Open-Meteo; compiling that local file needs neither network access nor auth. Actually executing a weather call needs network access. For private/authenticated local-mode APIs, see [credentials and writes](#credentials-and-writes).
 
-`stdio` compiles and serves from the launch environment only; it never discovers
-ambient `.env`. An explicit `--env-file /absolute/path/to/private.env` is optional.
-Omit sources or use `GRYPHON_SWAGGERS="[]"` for compute only. An explicitly selected
-`GRYPHON_SWAGGER_CONFIG_FILE` also works. Optional absolute `GRYPHON_STATE_DIR`
-sets the private state root (default: absolute `$XDG_STATE_HOME/gryphon`, otherwise
-`~/.local/state/gryphon`). Catalog/cache/receipts/artifacts are source-scoped;
-explicit storage overrides are retained. No installed-package writes occur.
-Run **one process per run database**; use separate state roots for simultaneous
-clients. Stdio trusts its launcher (`local` owner). Logs use stderr, MCP uses stdout.
+`stdio` compiles and serves from the launch environment only; it never discovers ambient `.env`. An explicit `--env-file /absolute/path/to/private.env` is optional. Omit sources or use `GRYPHON_SWAGGERS="[]"` for compute only. An explicitly selected `GRYPHON_SWAGGER_CONFIG_FILE` also works.
+Optional absolute `GRYPHON_STATE_DIR` sets the private state root (default: absolute `$XDG_STATE_HOME/gryphon`, otherwise `~/.local/state/gryphon`). Catalog/cache/receipts/artifacts are source-scoped; explicit storage overrides are retained. No installed-package writes occur. Run **one process per run database**; use separate state roots for simultaneous clients. Stdio trusts its launcher (`local` owner). Logs use stderr, MCP uses stdout.
 
 Development dependencies are **optional for running stdio**:
 `uv sync --frozen --extra dev --extra saas` installs the full test environment;
@@ -102,12 +84,8 @@ printf '%s\n' "$GRYPHON_SAAS_ADMIN_TOKEN"
 uv run --frozen --extra saas gryphon saas
 ```
 
-Create the SQLite parent directory **before** startup; SQLite does not create it.
-Use a dedicated private directory; `umask` does not repair existing permissions.
-The token command generates a token **only when absent/empty**. Save it in a
-password manager and export that saved value in a new shell; do not generate a
-new recovery token on every restart. `printf` displays it only in your **private
-local terminal**: do not share it in chat, screenshots, logs, or a committed file.
+Create the SQLite parent directory **before** startup; SQLite does not create it. Use a dedicated private directory; `umask` does not repair existing permissions.
+The token command generates a token **only when absent/empty**. Save it in a password manager and export that saved value in a new shell; do not generate a new recovery token on every restart. `printf` displays it only in your **private local terminal**: do not share it in chat, screenshots, logs, or a committed file.
 
 Open **http://127.0.0.1:8000/**, expand **Bootstrap administrator token**, and paste
 its **displayed value**, not `$GRYPHON_SAAS_ADMIN_TOKEN`. Keep the terminal running; **Ctrl+C**
@@ -116,7 +94,7 @@ This explicit loopback-only HTTP exception disables Secure cookies; never use
 it for public traffic. `saas` does not load ambient `.env`; use explicit
 `--env-file /absolute/path/to/private-hosted.env` if preferred.
 
-**No standalone compile is required:** upload OpenAPI JSON/YAML in the browser.
+**No standalone compile is required:** choose **File**, **OpenAPI URL** or **UCP URL** in the browser.
 `gryphon serve --transport http` is the legacy MCP-only server, **not this UI**.
 
 ### Docker + PostgreSQL hosted server
@@ -151,7 +129,7 @@ the canonical Host; it does not test all channels or upstream APIs.
 ### Tenant and channel workflow
 
 1. Log in at `/` with the bootstrap admin token and create a tenant.
-2. Upload immutable Swagger/OpenAPI **JSON or YAML** versions for that tenant.
+2. Import immutable versions: Swagger/OpenAPI **JSON/YAML file**, **OpenAPI URL**, or the bounded **UCP URL** subset below.
 3. Create a channel bound only to that tenant's versions (or none for offline
    compute). Choose restricted execution; Docker requires operator provisioning.
 4. Generate/rotate its key and copy it **once**; only the hash is stored. Connect
@@ -159,13 +137,24 @@ the canonical Host; it does not test all channels or upstream APIs.
    `Authorization: Bearer <channel-key>` (use your local origin for development).
 5. Manage channels, revoke keys, disable tenants, and inspect aggregate usage/audit.
 
-Uploaded catalogs are read-only and **public-API-only**: no upstream host-auth
-inheritance, tenant secret manager, external references, environment interpolation,
-or caller-selected host paths. Channels have independent runtime stores/authority.
-Admin `/api` sessions use bounded, in-memory **Secure, HttpOnly, SameSite=Strict**
-cookies with session-bound CSRF checks for mutations; restart invalidates sessions.
-Channel keys cannot administer `/api`; an admin login does not grant MCP access
-without a separately issued channel key.
+Hosted catalogs are read-only and **public-API-only**: no upstream host-auth inheritance, tenant secret manager, environment interpolation or caller-selected host paths. Ordinary OpenAPI external references stay denied; only the bounded UCP adapter resolves approved schema references. Channels have independent runtime stores/authority.
+Admin `/api` sessions use bounded, in-memory **Secure, HttpOnly, SameSite=Strict** cookies with session-bound CSRF checks for mutations; restart invalidates sessions. Channel keys cannot administer `/api`; admin login does not grant MCP access without a separately issued channel key.
+
+### Import, inspect and refresh specifications
+
+Navigation uses consistent outlined icons. **API specifications** offers File, OpenAPI URL and UCP URL, operation counts/warnings, and saved JSON view/download. Browser-session/CSRF APIs (all under `/api/tenants/{tenant_id}`):
+- `POST /specs`: file `{"name":"cse","content":"<OpenAPI JSON or YAML>"}`; URL `{"name":"store","url":"https://merchant.example","kind":"ucp"}` (or `kind:"openapi"`). Never submit a host file path.
+- URLs are at most **2048 characters**, without queries, userinfo or fragments. UCP requires HTTPS; a root URL becomes `/.well-known/ucp`. Fetches use bounded DNS-pinned HTTP, no auth inheritance, redirects, environment interpolation or proxies. Public OpenAPI relative server URLs resolve against the fetched document and are saved in the self-contained snapshot.
+- `POST /specs/{spec_id}/refresh`: URL source `{}` refetches its saved URL; file source `{"content":"<replacement document>"}` requires replacement bytes. Optional `update_channels` is a strict boolean, **false by default in the API**; the UI's **Update bound channels** checkbox starts **checked**.
+- Changed refresh returns **201**, creating an immutable successor with `parent_id`. When requested, only channels bound to that exact old ID advance atomically with their revisions; invalidated runtimes are drained before returning. Other channel settings and old snapshots remain intact.
+- Unchanged document/diagnostics/warnings returns **200** with the old ID and no channel revisions, even if updating was requested. Refreshing a superseded version returns **409**; use its latest successor. Legacy uploads default to file provenance; this metadata needs **no database schema migration**.
+- Diagnostics report `total_operations`, `available_operations`, `filtered_operations` before/after read policy, plus `unsupported_operations`. Unsupported callable request/schema semantics reject the import, not silent partial success; a successful import does not turn unsupported operations into callable ones. UCP counts describe its adapted GET document; exclusions are warnings.
+- One active import, **no queued imports**, with a **25-second** import deadline and cancellation cleanup. Existing spec/storage quotas still apply.
+
+**UCP is a bounded adapter, not full protocol support.** It recognizes published **2026-01-11, 2026-01-23, 2026-04-08 and 2026-08-25** profile shapes. Paths come from the advertised shopping REST schema, never guessed from names. Only matching advertised GET operation IDs `get_checkout`, `get_cart`, `get_order` are mapped (January: checkout only). Canonical April/August checkout/cart/order GET contracts compile; that does not prove merchant access or upstream behavior.
+Required **UCP-Agent** and **Request-Id** remain caller-supplied; Gryphon generates no platform identity or negotiation. Required auth/signing rejects the import, including canonical January signing requirements. Unsupported response validation schemas (such as canonical `oneOf`) are explicitly omitted with warnings: returned JSON is **not schema-validated** against those contracts.
+No POST shopping/catalog queries, payments, checkout updates, non-REST transports or extension composition. Arbitrary callbacks, capability URLs and unused error/signature metadata are not fetched. View/download shows the **compiled self-contained OpenAPI document**, not the raw profile; refresh refetches the profile and needed schemas.
+UCP fetches at most **32 schema documents**, within **min(configured HTTP timeout, 30 seconds)** (and the outer import deadline). The aggregate raw profile/schema budget is the minimum of hosted spec limit, `GRYPHON_MAX_SPEC_SIZE_BYTES` and **5 MiB**. References stay on the advertised schema origin; that origin must be the profile origin, `https://ucp.dev`, or explicitly operator-allowed. All network policy and structural/expansion limits still apply.
 
 ### Users and passwords
 
@@ -341,11 +330,22 @@ Public APIs need no auth block. **Local/operator mode** supports trusted source 
 Host auth supports `static`, `jwt`, `basic`, OAuth2 client credentials (`oauth2`), `keycloak` and `session`, with refresh. Alternatives: `GRYPHON_{SERVER}_AUTH` and JSON `GRYPHON_{SERVER}_EXTRA_HEADERS`.
 Neither sandbox receives credentials. **Hosted channels cannot use these credentials**; public upstream APIs only.
 
-`is_read_only: true` filters writes at compile time and dispatch. Local/operator
-writes require a write-enabled source, `GRYPHON_ALLOW_WRITES=true`, **and** exact
-administrator permits such as `GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]`.
-No model flag, guide, idempotency key or tool hint authorizes writes; there is no
-interactive write-approval UI. Hosted catalogs remain read-only regardless of base permits.
+`is_read_only: true` filters writes at compile time and dispatch. Local/operator writes require a write-enabled source, `GRYPHON_ALLOW_WRITES=true`, **and** exact administrator permits such as `GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]`. No model flag, guide, idempotency key or tool hint authorizes writes; there is no interactive write-approval UI. Hosted catalogs remain read-only regardless of write permits.
+
+### Read-only POST attestations and CSE forms
+
+Some read APIs use POST. The original inspected CSE document contains **1 GET + 25 POST**: **23 URL-encoded + 2 scalar multipart** POST bodies. The default read-only filter therefore exposed only one operation; operation names and user hints cannot grant read authority. All 26 compiled with 25 temporary exact permits during document-only verification; **no permits were enabled in the actual environment, no live API calls were made, and upstream read semantics are not proven**.
+`GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults to `[]`. An operator may attest reviewed routes using a JSON array of exact `server_name`, effective `base_url`, literal `path`, and `method:"POST"`. No templates/globs; the effective base includes operation/path server or CDN overrides. Compiler **and broker** check the permit; permit sets also bind compilation/replay identity. Recompile/reimport (or refresh) after an intentional policy change.
+These are **deployment-wide read-semantic attestations**, including any hosted tenant matching the exact route namespace—not per-tenant authorization or credentials. Do not automatically enable them or change security configuration to make a catalog larger. Review the upstream semantics and hosted tenant exposure first.
+Example shape only, using a **synthetic** destination, not a live CSE approval:
+```json
+[{"server_name":"cse","base_url":"https://market.example/api","path":"/companyInfoSummery","method":"POST"}]
+```
+For the UI source name **cse**, use canonical server **`cse`**, not `cse_api`. Use MCP `list_servers`, then `search_functions` and `get_functions` to inspect canonical server/function names, schemas and method/path; review the saved document and operator overrides for the effective base URL. Do not infer names from labels. After inspection, the two-argument call shape is:
+```python
+result = await call_tool("cse.get_company_info_summery", {"json_body": {"symbol": inputs["symbol"]}})
+```
+That illustrative function name must match your inspected catalog. Both `application/x-www-form-urlencoded` and `multipart/form-data` accept a **`json_body` object**; the broker chooses wire encoding. Forms are closed objects of scalars/scalar arrays (repeated fields), not nested/null/binary/file values. Multipart never reads host files or emits caller-selected filenames; bounds are **1024 parts / 2 MiB**. Other POSTs remain filtered or subject to ordinary write controls.
 
 ### Runtime settings
 

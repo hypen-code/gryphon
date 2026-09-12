@@ -8,6 +8,14 @@ Notable changes to Gryphon, following
 
 ### Added
 
+- Hosted File/OpenAPI URL/UCP URL imports at `POST /api/tenants/{tenant_id}/specs`: `{name,content}` or `{name,url,kind:"openapi"|"ucp"}`. Bounded DNS-pinned public-document reads inherit no auth, redirects, environment interpolation or proxies. URLs are at most 2048 characters, without userinfo/query/fragments; UCP requires HTTPS and expands root URLs to `/.well-known/ucp`. Relative OpenAPI server URLs normalize into saved self-contained snapshots; ordinary external references remain denied.
+- Source provenance, saved compiled-JSON view/download, explicit before/after read-policy operation counts and warnings. Unsupported callable request/schema contracts reject import instead of silently publishing partial success. Old records default to file provenance; no specification database schema migration is required.
+- Immutable refresh at `POST /api/tenants/{tenant_id}/specs/{spec_id}/refresh`: URL `{}` refetches saved source; file `{content}` replaces bytes. Optional strict boolean `update_channels` defaults false in API, while the UI checkbox starts checked. Changed snapshots return 201 with `parent_id`; selected exact old bindings and channel revisions update atomically, then invalidated runtimes drain. Unchanged document/diagnostics/warnings returns 200 with no revisions; superseded refresh returns 409. Previous snapshots remain available.
+- One active hosted import with no queue and a 25-second deadline. UCP adds at most 32 fetched schema documents, a min(HTTP timeout, 30 seconds) adapter deadline and an aggregate raw profile/schema budget capped by configured spec limits and 5 MiB, plus bounded expansion. Schema origin must be the profile origin, `https://ucp.dev`, or operator-approved; references stay on that schema origin.
+- Bounded UCP adapter for published 2026-01-11/01-23/04-08/08-25 profile shapes. It reads advertised shopping REST paths and maps only matching advertised `get_checkout`, `get_cart`, `get_order` GETs (January: checkout only). Canonical April/August GET contracts compile; required UCP-Agent/Request-Id stay caller-supplied, without generated identity/negotiation. Canonical January required signing fails closed. Unsupported response validation is omitted with explicit warnings, not claimed validation. Saved output is compiled OpenAPI, not a raw profile; refresh refetches profile and needed schemas.
+- Exact `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` operator attestations (empty default), checked during compile and broker dispatch and included in policy/catalog identity. JSON tuples bind canonical server name, effective base URL including CDN overrides, literal route and POST; templates/globs and uploaded hints cannot grant authority. Permits intentionally apply deployment-wide, including any matching hosted tenant, not as per-tenant credentials/authorization.
+- Closed scalar/scalar-array URL-encoded and multipart form support through `json_body`; nested/null/binary/file contracts reject. Multipart is text-only, never host-file access or caller filenames, bounded to 1024 parts and 2 MiB.
+- Offline import/refresh/UCP/form-policy regression suites, Node specification-UI state tests and opt-in disposable Chromium verification of all source modes, refresh bindings, old snapshot download, and desktop/mobile dialogs/icons with synthetic upstream traffic.
 - GitHub `publish.yml` release workflow for `gryphon-runtime`: matching version
   tags, full locked quality gates and 90% coverage, distribution validation and
   installed-wheel stdio MCP smoke, then a separate protected-environment PyPI
@@ -134,6 +142,8 @@ Notable changes to Gryphon, following
 
 ### Fixed
 
+- Consistent 20×20 outlined navigation icons across Overview, Analytics, Channels, API specifications, Audit and Users, including mobile layout.
+- CSE root cause made explicit: the inspected original document has 1 GET and 25 POST operations (23 URL-encoded, 2 scalar multipart), so default read-only policy exposed only one. All 26 compiled with 25 temporary exact permits in document-only verification; no actual operator environment was enabled, no live CSE API was called, and upstream read semantics are not proven. A UI source named `cse` uses namespace `cse`, not the synthetic fixture's `cse_api`; README shows inspection and a small synthetic permit/form example.
 - Standalone compilation prints credential-free MCP client JSON even for unchanged
   catalogs; startup compilation remains silent on stdout. Generated entries pin
   storage/env-file paths and disable recompilation from the client's directory.

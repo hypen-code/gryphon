@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from gryphon.models import SwaggerSource
+from gryphon.models import ReadOnlyPostOperation, SwaggerSource
 
 # Resolve .env with a fallback chain:
 #   1. CWD/.env      — works when the server is launched from the project root
@@ -87,6 +87,7 @@ class GryphonConfig(BaseSettings):
     allow_private_networks: bool = False
     allow_writes: bool = False
     allowed_write_operations: list[str] = Field(default_factory=list)
+    allowed_read_only_post_operations: list[ReadOnlyPostOperation] = Field(default_factory=list, max_length=1000)
     http_timeout_seconds: int = Field(default=15, ge=1, le=60)
     max_response_size_bytes: int = Field(default=2097152, ge=1024, le=16777216)
     max_spec_size_bytes: int = Field(default=5242880, ge=1024, le=16777216)

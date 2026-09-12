@@ -6,22 +6,10 @@ before editing it, and inspect the implementation before documenting behavior.
 
 ## 1. Purpose and scope
 
-Gryphon is the legendary guardian between agent-generated programs and API
-capabilities. Preserve the original API-agent-backend design: compile OpenAPI,
-discover a small amount of metadata, inspect needed operations, execute bounded
-code, and reuse recipes. Do not replace the meta-tool interface with one tool
-per endpoint.
+Gryphon is the legendary guardian between agent-generated programs and API capabilities. Preserve the original API-agent-backend design: compile OpenAPI, discover a small amount of metadata, inspect needed operations, execute bounded code, and reuse recipes. Do not replace the meta-tool interface with one tool per endpoint.
 
-The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings
-use `GRYPHON_`. Checkout/local-wheel installation works without a claimed PyPI
-release. Only after verified publication document public-index installation as
-available. Keep `https://github.com/hypen-code/gryphon`. Release workflow
-`.github/workflows/publish.yml` accepts published releases or explicit version-tag
-dispatch, never branch pushes; tag `vX.Y.Z` must match both package versions.
-Keep full quality gates and wheel smoke checks before the separate OIDC publish
-job. PyPI publisher identity is `hypen-code` / `gryphon` / `publish.yml` / `pypi`,
-project `gryphon-runtime`; maintainers configure protected-environment reviewers.
-Never commit publishing tokens or automatically commit/tag/push/publish.
+The distribution is `gryphon-runtime`, the package/CLI is `gryphon`, and settings use `GRYPHON_`. Checkout/local-wheel installation works without a claimed PyPI release. Only after verified publication document public-index installation as available. Keep `https://github.com/hypen-code/gryphon`.
+Release workflow `.github/workflows/publish.yml` accepts published releases or explicit version-tag dispatch, never branch pushes; tag `vX.Y.Z` must match both package versions. Keep full quality gates and wheel smoke checks before the separate OIDC publish job. PyPI publisher identity is `hypen-code` / `gryphon` / `publish.yml` / `pypi`, project `gryphon-runtime`; maintainers configure protected-environment reviewers. Never commit publishing tokens or automatically commit/tag/push/publish.
 
 Deployments include **local stdio, operator-token HTTP, and admin-managed hosted
 tenants/channels**. Hosted mode has exactly one active worker per control database,
@@ -63,6 +51,10 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/saas_api.py`, `saas_auth.py`, `saas_http.py` | Browser sessions, CSRF, bounded HTTP and UI API |
 | `src/gryphon/saas_user_api.py`, `saas_access.py`, `saas_users.py`, `saas_passwords.py` | Platform/user authorization, revisioned accounts, bounded salted password hashing |
 | `src/gryphon/saas_store.py`, `saas_database.py` | Tenant control metadata, hashed keys, quotas and worker lease |
+| `src/gryphon/saas_spec_import.py`, `saas_upload.py`, `saas_spec_versions.py` | Bounded URL/file imports, diagnostics, immutable refresh and atomic binding revisions |
+| `src/gryphon/compiler/ucp.py`, `ucp_profile.py`, `ucp_refs.py`, `ucp_responses.py` | Published UCP shape/GET mapping, bounded approved refs, explicit response omissions |
+| `src/gryphon/models/specifications.py`, `operation_policy.py` | Provenance/diagnostics and exact operator read-only POST attestations |
+| `src/gryphon/security/form_encoding.py`, `static/specifications.js` | Closed scalar form wire encoding; browser import/refresh state |
 | `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated runtimes, read-only uploaded catalogs |
 | `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
 | `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
@@ -191,7 +183,7 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
    request arguments and schemas. Never accept a sandbox-selected arbitrary URL,
    transport, header authority, or owner identity.
 3. Enforce read-only source policy at compile time **and** dispatch time.
-   Writes require both `GRYPHON_ALLOW_WRITES=true` and exact
+   Except operator-attested read-only POSTs below, writes require both `GRYPHON_ALLOW_WRITES=true` and exact
    `GRYPHON_ALLOWED_WRITE_OPERATIONS` administrator permits. No model-provided
    approval parameter, guide text, or idempotency key can authorize a write.
 4. Enforce exact-domain policy and validate all DNS answers before connecting to
@@ -205,10 +197,7 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
    static auth maps to `operator`; stdio uses trusted `local`. Public deployment
    needs TLS termination and additional operator controls. Hosted channel identity
    must come from database-verified keys/status, never the URL alone or client claims.
-7. Hosted catalogs are read-only, with no source-auth or host credential/header
-   inheritance; current upstream support is public APIs only. Do not invent a
-   tenant secret manager. Uploaded versions are immutable and tenant-bound; deny
-   external references, environment interpolation, and caller-selected host paths.
+7. Hosted catalogs are read-only, with no source-auth or host credential/header inheritance; upstream support is public APIs only. Do not invent a tenant secret manager. Versions are immutable and tenant-bound; deny ordinary OpenAPI external references, environment interpolation and caller-selected host paths. Only the bounded UCP adapter may resolve approved schema refs.
 8. Hosted Docker requires explicit operator enablement and manually provisioned
    daemon/image/runsc. Channel imports only narrow preinstalled approved libraries;
    no arbitrary pip installs. Shipped Compose profiles must not mount a Docker socket.
@@ -284,6 +273,16 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
   span all requests, not exact misses versus storage failures; failed replay
   requests and request/run error categories remain separate from backend reuse.
 
+### Specification imports and exact read-only POST policy
+
+- Keep File `{name,content}` and URL `{name,url,kind:"openapi"|"ucp"}` imports under scoped `/api/tenants/{tenant_id}/specs`; URL maximum 2048 characters, no query/userinfo/fragment. UCP HTTPS roots become `/.well-known/ucp`. Use only DNS-pinned bounded clients: no host auth, redirects, env interpolation/proxies. Save normalized relative OpenAPI servers; ordinary external refs stay denied.
+- Refresh URL `{}` or file `{content}` creates an immutable successor with `parent_id`; optional strict boolean `update_channels` defaults false in API, checked in UI. Atomically replace only exact parent bindings/revisions when opted in and drain invalidated runtimes. Unchanged document/diagnostics/warnings returns 200 without revisions, changed 201, superseded 409. Preserve old payload defaults (file) without a schema migration and recheck authorization after fetching.
+- Expose before/after read-policy counts and warnings; unsupported callable schema semantics must reject import, not silent partial success. One active import, no queue, 25-second deadline, cancellation-owned cleanup. UCP counts refer to its adapted document, with exclusions separately warned.
+- Keep UCP bounded to published 2026-01-11/01-23/04-08/08-25 shapes and matching advertised shopping REST GET IDs from schema paths: checkout; April/August cart/order too. Canonical April/August contracts compile; required auth/signing (canonical January) rejects. UCP-Agent/Request-Id stay caller-supplied; no generated identity/negotiation. Omitted unsupported response schemas require explicit warnings, never claimed validation.
+- No UCP POST shopping/payments/checkout updates, non-REST or extension composition; no arbitrary callbacks/capability fetches. Save compiled OpenAPI, not raw profile; refresh refetches profile/needed schemas. Max 32 schema documents, min(HTTP timeout,30s), aggregate raw profile/schema budget min(hosted spec limit, configured max spec bytes,5MiB). Refs stay on schema origin; origin must be profile origin, ucp.dev or operator-approved. Preserve structural/expansion bounds.
+- `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults empty; only operator JSON tuples of canonical server/effective base/literal path/POST attest reads. No templates/globs or uploaded hints. Check parser and broker, include permits in compilation/replay identity, and match CDN/operation overrides. These intentionally apply deployment-wide, including any matching hosted tenant: not per-tenant authorization/credentials. Never change real security config or automatically apply permits.
+- Original CSE evidence: 1 GET + 25 POST (23 URL-encoded + 2 scalar multipart); temporary 25-permit compilation exposed all 26, not verified live semantics. Never call live APIs for proof or enable actual env permits. A UI source `cse` means namespace `cse`, not fixture `cse_api`; inspect canonical names using MCP. Both forms use closed scalar/scalar-array `json_body`; nested/null/binary/files reject, multipart never reads host files/emits caller filenames (1024 parts/2MiB).
+
 ## 6. Code quality
 
 - Fully annotate signatures; use modern `X | None`, `list[str]`, and `dict` types.
@@ -325,7 +324,14 @@ uv run --frozen --extra saas mypy --strict src/ tests/
 uv run --frozen --extra saas pytest --cov-fail-under=90
 uv run --frozen --extra saas pre-commit install
 uv run --frozen --extra saas pre-commit run --all-files
+node --test tests/unit/specifications_ui.test.js
+node --check src/gryphon/static/specifications.js
+node --check tests/integration/browser_ui.cjs
+# Opt-in: separately provision Node, Puppeteer and its working Chromium (no sandbox downgrade).
+uv run --frozen --extra saas python tests/integration/browser_ui_fixture.py
 ```
+The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It verifies mobile/desktop icons/dialogs, all import modes, refresh choices, bindings, warnings and retained snapshot downloads. Puppeteer is an optional external test prerequisite, not a Python runtime dependency.
+Targeted suites: `tests/unit/test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_ucp*.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`; integration `tests/integration/test_saas_spec_refresh.py` and `test_saas_ucp_http.py`. Run selected files with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—the full gates.
 
 Local pre-commit hooks invoke locked `uv run --frozen` commands; mypy and pytest
 include `--extra saas`. Mypy covers `src` and `tests`, and `pytest-coverage`

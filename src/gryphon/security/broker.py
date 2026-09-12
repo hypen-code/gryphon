@@ -140,12 +140,17 @@ class ToolBroker:
         if {key.lower() for key in headers} & {key.lower() for key in credentials}:
             raise SecurityViolationError("Request header override is not permitted")
         self._check_scope(scope)
+        self._authorize(manifest, endpoint, server_name, endpoint.function_name)
+        form = endpoint.request_body_media_type != "application/json"
+        multipart = endpoint.request_body_media_type == "multipart/form-data"
         response = await self._network.request(
             endpoint.method,
             url,
             headers={**headers, **credentials},
-            json_body=body,
-            json_body_present=body_present,
+            json_body=None if form else body,
+            json_body_present=body_present and not form,
+            data=body if form and not multipart else None,
+            content=body if multipart else None,
             timeout=scope.deadline - time.monotonic(),
         )
         self._check_scope(scope)
@@ -165,6 +170,14 @@ class ToolBroker:
         """Enforce source read-only policy plus exact administrator write grants."""
         if endpoint.method not in _READ_METHODS | _WRITE_METHODS:
             raise SecurityViolationError("Unsupported upstream HTTP method")
+        if endpoint.read_only_post:
+            base = endpoint.base_url or manifest.base_url
+            if endpoint.method != "POST" or not any(
+                permit.matches(server_name, endpoint.method, base, endpoint.path)
+                for permit in self._config.allowed_read_only_post_operations
+            ):
+                raise SecurityViolationError("Read-only POST is not authorized by administrator policy")
+            return
         if manifest.is_read_only:
             enforce_read_only(endpoint.method, server_name)
         if endpoint.method in _WRITE_METHODS:

@@ -123,7 +123,9 @@ def test_analytics_ui_both_roles_and_narrow_filters() -> None:
     """Analytics stays available inside selected tenant content without changing Users gates."""
     template = _TEMPLATE.read_text()
     admin = _ADMIN.read_text()
-    assert '<a href="#analytics" data-page="analytics">Analytics</a>' in template
+    analytics_link = re.search(r'<a href="#analytics" data-page="analytics">(.*?)</a>', template)
+    assert analytics_link is not None
+    assert 'class="nav-icon"' in analytics_link[1] and analytics_link[1].endswith(" Analytics")
     assert (
         template.index('id="tenant-content"')
         < template.index('id="page-analytics"')

@@ -7,9 +7,15 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from gryphon.models.analytics import RunMetrics as RunMetrics
+from gryphon.models.operation_policy import ReadOnlyPostOperation as ReadOnlyPostOperation
+from gryphon.models.specifications import SaaSSpec as SaaSSpec
+from gryphon.models.specifications import SpecDiagnostics as SpecDiagnostics
+from gryphon.models.specifications import SpecImport as SpecImport
 from gryphon.models.users import UserAccount as UserAccount
 from gryphon.models.users import UserAudit as UserAudit
 from gryphon.models.users import UserRole as UserRole
+
+type RequestBodyMediaType = Literal["application/json", "application/x-www-form-urlencoded", "multipart/form-data"]
 
 # ---------------------------------------------------------------------------
 # Swagger / OpenAPI models (swagger.py namespace)
@@ -49,6 +55,8 @@ class EndpointSpec(BaseModel):
     description: str = ""
     parameters: list[ParamSchema] = Field(default_factory=list)
     request_body_schema: dict[str, Any] | None = None
+    request_body_media_type: RequestBodyMediaType = "application/json"
+    read_only_post: bool = False
     response_schema: list[ResponseField] = Field(default_factory=list)
     response_json_schema: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
@@ -280,6 +288,8 @@ class EndpointManifest(BaseModel):
     parameters: list[ParamSchema] = Field(default_factory=list)
     response_fields: list[ResponseField] = Field(default_factory=list)
     request_body_schema: dict[str, Any] | None = None
+    request_body_media_type: RequestBodyMediaType = "application/json"
+    read_only_post: bool = False
     base_url: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
@@ -338,17 +348,6 @@ class Tenant(BaseModel):
     id: str
     name: str = Field(min_length=1, max_length=128)
     enabled: bool = True
-    created_at: float
-
-
-class SaaSSpec(BaseModel):
-    """Immutable tenant-owned canonical JSON specification."""
-
-    id: str
-    tenant_id: str
-    name: str = Field(min_length=1, max_length=128)
-    document: dict[str, Any] = Field(default_factory=dict, repr=False)
-    sha256: str
     created_at: float
 
 

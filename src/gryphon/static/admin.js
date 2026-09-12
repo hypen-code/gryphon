@@ -9,7 +9,7 @@ const errors = {
   csrf: "Your security session is out of date. Refresh the page and sign in again.",
   invalid_csrf: "Your security session is out of date. Refresh the page and sign in again.",
   validation: "Check the document format, unique API binding names, and sandbox/library policy. The submitted configuration was not accepted.",
-  invalid_spec: "The specification could not be validated. Check its OpenAPI or Swagger structure.",
+  invalid_spec: "The specification could not be validated. Check its Swagger/OpenAPI document or UCP discovery structure.",
   invalid_request: "The request was not accepted. Check the form values.",
   sandbox_unavailable: "Docker execution is unavailable. Ask the operator to check its configuration.",
   not_found: "This resource no longer exists. Refresh the workspace.",
@@ -52,6 +52,7 @@ function signedOut() {
 function validationMessage(path) {
   if (path === "/api/password" || (path.startsWith("/api/users/") && path.endsWith("/password"))) return errors.invalid_password;
   if (path === "/api/users" || path.startsWith("/api/users/")) return "Check the username format, display name, 12–128 character password, and enabled assigned tenant.";
+  if (path.includes("/specs")) return "Check the specification document or direct public URL and operator network policy. POST read endpoints need exact operator read-only approvals; unsupported transports are not callable.";
   return errors.validation;
 }
 async function api(path, method = "GET", body, signal) {
@@ -140,15 +141,7 @@ function action(label, work, danger = false) {
 function emptyRow(id, columns, text) {
   const row = node("tr"); const cell = node("td", text, "empty-cell"); cell.colSpan = columns; row.append(cell); $(id).replaceChildren(row);
 }
-function renderSpecs() {
-  $("spec-rows").replaceChildren();
-  state.specs.forEach((spec) => {
-    const row = node("tr"); const name = node("td"); name.append(node("strong", spec.name));
-    const actions = node("td"); actions.append(action("View source / download", () => viewSource(spec)));
-    row.append(name, node("td", spec.id), actions); $("spec-rows").append(row);
-  });
-  if (!state.specs.length) emptyRow("spec-rows", 3, "No specifications yet. Upload a JSON or YAML document to get started.");
-}
+function renderSpecs() { specifications.render(); }
 function detail(label, value) { const line = node("p", `${label} `); line.append(node("strong", value)); return line; }
 function renderChannels() {
   $("channel-list").replaceChildren(); $("nav-channel-count").textContent = String(state.channels.length);
@@ -232,15 +225,6 @@ async function saveChannel() {
   if (state.editing) payload.enabled = $("channel-enabled").checked;
   await api(state.editing ? channelPath(state.editing) : tenantPath("/channels"), state.editing ? "PATCH" : "POST", payload);
   $("channel-dialog").close(); await refresh(); notify("Channel saved. Rotate its key when you are ready to connect a client.");
-}
-async function uploadSpec() {
-  const file = $("spec-file").files[0]; const name = $("spec-name").value.trim();
-  if (!name) throw new Error("Enter a specification name.");
-  if (!file || !/\.(json|ya?ml)$/i.test(file.name)) throw new Error("Choose a .json, .yaml, or .yml file.");
-  if (file.size > state.settings.max_spec_bytes) throw new Error(`File is too large. The limit is ${count(state.settings.max_spec_bytes)} bytes.`);
-  const content = await file.text();
-  if (new TextEncoder().encode(content).length > state.settings.max_spec_bytes) throw new Error("The decoded document exceeds the upload size limit.");
-  await api(tenantPath("/specs"), "POST", { name, content }); $("spec-dialog").close(); $("spec-form").reset(); await refresh(); notify("Specification uploaded as a new immutable version.");
 }
 async function viewSource(spec) {
   const source = await api(tenantPath(`/specs/${segment(spec.id)}`));
@@ -363,16 +347,14 @@ function wireForms() {
     const name = $("tenant-name").value.trim(); if (!name) throw new Error("Enter a tenant name.");
     const tenant = await api("/api/tenants", "POST", { name }); state.tenant = tenant.id; $("tenant-dialog").close(); await refresh(); notify("Tenant created. Upload a specification or create your first channel.");
   }, "submit");
-  bind("spec-form", uploadSpec, "submit"); bind("channel-form", saveChannel, "submit");
+  bind("channel-form", saveChannel, "submit");
   bind("confirm-form", async () => { if (state.confirm) await state.confirm(); }, "submit");
-  $("spec-file").addEventListener("change", () => { if (!$("spec-name").value) $("spec-name").value = $("spec-file").files[0]?.name.replace(/\.(json|ya?ml)$/i, "").replace(/[^a-z0-9_ -]/gi, "-").slice(0, 120) || ""; });
   $("sandbox-mode").addEventListener("change", sandboxPolicy);
 }
 function wireActions() {
   const newTenant = () => { if (!isAdmin()) throw new Error("Only platform administrators can create tenants."); $("tenant-form").reset(); showDialog("tenant-dialog"); };
   bind("new-tenant", newTenant); bind("empty-new-tenant", newTenant); bind("toggle-tenant", toggleTenant);
   bind("new-channel", () => editChannel());
-  bind("new-spec", () => { if (!state.settings) throw new Error("Refresh settings before uploading."); $("spec-form").reset(); $("file-limit").textContent = `Maximum file size: ${count(state.settings.max_spec_bytes)} bytes. No remote URLs are fetched by this form.`; showDialog("spec-dialog"); });
   bind("refresh", refresh); bind("logout", async () => { analytics.reset(); try { await api("/api/logout", "POST", {}); } finally { signedOut(); } notify("Signed out."); });
   $("tenant-select").addEventListener("change", () => run(async () => { if (!isAdmin()) { renderTenants(); return; } state.epoch += 1; state.tenant = $("tenant-select").value; clearKey(); renderTenants(); await loadTenant(); notify("Tenant workspace loaded."); }));
   bind("download-source", downloadSource); bind("copy-endpoint", () => copy($("endpoint").value)); bind("copy-config", () => copy($("client-config").textContent)); bind("copy-key", () => copy($("channel-token").value));
@@ -383,5 +365,5 @@ function wireActions() {
   $("source-dialog").addEventListener("close", () => { state.source = null; $("source-content").textContent = ""; });
   window.addEventListener("hashchange", page); window.addEventListener("pagehide", clearKey);
 }
-wireForms(); wireActions(); wireAccounts(); analytics.wire(); page();
+wireForms(); wireActions(); wireAccounts(); specifications.wire(); analytics.wire(); page();
 run(async () => { try { await enter(await api("/api/session")); } catch (error) { if (state.csrf) throw error; notify(error.message, true); } });

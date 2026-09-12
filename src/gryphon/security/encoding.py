@@ -10,6 +10,7 @@ from urllib.parse import quote
 import httpx
 
 from gryphon.errors import InputValidationError, SecurityViolationError
+from gryphon.security.form_encoding import encode_form, encode_multipart
 from gryphon.security.policies import validated_url
 from gryphon.security.schema import validate_contract, walk_json
 
@@ -115,8 +116,8 @@ def encode_request(
         arguments: Schema-validated JSON object with optional wire nulls omitted.
 
     Returns:
-        URL, noncredential headers, and JSON body. The caller separately tracks
-        whether json_body was present, distinguishing null from an absent body.
+        URL, noncredential headers, and JSON or encoded form body. The caller tracks
+        json_body presence and uses the manifest media type to select transport encoding.
     """
     base = _routing_base(base_url, endpoint.path)
     declared = {param.name for param in endpoint.parameters}
@@ -130,7 +131,13 @@ def encode_request(
     url = httpx.URL(str(base).rstrip("/") + path)
     if query:
         url = url.copy_with(query=str(httpx.QueryParams(tuple(query))).encode("ascii"))
-    return str(url), headers, arguments.get("json_body")
+    body = arguments.get("json_body")
+    if endpoint.request_body_media_type == "application/x-www-form-urlencoded":
+        headers["Content-Type"] = endpoint.request_body_media_type
+        body = encode_form(body) if "json_body" in arguments else None
+    elif endpoint.request_body_media_type == "multipart/form-data":
+        headers["Content-Type"], body = encode_multipart(arguments.get("json_body", {}))
+    return str(url), headers, body
 
 
 def _encode_parameters(

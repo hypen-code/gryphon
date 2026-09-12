@@ -61,6 +61,9 @@ def fingerprint(config: GryphonConfig, registry: Registry) -> str:
             "container_memory_limit",
         )
     }
+    policy["allowed_read_only_post_operations"] = sorted(
+        {permit.model_dump_json() for permit in config.allowed_read_only_post_operations}
+    )
     policy["allowed_write_operations"] = sorted(set(config.allowed_write_operations))
     policy["sandbox_allowed_imports"] = sorted(effective_imports(config))
     return hashlib.sha256(json.dumps([catalog, policy], sort_keys=True).encode()).hexdigest()

@@ -255,6 +255,8 @@ class Orchestrator(ClientConfigSupport):
                 parameters=ep.parameters,
                 response_fields=ep.response_schema,
                 request_body_schema=ep.request_body_schema,
+                request_body_media_type=ep.request_body_media_type,
+                read_only_post=ep.read_only_post,
                 base_url=ep.base_url or spec.base_url,
                 input_schema=input_schema(ep),
                 output_schema=ep.response_json_schema,
