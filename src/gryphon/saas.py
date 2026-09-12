@@ -33,6 +33,7 @@ _ASSETS = Path(__file__).parent
 
 def create_app(config: SaaSConfig, base: GryphonConfig) -> Starlette:
     """Compose explicit hosted dependencies; initialization happens only inside lifespan."""
+    base = base.model_copy(deep=True, update={"allow_catalog_posts": True})
     store = SaaSStore(config.database_url.get_secret_value(), max_tenants=100, max_spec_bytes=config.max_spec_bytes)
     analytics = AnalyticsStore(store._db)
     runtimes = ChannelRuntimeManager(base, config.state_dir, config.max_runtimes, analytics=analytics)

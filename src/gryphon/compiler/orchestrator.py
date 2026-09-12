@@ -245,6 +245,7 @@ class Orchestrator(ClientConfigSupport):
             EndpointManifest(
                 function_name=ep.operation_id,
                 summary=ep.summary,
+                description=ep.description,
                 method=ep.method,
                 path=ep.path,
                 parameters_summary=", ".join(

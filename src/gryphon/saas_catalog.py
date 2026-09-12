@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from gryphon.compiler.catalog import contained_path, module_name
 from gryphon.compiler.orchestrator import Orchestrator
 from gryphon.compiler.schemas import validate_document_tree
+from gryphon.compiler.ucp_mcp import selected_document
 from gryphon.errors import CompileError, InputValidationError, SecurityViolationError
 from gryphon.models import SwaggerSource
 from gryphon.runtime.execution_cleanup import finish_cleanup
@@ -108,9 +109,29 @@ def prepare_channel_storage(config: GryphonConfig) -> None:
         raise SecurityViolationError("Channel state directory must be private and owned")
 
 
+def approved_spec_config(config: GryphonConfig, channel: Channel, specs: Sequence[SaaSSpec]) -> GryphonConfig:
+    """Copy scoped read grants only after validating exact tenant-bound channel selection.
+
+    Never mutate deployment settings: the same returned snapshot must govern compilation
+    and broker execution. Ordinary hosted write controls remain disabled.
+    """
+    validate_selection(channel, specs)
+    permits = list(config.allowed_read_only_post_operations)
+    scoped = {permit for spec in specs for permit in spec.approved_post_reads}
+    permits.extend(sorted(scoped.difference(permits), key=lambda permit: permit.model_dump_json()))
+    return config.model_copy(
+        deep=True,
+        update={
+            "allowed_read_only_post_operations": permits,
+            "allow_writes": False,
+            "allowed_write_operations": [],
+        },
+    )
+
+
 async def compile_catalog(config: GryphonConfig, channel: Channel, specs: Sequence[SaaSSpec]) -> Registry:
     """Compile in an owned worker and remove all temporary files, including on cancellation."""
-    validate_selection(channel, specs)
+    config = approved_spec_config(config, channel, specs)
     snapshot = [spec.model_copy(deep=True) for spec in specs]
     return await finish_cleanup(asyncio.to_thread(_compile_catalog, config, channel.revision, snapshot))
 
@@ -142,7 +163,16 @@ def _stable_metadata(output: Path, config: GryphonConfig, revision: int, specs: 
         name = module_name(spec.name)
         path = output / name / "manifest.json"
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        source = SwaggerSource(name=name, swagger_url=f"uploaded:{spec.id}", is_read_only=spec.read_only_filter)
+        source = SwaggerSource(
+            name=name,
+            swagger_url=f"uploaded:{spec.id}",
+            is_read_only=spec.read_only_filter and not spec.mcp_bindings,
+        )
+        for endpoint in manifest["endpoints"]:
+            binding = spec.mcp_bindings.get(endpoint["function_name"])
+            if binding is not None:
+                endpoint["mcp_binding"] = binding.model_dump(mode="json")
+                endpoint["read_only_post"] = False
         manifest["template_hash"] = compiler._source_hash(source)
         manifest["compiled_at"] = f"channel-revision:{revision}"
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -158,6 +188,12 @@ def _write_sources(root: Path, specs: Sequence[SaaSSpec], max_bytes: int) -> lis
             raise CompileError("Channel specification names collide")
         names.add(name)
         path = root / f"source-{index}.json"
-        path.write_text(validate_uploaded_document(spec.document, max_bytes), encoding="utf-8")
-        sources.append({"name": name, "swagger_url": str(path), "is_read_only": spec.read_only_filter})
+        path.write_text(validate_uploaded_document(selected_document(spec), max_bytes), encoding="utf-8")
+        sources.append(
+            {
+                "name": name,
+                "swagger_url": str(path),
+                "is_read_only": spec.read_only_filter and not spec.mcp_bindings,
+            }
+        )
     return sources

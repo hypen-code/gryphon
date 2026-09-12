@@ -10,6 +10,9 @@ const errors = {
   invalid_csrf: "Your security session is out of date. Refresh the page and sign in again.",
   validation: "Check the document format, unique API binding names, and sandbox/library policy. The submitted configuration was not accepted.",
   invalid_spec: "The specification could not be validated. Check its Swagger/OpenAPI document or UCP discovery structure.",
+  ucp_discovery: "UCP discovery failed. Use a public HTTPS website root, /.well-known/ucp profile, or MCP endpoint and check operator network policy.",
+  ucp_transport: "The UCP transport could not be used. Check the advertised REST or MCP binding and its endpoint; unsupported transports are not callable.",
+  ucp_schema: "The UCP tool or schema contract is unsupported or invalid. Check the advertised tool inputs, required caller metadata, and supported contracts.",
   invalid_request: "The request was not accepted. Check the form values.",
   sandbox_unavailable: "Docker execution is unavailable. Ask the operator to check its configuration.",
   not_found: "This resource no longer exists. Refresh the workspace.",
@@ -56,19 +59,18 @@ function signedOut() {
   state.epoch += 1; state.csrf = ""; state.tenant = ""; state.tenants = []; state.channels = []; state.specs = []; state.settings = null; state.source = null; state.confirm = null;
   state.me = null; state.users = []; state.userOffset = 0; state.userNext = null; state.editing = null; state.editingUser = null; state.passwordUser = null;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); clearKey(); clearPasswords();
-  document.querySelectorAll("form").forEach((form) => form.reset()); $("source-content").textContent = ""; $("client-config").textContent = ""; $("endpoint").value = "";
+  document.querySelectorAll("form").forEach((form) => form.reset()); $("source-content").textContent = ""; $("source-metadata").textContent = ""; $("client-config").textContent = ""; $("endpoint").value = "";
   renderIdentity(); renderTenants(); renderSpecs(); renderChannels(); renderUsage([]); renderAudit([]); renderUsers(); notify("");
   $("app").hidden = true; $("login").hidden = false; $("login-username").focus();
 }
 function validationMessage(path) {
   if (path === "/api/password" || (path.startsWith("/api/users/") && path.endsWith("/password"))) return errors.invalid_password;
   if (path === "/api/users" || path.startsWith("/api/users/")) return "Check the username format, display name, 12–128 character password, and enabled assigned tenant.";
-  if (path.includes("/specs")) return "Check the specification document or direct public URL and operator network policy. POST read endpoints need exact operator read-only approvals for execution, not unfiltered discovery; unsupported transports are not callable.";
+  if (path.includes("/specs")) return "Check the specification document or public source URL, supported tool/schema contracts, and operator network policy. UCP accepts a HTTPS website root, discovery profile, or MCP endpoint.";
   return errors.validation;
 }
 async function api(path, method = "GET", body, signal) {
-  const epoch = state.epoch;
-  const headers = { Accept: "application/json" };
+  const epoch = state.epoch; const headers = { Accept: "application/json" };
   if (method !== "GET") { headers["Content-Type"] = "application/json"; if (state.csrf) headers["X-CSRF-Token"] = state.csrf; }
   let response;
   try { response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
@@ -124,7 +126,7 @@ async function refresh() {
     state.settings = settings; state.tenants = isAdmin() ? tenants.items : tenants.items.filter((tenant) => tenant.id === state.me.tenant_id);
     if (!state.tenants.some((tenant) => tenant.id === state.tenant)) state.tenant = state.tenants[0]?.id || "";
     renderTenants(); renderAudit(audit.items); await loadTenant(); if (isAdmin()) await loadUsers(); notify("Workspace is up to date.");
-  } catch (error) { analytics.clear(); emptyRow("audit-rows", 4, "Audit data may be unavailable. Use Refresh data to retry."); throw error; }
+  } catch (error) { analytics.clear(); emptyRow("audit-rows", 5, "Audit data may be unavailable. Use Refresh data to retry."); throw error; }
   finally { $("loading").hidden = true; $("main").removeAttribute("aria-busy"); }
 }
 async function loadTenant() {
@@ -147,7 +149,7 @@ async function enter(session) {
 }
 function action(label, work, danger = false) {
   const button = node("button", label, `text-button${danger ? " danger-text" : ""}`); button.type = "button";
-  button.addEventListener("click", () => run(work, button)); return button;
+  button.addEventListener("click", (event) => { event.preventDefault(); run(work, button); }); return button;
 }
 function emptyRow(id, columns, text) {
   const row = node("tr"); const cell = node("td", text, "empty-cell"); cell.colSpan = columns; row.append(cell); $(id).replaceChildren(row);
@@ -160,7 +162,7 @@ function renderChannels() {
     const card = node("article", "", "channel-card"); const header = node("div", "", "channel-card-header");
     header.append(node("h2", channel.name), node("span", channel.enabled ? "Enabled" : "Disabled", `badge ${channel.enabled ? "" : "neutral"}`));
     const details = node("div", "", "channel-details");
-    const bindings = channel.spec_ids.map((id) => state.specs.find((spec) => spec.id === id)?.name || id);
+    const bindings = specifications.bindingChoices(channel.spec_ids).filter((spec) => channel.spec_ids.includes(spec.id)).map((spec) => spec.name);
     details.append(detail("Sandbox", channel.sandbox_mode === "docker" ? "Docker · offline" : "Restricted Python"), detail("Specifications", bindings.join(", ") || "None bound"), detail("Libraries", channel.allowed_imports.join(", ") || "No imports"), detail("Revision", String(channel.revision ?? "—")));
     details.append(detail("Discovery", channel.include_function_summaries ? "Function names and descriptions · bounded continuation" : "Compact server summaries"));
     const actions = node("div", "", "channel-actions");
@@ -198,19 +200,34 @@ function renderChart(items) {
   });
   if (!sorted.length) $("usage-chart").append(node("p", "No traffic yet. Your channel activity will appear here.", "empty-cell"));
 }
+function auditActor(item) {
+  const actor = item.actor && typeof item.actor === "object" ? item.actor : {};
+  const id = actor.id || item.actor_id; const name = actor.name || item.actor_name; const username = actor.username || item.actor_username;
+  const bootstrap = actor.kind === "bootstrap" || id === "bootstrap" || id === "bootstrap_admin";
+  const cell = node("td", bootstrap ? "Bootstrap administrator" : name || username || (id ? "Account" : "Unknown / legacy actor"));
+  if (username && username !== name) cell.append(node("small", username));
+  if (id) cell.append(node("small", `Actor ID: ${id}`));
+  if (actor.display_source === "current" && (name || username)) cell.append(node("small", "Current account name"));
+  return cell;
+}
 function renderAudit(items) {
   $("audit-rows").replaceChildren();
   items.forEach((item) => {
     const row = node("tr"); const date = new Date(typeof item.created_at === "number" ? item.created_at * 1000 : item.created_at);
-    row.append(node("td", item.event), node("td", state.tenants.find((tenant) => tenant.id === item.tenant_id)?.name || item.tenant_id || "—"), node("td", item.channel_id || "—"), node("td", Number.isNaN(date.getTime()) ? "—" : date.toLocaleString())); $("audit-rows").append(row);
+    const event = node("td", item.event); const subject = item.subject || {};
+    const subjectId = subject.id || item.subject_id || item.user_id; const subjectName = subject.name || subject.username || item.subject_name || item.subject_username;
+    if (subjectId || subjectName) event.append(node("small", `Account subject: ${subjectName || subjectId}${subjectName && subjectId ? ` · ${subjectId}` : ""}`));
+    row.append(event, auditActor(item), node("td", state.tenants.find((tenant) => tenant.id === item.tenant_id)?.name || item.tenant_id || "—"), node("td", item.channel_id || "—"), node("td", Number.isNaN(date.getTime()) ? "—" : date.toLocaleString())); $("audit-rows").append(row);
   });
-  if (!items.length) emptyRow("audit-rows", 4, "No administrative activity recorded yet.");
+  if (!items.length) emptyRow("audit-rows", 5, "No administrative activity recorded yet.");
 }
 function choices(id, items, selected) {
   $(id).replaceChildren();
   items.forEach((item) => {
     const label = node("label", "", "check-label"); const input = document.createElement("input"); input.type = "checkbox"; input.value = item.id; input.checked = selected.includes(item.id);
-    const text = node("span", item.name); if (item.name !== item.id) text.append(node("small", item.id)); label.append(input, text); $(id).append(label);
+    const text = node("span", item.name); if (item.name !== item.id) text.append(node("small", item.id)); label.append(input, text);
+    if (item.latest_id) label.append(action("Use latest", () => { input.value = item.latest_id; input.checked = true; text.textContent = item.latest_name; text.append(node("small", item.latest_id)); label.lastChild.remove(); }));
+    $(id).append(label);
   });
   if (!items.length) $(id).append(node("p", id === "spec-options" ? "No specifications uploaded. You can bind them later." : "No libraries approved by the operator.", "hint"));
 }
@@ -225,7 +242,7 @@ function editChannel(channel = null) {
   state.editing = channel; $("channel-form").reset(); $("channel-dialog-title").textContent = channel ? "Edit channel" : "Create channel";
   $("channel-name").value = channel?.name || ""; $("channel-enabled").checked = channel?.enabled ?? true; $("channel-enabled-label").hidden = !channel;
   $("channel-function-summaries").checked = channel?.include_function_summaries ?? false;
-  choices("spec-options", state.specs, channel?.spec_ids || []);
+  choices("spec-options", specifications.bindingChoices(channel?.spec_ids || []), channel?.spec_ids || []);
   choices("library-options", state.settings.allowed_imports.map((name) => ({ id: name, name })), channel?.allowed_imports || []);
   $("sandbox-mode").querySelector('[value="docker"]').disabled = !state.settings.docker_enabled;
   $("sandbox-mode").value = channel?.sandbox_mode || "restricted"; sandboxPolicy(); showDialog("channel-dialog");
@@ -242,7 +259,7 @@ async function saveChannel() {
 async function viewSource(spec) {
   const source = await api(tenantPath(`/specs/${segment(spec.id)}`));
   state.source = { name: source.name, text: JSON.stringify(source.document, null, 2) };
-  $("source-title").textContent = source.name; $("source-content").textContent = state.source.text; showDialog("source-dialog");
+  $("source-title").textContent = `${source.name} · ${spec.id}`; $("source-metadata").textContent = specifications.sourceMetadata(source).join(" · "); $("source-content").textContent = state.source.text; showDialog("source-dialog");
 }
 function downloadSource() {
   if (!state.source) return;
@@ -376,7 +393,7 @@ function wireActions() {
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => { if (!state.busy) { const dialog = button.closest("dialog"); clearDialog(dialog); dialog.close(); } }));
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("cancel", (event) => { if (state.busy) event.preventDefault(); else clearDialog(dialog); }));
   $("key-dialog").addEventListener("close", clearKey); $("confirm-dialog").addEventListener("close", () => { state.confirm = null; });
-  $("source-dialog").addEventListener("close", () => { state.source = null; $("source-content").textContent = ""; });
+  $("source-dialog").addEventListener("close", () => { state.source = null; $("source-content").textContent = ""; $("source-metadata").textContent = ""; });
   window.addEventListener("hashchange", page); window.addEventListener("pagehide", clearKey);
 }
 wireForms(); wireActions(); wireAccounts(); specifications.wire(); analytics.wire(); page();

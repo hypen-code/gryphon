@@ -186,7 +186,9 @@ async def test_import_invalid_source_combinations_fail_closed(
 ) -> None:
     """Malformed source combinations fail before constructing any network client."""
     with patch("gryphon.saas_spec_import.NetworkClient") as network, pytest.raises(InputValidationError):
-        await SpecImporter(gryphon_config, 8192).load("api", **arguments)
+        await SpecImporter(gryphon_config, 8192).load(
+            "api", content=arguments.get("content"), url=arguments.get("url"), kind=arguments.get("kind", "openapi")
+        )
     network.assert_not_called()
 
 

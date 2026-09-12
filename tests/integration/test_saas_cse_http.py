@@ -1,4 +1,4 @@
-"""Hosted synthetic CSE-shaped POST permits and wire contracts, not upstream semantic attestations."""
+"""Hosted CSE-shaped automatic POSTs and legacy filtered inclusion, using only synthetic HTTP."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from test_saas_http import _data
 from test_saas_user_http import POLICY, Members
 from test_saas_user_http import members as members
 
-from gryphon.models import ReadOnlyPostOperation
+from gryphon.models import ReadOnlyPostOperation, SwaggerSource
 from gryphon.security.network import NetworkClient
 
 if TYPE_CHECKING:
@@ -37,13 +37,23 @@ def _configure(members: Members, permits: list[ReadOnlyPostOperation]) -> None:
     """Configure both operator snapshots before upload and lazy channel runtime creation."""
     members.app.state.admin.base.allowed_read_only_post_operations = permits
     members.app.state.runtimes._base.allowed_read_only_post_operations = permits
+    members.app.state.runtimes._base.swaggers = [
+        SwaggerSource(
+            name="cse_api",
+            swagger_url="https://market.example/spec.json",
+            base_url="https://market.example/api",
+            auth_header="Bearer disposable-source-token",
+            extra_headers={"Cookie": "disposable=source", "X-Source-Only": "synthetic"},
+        )
+    ]
 
 
-async def _publish(members: Members, available: int) -> dict[str, str]:
+async def _publish(members: Members, available: int, *, filtered: bool = True) -> dict[str, str]:
     """Compile the real fixture under its normalized display name and issue an isolated channel key."""
     prefix = f"/api/tenants/{members.tenants[0]}"
     response = await members.first.post(
-        prefix + "/specs", json={"name": "CSE API", "content": _FIXTURE.read_text(encoding="utf-8")}
+        prefix + "/specs",
+        json={"name": "CSE API", "content": _FIXTURE.read_text(encoding="utf-8"), "read_only_filter": filtered},
     )
     assert response.status_code == 201
     assert response.json()["diagnostics"] == {
@@ -85,10 +95,10 @@ async def test_hosted_cse_default_or_inexact_permits_only_expose_get(
     network.assert_not_called()
 
 
-async def _exercise(client: Client[Any], function: str, arguments: dict[str, object]) -> None:
+async def _exercise(client: Client[Any], function: str, arguments: dict[str, object], available: int) -> None:
     """Inspect and execute the actual manifest capability, then replay with complete structured inputs."""
     listing = await _data(client, "list_servers")
-    assert [(item["name"], item["function_count"]) for item in listing["servers"]] == [("cse_api", 5)]
+    assert [(item["name"], item["function_count"]) for item in listing["servers"]] == [("cse_api", available)]
     inspection = await _data(
         client, "get_functions", {"functions": [{"server_name": "cse_api", "function_name": function}]}
     )
@@ -106,6 +116,7 @@ def _assert_wire(request: httpx.Request, route: str) -> None:
     assert request.url.host == "93.184.216.34" and request.headers["host"] == "market.example"
     assert request.extensions["sni_hostname"] == "market.example"
     assert "authorization" not in request.headers and "cookie" not in request.headers
+    assert "x-source-only" not in request.headers
     if route in {"/marketStatus", "/companyInfoSummery"}:
         assert request.headers["content-type"] == "application/x-www-form-urlencoded"
         assert request.content == (b"" if route == "/marketStatus" else b"symbol=SYN+%26%2B%3D%2F%C3%A9")
@@ -124,13 +135,15 @@ def _assert_wire(request: httpx.Request, route: str) -> None:
         ("/companyInfoVideo", "get_company_info_video"),
     ],
 )
-async def test_hosted_cse_exact_permits_execute_and_replay_pinned_forms(
-    members: Members, route: str, function: str
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_hosted_cse_automatic_or_legacy_included_posts_replay_pinned_forms(
+    members: Members, route: str, function: str, legacy: bool
 ) -> None:
-    """Operator permits survive upload parsing and channel deep copies through real Monty and broker dispatch."""
-    permits = _permits()
+    """Automatic POSTs need no grants; retained legacy permits still include POSTs under the HTTP filter."""
+    permits = _permits() if legacy else []
     _configure(members, permits)
-    channel = await _publish(members, 5)
+    available = 5 if legacy else 7
+    channel = await _publish(members, available, filtered=legacy)
     requests: list[httpx.Request] = []
 
     def transport(request: httpx.Request) -> httpx.Response:
@@ -147,12 +160,12 @@ async def test_hosted_cse_exact_permits_execute_and_replay_pinned_forms(
     arguments: dict[str, object] = {} if route == "/marketStatus" else {"json_body": {"symbol": "SYN &+=/é"}}
     with patch("gryphon.security.broker.NetworkClient", side_effect=network):
         async with Client(channel["url"], auth=channel["token"]) as client:
-            await _exercise(client, function, arguments)
+            await _exercise(client, function, arguments, available)
             broker = members.app.state.runtimes._runtimes[channel["id"]].broker
             assert broker is not None and broker._config.allowed_read_only_post_operations == permits
             assert not broker._config.allow_writes and broker._config.allowed_write_operations == []
             endpoint = broker._registry.get_endpoint("cse_api", function)
-            assert endpoint.read_only_post and endpoint.path == route
+            assert endpoint.read_only_post is legacy and endpoint.path == route
     assert len(requests) == 2
     for request in requests:
         _assert_wire(request, route)

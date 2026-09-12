@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from gryphon.errors import SaaSDisabledError, SaaSValidationError
 from gryphon.models import AdminAudit, AuditEvent, Channel, ChannelUsage, SaaSSpec, SpecImport, Tenant
+from gryphon.saas_audit import current_actor
 from gryphon.saas_database import SaaSDatabase, SQLValue
 from gryphon.saas_records import SaaSRecords
 from gryphon.saas_spec_versions import insert_spec, new_spec, refresh_spec
@@ -85,9 +86,14 @@ class SaaSStore(SaaSRecords):
         return tenant
 
     async def _audit(self, tenant_id: str, event: AuditEvent, channel_id: str | None = None) -> None:
-        """Append only a static event and trim the globally bounded audit history."""
+        """Append static metadata and the verified actor snapshot in the mutation transaction."""
         item = AdminAudit(
-            id=str(uuid4()), tenant_id=tenant_id, channel_id=channel_id, event=event, created_at=time.time()
+            id=str(uuid4()),
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            event=event,
+            created_at=time.time(),
+            actor=current_actor(),
         )
         await self._db.execute(
             "INSERT INTO saas_audit VALUES (?,?,?,?)", (item.id, tenant_id, item.created_at, item.model_dump_json())

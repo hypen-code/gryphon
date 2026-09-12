@@ -275,7 +275,9 @@ async def test_member_identity_discovery_and_audit_are_scoped_and_secret_free(me
     account_events = [event for event in audit if "subject_id" in event]
     assert {event["subject_id"] for event in account_events} >= {user.id for user in members.users}
     for event in account_events:
-        assert set(event) == {"id", "actor_id", "subject_id", "tenant_id", "event", "created_at"}
+        assert set(event) == {"id", "actor_id", "subject_id", "tenant_id", "event", "created_at", "actor"}
+        assert set(event["actor"]) == {"id", "username", "name", "kind", "display_source"}
+        assert event["actor"]["id"] == event["actor_id"]
 
 
 async def test_member_credentials_cannot_cross_bootstrap_password_or_channel_sessions(members: Members) -> None:

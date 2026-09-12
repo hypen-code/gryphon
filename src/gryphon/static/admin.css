@@ -72,6 +72,8 @@ legend { padding: 0; margin-bottom: 7px; }
 .sidebar nav a { color: #b9c8ce; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 7px; font-size: 13px; }
 .nav-icon { display: block; width: 20px; height: 20px; flex: 0 0 20px; }
 .spec-actions .text-button { display: block; }
+#spec-history-rows td { min-width: 150px; }
+#spec-options .text-button { flex-shrink: 0; font-size: 11px; }
 .source-location { overflow-wrap: anywhere; }
 .spec-diagnostics { display: block; margin-top: 6px; font-size: 12px; }
 .spec-diagnostics.negative { color: var(--red); }

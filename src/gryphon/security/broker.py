@@ -8,10 +8,11 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from gryphon.errors import CapacityError, ExecutionTimeoutError, SecurityViolationError
+from gryphon.errors import CapacityError, ExecutionTimeoutError, InputValidationError, SecurityViolationError
 from gryphon.runtime.execution_metrics import broker_measurements
 from gryphon.security.auth import AsyncVault
 from gryphon.security.encoding import encode_request, validate_arguments
+from gryphon.security.mcp_client import invoke_tool
 from gryphon.security.network import NetworkClient, decode_json
 from gryphon.security.policies import check_domain_allowed, enforce_read_only, validated_url
 from gryphon.security.response import validate_response
@@ -80,7 +81,11 @@ class ToolBroker:
         endpoint = self._registry.get_endpoint(server_name, function_name)
         self._authorize(manifest, endpoint, server_name, function_name)
         normalized = validate_arguments(endpoint, arguments)
-        url, headers, body = encode_request(endpoint, endpoint.base_url or manifest.base_url, normalized)
+        headers: dict[str, str]
+        if endpoint.mcp_binding is not None:
+            url, headers, body = endpoint.mcp_binding.endpoint, {}, normalized.get("json_body", {})
+        else:
+            url, headers, body = encode_request(endpoint, endpoint.base_url or manifest.base_url, normalized)
         check_domain_allowed(url, self._config.allowed_domains)
         return await self._dispatch(
             server_name, manifest, endpoint, url, headers, body, scope, body_present="json_body" in normalized
@@ -135,6 +140,9 @@ class ToolBroker:
         body_present: bool,
     ) -> Any:
         """Resolve host credentials and recheck authority before and after network I/O."""
+        if endpoint.mcp_binding is not None:
+            self._authorize(manifest, endpoint, server_name, endpoint.function_name)
+            return await self._send_mcp(endpoint, body, scope)
         credentials = await self._vault.resolve(server_name, self._auth_configs.get(server_name))
         self._check_credential_origin(manifest.base_url, url, credentials)
         if {key.lower() for key in headers} & {key.lower() for key in credentials}:
@@ -160,6 +168,25 @@ class ToolBroker:
         self._check_scope(scope)
         return result
 
+    async def _send_mcp(self, endpoint: EndpointManifest, body: Any, scope: ExecutionScope) -> Any:
+        """Invoke a fixed, fingerprinted native MCP tool without forwarding host credentials."""
+        binding = endpoint.mcp_binding
+        if binding is None or not isinstance(body, dict):
+            raise InputValidationError("MCP tool arguments must be an object")
+        self._check_scope(scope)
+        result = await invoke_tool(
+            self._config,
+            binding.endpoint,
+            binding.tool_name,
+            body,
+            expected_fingerprint=binding.tool_fingerprint,
+            check_active=lambda: self._check_scope(scope),
+            timeout=scope.deadline - time.monotonic(),
+            max_bytes=self._config.max_response_size_bytes,
+        )
+        self._check_scope(scope)
+        return validate_response(result, endpoint.output_schema, {})
+
     def _authorize(
         self,
         manifest: ServerManifest,
@@ -170,6 +197,10 @@ class ToolBroker:
         """Enforce source read-only policy plus exact administrator write grants."""
         if endpoint.method not in _READ_METHODS | _WRITE_METHODS:
             raise SecurityViolationError("Unsupported upstream HTTP method")
+        if endpoint.method == "POST" and self._config.allow_catalog_posts:
+            if manifest.is_read_only and not endpoint.read_only_post:
+                enforce_read_only(endpoint.method, server_name)
+            return
         if endpoint.read_only_post:
             base = endpoint.base_url or manifest.base_url
             if endpoint.method != "POST" or not any(

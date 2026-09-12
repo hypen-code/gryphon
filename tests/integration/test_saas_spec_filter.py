@@ -1,4 +1,4 @@
-"""Specification catalog visibility toggles are immutable and never authorize hosted writes."""
+"""Immutable specification filtering controls POST inclusion without enabling other hosted mutations."""
 
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ if TYPE_CHECKING:
 _CONTENT = (Path(__file__).parents[1] / "fixtures" / "cse_read_only_posts.yaml").read_text()
 
 
-async def _publish(http: httpx.AsyncClient, *, filtered: bool = True) -> tuple[str, dict[str, Any], dict[str, str]]:
+async def _publish(
+    http: httpx.AsyncClient, *, filtered: bool = True, content: str = _CONTENT
+) -> tuple[str, dict[str, Any], dict[str, str]]:
     """Bind a synthetic complete specification without enabling operator write permissions."""
     tenant = (await http.post("/api/tenants", json={"name": "Filter"})).json()["id"]
     prefix = f"/api/tenants/{tenant}"
     response = await http.post(
-        prefix + "/specs", json={"name": "cse", "content": _CONTENT, "read_only_filter": filtered}
+        prefix + "/specs", json={"name": "cse", "content": content, "read_only_filter": filtered}
     )
     assert response.status_code == 201
     spec = response.json()
@@ -61,27 +63,28 @@ async def _catalog_count(channel: dict[str, str]) -> int:
         return int((await _data(client, "list_servers"))["servers"][0]["function_count"])
 
 
-async def test_unfiltered_import_exposes_all_supported_operations_but_denies_writes(
-    hosted: tuple[httpx.AsyncClient, Starlette],
+@pytest.mark.parametrize("method", ["put", "patch", "delete"])
+async def test_unfiltered_import_exposes_supported_operations_but_denies_non_post_mutations(
+    hosted: tuple[httpx.AsyncClient, Starlette], method: str
 ) -> None:
-    """Unticking the filter includes POST/PUT metadata without granting network execution."""
+    """Unticking the filter includes POST/PUT metadata without enabling ordinary write controls."""
     http, app = hosted
     app.state.runtimes._base.allow_writes = True
-    app.state.runtimes._base.allowed_write_operations = ["cse.get_company_profile"]
-    _, spec, channel = await _publish(http, filtered=False)
+    app.state.runtimes._base.allowed_write_operations = ["cse.get_company_data_by_put"]
+    _, spec, channel = await _publish(http, filtered=False, content=_CONTENT.replace("    put:", f"    {method}:"))
     assert spec["read_only_filter"] is False
     assert spec["diagnostics"]["available_operations"] == 7 and spec["diagnostics"]["filtered_operations"] == 0
     assert await _catalog_count(channel) == 7
     with patch("gryphon.security.broker.NetworkClient.request", AsyncMock()) as network:
         async with Client(channel["url"], auth=channel["token"]) as client:
-            found = await _data(client, "search_functions", {"query": "get_company_profile"})
-            assert found["functions"][0]["function_name"] == "get_company_profile"
+            found = await _data(client, "search_functions", {"query": "get_company_data_by_put"})
+            assert found["functions"][0]["function_name"] == "get_company_data_by_put"
             result = await _data(
                 client,
                 "execute_code",
                 {
-                    "code": 'result = await call_tool("cse.get_company_profile", {"json_body": {"symbol": "SYN"}})',
-                    "description": "Unapproved POST",
+                    "code": 'result = await call_tool("cse.get_company_data_by_put", {})',
+                    "description": "Denied PUT despite base permits",
                 },
             )
             assert not result["success"] and result["error_type"] == "security"

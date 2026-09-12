@@ -7,6 +7,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from gryphon.models.analytics import RunMetrics as RunMetrics
+from gryphon.models.audit import AdminAudit as AdminAudit
+from gryphon.models.audit import AuditActor as AuditActor
+from gryphon.models.audit import AuditEvent as AuditEvent
+from gryphon.models.mcp import MCPBinding as MCPBinding
 from gryphon.models.operation_policy import ReadOnlyPostOperation as ReadOnlyPostOperation
 from gryphon.models.specifications import SaaSSpec as SaaSSpec
 from gryphon.models.specifications import SpecDiagnostics as SpecDiagnostics
@@ -280,6 +284,7 @@ class EndpointManifest(BaseModel):
 
     function_name: str
     summary: str
+    description: str = ""
     method: str
     path: str
     parameters_summary: str
@@ -293,6 +298,10 @@ class EndpointManifest(BaseModel):
     base_url: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
+    mcp_binding: MCPBinding | None = None
+
+
+EndpointManifest.model_rebuild(_types_namespace={"MCPBinding": MCPBinding})
 
 
 class ServerManifest(BaseModel):
@@ -375,25 +384,3 @@ class ChannelUsage(BaseModel):
     status: Literal["success", "error"]
     calls: int
     latency_ms: float
-
-
-AuditEvent = Literal[
-    "tenant_created",
-    "tenant_disabled",
-    "tenant_enabled",
-    "spec_created",
-    "channel_created",
-    "channel_updated",
-    "key_rotated",
-    "key_revoked",
-]
-
-
-class AdminAudit(BaseModel):
-    """Static administrative event containing only server-owned identifiers."""
-
-    id: str
-    tenant_id: str
-    channel_id: str | None = None
-    event: AuditEvent
-    created_at: float

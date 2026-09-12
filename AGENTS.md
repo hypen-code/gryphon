@@ -52,10 +52,11 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/saas_user_api.py`, `saas_access.py`, `saas_users.py`, `saas_passwords.py` | Platform/user authorization, revisioned accounts, bounded salted password hashing |
 | `src/gryphon/saas_store.py`, `saas_database.py` | Tenant control metadata, hashed keys, quotas and worker lease |
 | `src/gryphon/saas_spec_import.py`, `saas_upload.py`, `saas_spec_versions.py` | Bounded URL/file imports, diagnostics, immutable refresh and atomic binding revisions |
-| `src/gryphon/compiler/ucp.py`, `ucp_profile.py`, `ucp_refs.py`, `ucp_responses.py` | Published UCP shape/GET mapping, bounded approved refs, explicit response omissions |
-| `src/gryphon/models/specifications.py`, `operation_policy.py` | Provenance/diagnostics and exact operator read-only POST attestations |
+| `src/gryphon/compiler/ucp.py`, `ucp_profile.py`, `ucp_refs.py`, `ucp_responses.py`, `ucp_discovery.py`, `ucp_mcp.py` | Bounded UCP REST/native MCP inference, schema adaptation/filtering and trusted bindings |
+| `src/gryphon/models/specifications.py`, `models/mcp.py`, `operation_policy.py`, `saas_post_reads.py`, `saas_post_read_api.py` | Provenance/diagnostics/native bindings; legacy POST-attestation compatibility only, no mounted approval route |
+| `src/gryphon/models/audit.py`, `saas_audit.py` | Public actor snapshots/current-name projections; request-local metadata, never authority |
 | `src/gryphon/security/form_encoding.py`, `static/specifications.js` | Closed scalar form wire encoding; browser import/refresh state |
-| `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated read-only execution, filter-controlled catalog visibility |
+| `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated automatic catalog POSTs, filter-controlled visibility |
 | `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
 | `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
 | `src/gryphon/config.py` | Validated operator settings |
@@ -75,7 +76,7 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/runtime/artifacts.py` | Owner-scoped, bounded, integrity-checked artifact storage |
 | `src/gryphon/security/broker.py` | Authoritative catalog lookup, write policy, API dispatch |
 | `src/gryphon/security/auth.py`, `vault.py` | Host-only credential resolution and refresh |
-| `src/gryphon/security/network.py`, `policies.py` | Egress enforcement, DNS/TLS, budgets |
+| `src/gryphon/security/network.py`, `policies.py`, `mcp_client.py`, `mcp_protocol.py` | Pinned egress/DNS/TLS, native sessions/JSON/SSE, fingerprint checks and bounded cleanup |
 | `src/gryphon/security/encoding.py`, `schema.py` | Closed request objects and bounded validation |
 | `src/gryphon/security/ast_guard.py` | Mandatory static defense before execution |
 | `config/swaggers.yaml.example`, `.env.example` | Public templates, never real credentials |
@@ -90,8 +91,7 @@ docs, or top-level directories without explicit task requirements. Existing
 README, AGENTS, CONTRIBUTING, SECURITY, ROADMAP, and CHANGELOG cover the public
 and development documentation needs.
 
-**Size limits:** at most 400 lines per file and 50 lines per function. Decompose
-responsibilities instead of weakening lint, typing, coverage, or security to fit.
+**Size limits:** at most 400 lines per file and 50 lines per function. Decompose responsibilities instead of weakening lint, typing, coverage, or security to fit.
 
 ## 4. Public contracts
 
@@ -142,13 +142,15 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 - Named `platform_admin` accounts administer all tenants/users; `tenant_user`
   accounts have immutable membership in exactly one enabled tenant. Enforce scope
   server-side for every spec/channel/key/usage/analytics/audit route, never only in the UI.
-  Tenant users cannot list/manage users, create tenants or elevate/change roles.
+  Tenant users cannot list/manage users, create tenants or elevate/change roles. No public POST-approval workflow remains.
   Keep bootstrap-token recovery. Passwords use salted PBKDF2-HMAC-SHA256 with
   600,000 iterations and bounded off-loop hashing; never expose passwords/hashes.
   Self-service changes require current credentials. Profile/status/reset/change
   and tenant status revisions invalidate cookies, including after re-enable.
   Separately issued channel keys remain independent: document offboarding key
   rotation. Platform/API authentication never substitutes for MCP channel keys.
+- Resource audit events persist verified request snapshots as nested `AuditActor` (`id`, `username`, `name`, `kind:user/bootstrap/system/unknown`, `display_source:snapshot/current/unknown`). Legacy unknown is not bootstrap. Account audits retain `actor_id` and resolve CURRENT public names, marked `current`; UI must label Current account name, never invent historical names or substitute event subject/self for actor. Expose only actors on authorized scoped events, not a tenant-accessible user directory.
+- Audit `ContextVar` is metadata only, never authority. Set it in the HTTP guard after auth; reset in `finally` on success/failure/cancellation and preserve metadata in owned `finish_cleanup` tasks. Persist only public attribution, not credentials or caller-supplied actor bodies/headers.
 - Successful standalone `compile` (including unchanged catalogs) prints non-secret
   MCP client JSON to stdout; logs stay on stderr. Dry runs, failures, and startup
   compilation inside `serve`/`run` must not emit client JSON on MCP stdout.
@@ -183,10 +185,9 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 2. Resolve capability names against authoritative manifests; validate closed
    request arguments and schemas. Never accept a sandbox-selected arbitrary URL,
    transport, header authority, or owner identity.
-3. Enforce read-only source policy at compile time **and** dispatch time.
-   Except operator-attested read-only POSTs below, writes require both `GRYPHON_ALLOW_WRITES=true` and exact
-   `GRYPHON_ALLOWED_WRITE_OPERATIONS` administrator permits. No model-provided
-   approval parameter, guide text, or idempotency key can authorize a write.
+3. Enforce source filtering at compilation **and** dispatch. `allow_catalog_posts` defaults false for local/operator mode; ordinary writes otherwise require a write-enabled source, `GRYPHON_ALLOW_WRITES=true` and exact `GRYPHON_ALLOWED_WRITE_OPERATIONS` permits.
+   SaaS privately clones base config with `allow_catalog_posts=True`: included bound POSTs execute without separate approval and **may have side effects**. Unclassified POSTs on a read-only source still fail; native MCP has its own known-read filter. Never call this automatic read-only execution.
+   No model approval flag, guide, hint or idempotency key grants authority; preserve exact catalog/channel ownership, supported methods, schema/DNS/TLS and budgets.
 4. Enforce exact-domain policy and validate all DNS answers before connecting to
    a pinned address. Public destinations are default; private/loopback needs
    explicit opt-in. Metadata and prohibited address classes remain denied.
@@ -198,7 +199,7 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
    static auth maps to `operator`; stdio uses trusted `local`. Public deployment
    needs TLS termination and additional operator controls. Hosted channel identity
    must come from database-verified keys/status, never the URL alone or client claims.
-7. Hosted **execution**, not all catalog visibility, is read-only: channel config must force `allow_writes=False` and `allowed_write_operations=[]`. `SpecImport`/`SaaSSpec.read_only_filter` defaults true and controls compiler `source.is_read_only`; false includes all supported methods without approving writes or read-only POST execution. Exact effective-destination operator POST permits remain necessary. No source-auth or host credential/header inheritance; public upstream APIs only, no tenant secret manager. Versions stay immutable and tenant-bound; deny ordinary OpenAPI external refs, environment interpolation and caller-selected host paths. Only bounded UCP may resolve approved schema refs.
+7. Hosted channel config must force `allow_writes=False` and `allowed_write_operations=[]`, denying PUT/PATCH/DELETE API operations even when visible; automatic catalog POSTs are the explicit exception. `read_only_filter` defaults true, excluding ordinary HTTP POSTs unless already exactly read-classified; false includes supported POSTs for automatic execution. No source-auth or host credential/header inheritance; public APIs only, no tenant secret manager. Versions remain immutable/tenant-bound; deny ordinary OpenAPI external refs, environment interpolation and caller-selected host paths. Only bounded UCP resolves approved refs.
 8. Hosted Docker requires explicit operator enablement and manually provisioned
    daemon/image/runsc. Channel imports only narrow preinstalled approved libraries;
    no arbitrary pip installs. Shipped Compose profiles must not mount a Docker socket.
@@ -274,16 +275,20 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
   span all requests, not exact misses versus storage failures; failed replay
   requests and request/run error categories remain separate from backend reuse.
 
-### Specification imports and exact read-only POST policy
+### Specification imports, automatic POSTs and native MCP
 
-- Keep File `{name,content}` and URL `{name,url,kind:"openapi"|"ucp"}` imports under scoped `/api/tenants/{tenant_id}/specs`; optional strict boolean `read_only_filter` defaults true. URL maximum 2048 characters, no query/userinfo/fragment; UCP HTTPS roots become `/.well-known/ucp`. DNS-pinned bounded clients only: no host auth, redirects, env interpolation/proxies. Save normalized relative OpenAPI servers; ordinary external refs stay denied.
-- Refresh URL `{}` or file `{content}` accepts optional strict boolean `read_only_filter`, defaulting to the previous choice. `/specs/{spec_id}/filter` requires `{read_only_filter}` and revalidates saved bytes without upload/fetch, retaining provenance. Both accept optional strict boolean `update_channels` (API false, UI checked); row filter changes require confirmation, with import/refresh checkboxes too.
-- Changed document/diagnostics/warnings/filter creates an immutable successor (`parent_id`, 201); filter-only changes count even for identical GET-only documents and must change catalog/policy identity, not necessarily document SHA-256. Opted-in exact parent bindings/revisions commit atomically and runtimes drain; unchanged returns 200 without revisions, superseded 409. Keep old versions, legacy defaults (file/filter true), no schema migration, and post-validation authorization rechecks.
-- Counts mean total, discovery-available and filtered, never execution approval; unsupported callable schemas reject import, not silent partial support. One active import, no queue, 25-second deadline, cancellation-owned cleanup. UCP counts describe adapted GETs; filter-off adds no UCP methods/capabilities.
-- Keep UCP bounded to published 2026-01-11/01-23/04-08/08-25 shapes and matching advertised shopping REST GET IDs from schema paths: checkout; April/August cart/order too. Canonical April/August contracts compile; required auth/signing (canonical January) rejects. UCP-Agent/Request-Id stay caller-supplied; no generated identity/negotiation. Omitted unsupported response schemas require explicit warnings, never claimed validation.
-- No UCP POST shopping/payments/checkout updates, non-REST or extension composition; no arbitrary callbacks/capability fetches. Save compiled OpenAPI, not raw profile; refresh refetches profile/needed schemas. Max 32 schema documents, min(HTTP timeout,30s), aggregate raw profile/schema budget min(hosted spec limit, configured max spec bytes,5MiB). Refs stay on schema origin; origin must be profile origin, ucp.dev or operator-approved. Preserve structural/expansion bounds.
-- `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults empty; only operator JSON tuples of canonical server/effective base/literal path/POST attest reads. No templates/globs or uploaded hints. Check parser and broker, include permits in compilation/replay identity, and match CDN/operation overrides. These intentionally apply deployment-wide, including any matching hosted tenant: not per-tenant authorization/credentials. Never change real security config or automatically apply permits.
-- Original CSE evidence: 1 GET + 25 POST (23 URL-encoded + 2 scalar multipart); document-only parsing with `source.is_read_only=false` exposed all 26 without permits, not verified live semantics or execution approval. Never call live APIs, modify operator stores/security config or enable real env permits for proof. Hosted POST read execution still needs exact operator attestation. UI `cse` means namespace `cse`, not fixture `cse_api`; inspect canonical MCP names. Forms use closed scalar/scalar-array `json_body`; nested/null/binary/files reject, multipart never reads host files/emits caller filenames (1024 parts/2MiB).
+- Keep File `{name,content}` and URL `{name,url,kind:"openapi"|"ucp"}` imports under scoped `/api/tenants/{tenant_id}/specs`; strict boolean `read_only_filter` defaults true. URLs max 2048 characters, no query/userinfo/fragment. Use bounded DNS-pinned clients, no host auth, redirects, env interpolation/proxies. Normalize relative OpenAPI servers; ordinary external refs stay denied.
+- Refresh URL `{}` or file `{content}` accepts optional strict boolean `read_only_filter`, defaulting to previous. `/specs/{spec_id}/filter` requires `{read_only_filter}` and revalidates saved bytes without upload/fetch, preserving provenance/native bindings. Both accept strict boolean `update_channels` (API false, UI checked); row changes require confirmation, with import/refresh checkboxes too.
+- Changed document OR any import metadata creates an immutable successor (`parent_id`, 201): include diagnostics/warnings/filter, legacy grants, `mcp_bindings` and resolved provenance even when normalized document SHA-256 is unchanged. Opted-in exact bindings/revisions commit atomically and runtimes drain; unchanged 200 without revisions, superseded 409. Keep old snapshots, defaults (file/filter true/grants empty), no spec schema migration, and post-validation authority checks. Identical canonical documents retain legacy grants; document changes clear them, with no new approval workflow.
+- UI groups parent-linked lineage into one managed entry with latest actions and History/downloads/bindings; never merge unrelated roots by name or delete/mutate snapshots. Channel selector uses latest for new choices, explicit pinned older for existing selections. Version IDs still change; no stable-ID or in-place overwrite claim. Preserve actors and 10-second notices.
+- Remove manual POST approval UI and route: GET/POST `/api/tenants/{tenant_id}/specs/{spec_id}/post-reads` return 404. Retain `approved_post_reads` metadata/helpers for old payload compatibility and historical `post_reads_updated` audit entries; no DB deletion. Legacy exact global permits remain optional, deployment-wide, not credentials/tenant authority; canonical server/effective base/literal POST tuples, no globs/templates, checked by parser/broker and included in identity. Merge selected-spec grants only after tenant/binding validation; never change operator env automatically.
+- Diagnostics mean total/available/filtered/unsupported, not permission for every HTTP method. Ordinary OpenAPI unsupported request schemas reject; native MCP unsupported tools omit with warnings, never weakened validation. One active import, no queue, 25-second deadline and cancellation-owned cleanup. UCP errors use HTTP 400 `ucp_discovery`, not obsolete approval advice; normal validation stays separate.
+- UCP accepts published 2026-01-11/01-23/04-08/08-25 profiles. Root or explicit `/mcp` first probes same-origin `/.well-known/ucp`; prefer matching advertised REST, else MCP; malformed advertised contracts fail closed. Only explicit MCP routes fall back directly if profile unavailable. Never arbitrary redirect/HTML-follow; public advertised delegations pass allowedDomains and pinned DNS/TLS policy at every step. Original `source_url` stays separate from `resolved_profile_url`, `resolved_endpoint`, `source_transport`.
+- Preserve REST advertised schema-path GET subset: checkout; April/August cart/order too. Required auth/signing (canonical January) rejects; UCP-Agent/Request-Id stay caller-supplied, no real platform identity. Unsupported REST response schemas omit with warnings, not claimed validation. No broad REST writes/extension composition or arbitrary callback/capability fetches. Max 32 schema documents, approved same-origin refs (profile origin/ucp.dev/operator-approved), structural/expansion bounds.
+- Native import runs initialize/notifications/initialized/paginated tools/list, never business tools/call. Known reads: get_checkout/get_cart/get_order/search_catalog/lookup_catalog/get_product (catalog.lookup). Filter true hides unknown/non-read; false includes supported native non-read tools for automatic execution, **potentially mutating**. Unsupported patterns/combinators/refs/input/output semantics omit the tool with warnings. Preserve descriptions and all required native inputs (including meta.ucp-agent.profile) inside `json_body`; no generated identity or inherited secrets.
+- Save trusted native endpoint/name/raw input/output schema fingerprint in `mcp_bindings` outside untrusted OpenAPI; synthetic `/__mcp__/...` POST paths NEVER actual routes. Fresh invocation reinitializes and rediscovers metadata, checks fingerprint BEFORE one tools/call; stale `conflict` requires refresh, no side-effect retries. Metadata-only filter changes remain network-free; endpoint/raw schema drift must change refresh identity even if normalized OpenAPI is unchanged.
+- Native JSON/SSE must match request IDs, bound notifications/session headers and reject protocol drift. Prefer structuredContent; decode one finite JSON text block; retain non-JSON/multimodal blocks without fetching resources. SDK handshake negotiation (2025-11-25 proposal/2025-03-26 compatible selection) is not Tasks/modern server-discovery/auth-platform completion. Discovery: max 1000 tools / 100 pages / 5 MiB aggregate within configured/hosted caps and min(HTTP timeout, 30s), outer 25s. Invocation init/list/call share caller deadline/response cap; only validated owned sessions get fixed-endpoint DELETE cleanup under a separate 2s / 1 KiB nonfatal budget; cancellation awaits local cleanup. Not arbitrary DELETE authority.
+- Coolbudget evidence: actual https://coolbudget.lk/api/ucp/mcp GET 301 to canonical WWW HTML 404; same-origin profile delegates https://qhhihh-tw.myshopify.com/api/ucp/mcp. Metadata-only import succeeds after initialized ACK `200 {}` compatibility: 13 discovered / six reads / two supported cancel tools hidden / five unsupported. No live business/payment calls or full-commerce claim. Original CSE: 1 GET + 25 POST (23 URL-encoded/two scalar multipart); filter-off parsing exposes 26, real Monty/mocked HTTP covers synthetic calls/replay, not universal/live proof. `cse` namespace is not fixture `cse_api`. Forms use closed scalar/scalar-array `json_body`, reject nested/null/binary/files; no host-file reads/filenames (1024 parts / 2 MiB).
 
 ## 6. Code quality
 
@@ -333,8 +338,8 @@ node --check tests/integration/browser_ui.cjs
 # Opt-in: separately provision Node, Puppeteer and its working Chromium (no sandbox downgrade).
 uv run --frozen --extra saas python tests/integration/browser_ui_fixture.py
 ```
-The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It covers mobile/desktop icons/dialogs, import/refresh/filter choices, no-fetch saved filter changes, exact bindings, warnings, retained downloads, channel summary create/edit and notification close/expiry. Puppeteer is an optional external prerequisite, not a Python runtime dependency. The Node suite also verifies notice expiry, manual close while busy, replacement/stale timers, inline error retention and quiet sign-out cleanup.
-Targeted suites: `tests/unit/test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_ucp*.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`, `test_discovery_summaries.py`; integration `tests/integration/test_saas_spec_refresh.py`, `test_saas_ucp_http.py`, `test_saas_spec_filter.py`, `test_saas_discovery_summaries.py`. Run selected files with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—the full gates.
+The browser fixture uses temporary state, generated credentials via stdin, real loopback cookies/CSRF and synthetic pinned upstream HTTP; never point it at operator stores or live APIs. It covers mobile/desktop icons/dialogs, grouped versions/history, absence of POST approval controls and preserved actors, import/refresh/filter choices, no-fetch saved filter changes, exact/pinned bindings, warnings, retained downloads, channel summary create/edit and notification close/expiry. Puppeteer is an optional external prerequisite, not a Python runtime dependency. Node also checks notice expiry, manual close while busy, replacement/stale timers, inline errors and quiet sign-out cleanup.
+Targeted suites: `tests/unit/test_ucp*.py`, `test_mcp_client*.py`, `test_mcp_shopify.py`, `test_saas_post_reads.py`, `test_saas_audit.py`, `test_saas_spec_import.py`, `test_saas_spec_versions.py`, `test_cse_posts.py`, `test_form_contracts.py`, `test_multipart_posts.py`, `test_discovery_summaries.py`; integration `tests/integration/test_saas_automatic_posts.py`, `test_saas_post_read_api.py`, `test_saas_post_read_runtime.py`, `test_saas_audit_actor.py`, `test_saas_spec_refresh.py`, `test_saas_ucp_http.py`, `test_saas_spec_filter.py`, `test_saas_discovery_summaries.py`. Run selected paths with `uv run --frozen --extra saas pytest <paths>` in addition to—not instead of—full gates. Verify route404, no-fetch filtering, raw-schema/endpoint drift, native dispatch/cleanup and all remaining method/channel/schema/network denials; never claim pending gates passed.
 
 Local pre-commit hooks invoke locked `uv run --frozen` commands; mypy and pytest
 include `--extra saas`. Mypy covers `src` and `tests`, and `pytest-coverage`

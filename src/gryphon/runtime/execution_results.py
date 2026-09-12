@@ -52,6 +52,7 @@ def fingerprint(config: GryphonConfig, registry: Registry) -> str:
             "allowed_domains",
             "allow_private_networks",
             "allow_writes",
+            "allow_catalog_posts",
             "allowed_write_operations",
             "max_tool_calls",
             "sandbox_memory_bytes",

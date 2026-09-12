@@ -127,7 +127,9 @@ async def _import_and_bind(http: httpx.AsyncClient, channel: dict[str, str]) -> 
     )
     assert response.status_code == 201
     spec = response.json()
-    assert spec["source_type"] == "ucp_url" and spec["source_url"] == "https://example.com" + _PROFILE_PATH
+    assert spec["source_type"] == "ucp_url" and spec["source_url"] == "https://example.com"
+    assert spec["resolved_profile_url"] == "https://example.com" + _PROFILE_PATH
+    assert spec["source_transport"] == "rest"
     assert spec["diagnostics"]["available_operations"] == 1
     assert any("Non-GET" in warning for warning in spec["warnings"])
     spec = (await http.get(channel["tenant"] + "/specs/" + spec["id"])).json()
@@ -241,7 +243,7 @@ async def test_ucp_hosted_unsupported_import_and_refresh_leave_snapshots_and_bin
     before_channels = (await http.get(channel["tenant"] + "/channels")).json()
     profile = ucp_profile()
     if unsupported == "transport":
-        profile["ucp"]["services"]["dev.ucp.shopping"][0]["transport"] = "mcp"
+        profile["ucp"]["services"]["dev.ucp.shopping"][0]["transport"] = "embedded"
     elif unsupported == "capability":
         profile["ucp"]["capabilities"] = {"dev.ucp.shopping.catalog": [{"version": "2026-08-25"}]}
     else:

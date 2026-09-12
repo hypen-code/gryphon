@@ -11,6 +11,10 @@ class CompileError(GryphonError):
     """Swagger parsing or code generation failure."""
 
 
+class UCPImportError(CompileError):
+    """UCP discovery or supported-tool adaptation failed with a static safe diagnostic."""
+
+
 class SecurityViolationError(GryphonError):
     """Code failed security scan."""
 

@@ -86,8 +86,10 @@ def capabilities(ucp: dict[str, Any], version: str) -> dict[str, list[dict[str, 
     return dict(sorted(result.items()))
 
 
-def shopping_binding(ucp: dict[str, Any], version: str, warnings: set[str]) -> dict[str, Any]:
-    """Select exactly one matching REST binding and report unsupported transports/services."""
+def shopping_binding(
+    ucp: dict[str, Any], version: str, warnings: set[str], *, transport: str = "rest"
+) -> dict[str, Any]:
+    """Select exactly one matching binding without guessing dispatch from schema URLs."""
     services = ucp.get("services")
     if not isinstance(services, dict):
         raise CompileError("UCP business profile requires services")
@@ -99,14 +101,18 @@ def shopping_binding(ucp: dict[str, Any], version: str, warnings: set[str]) -> d
             continue
         records = _legacy_bindings(raw) if version == "2026-01-11" else _records(raw)
         for record in records:
-            if record.get("transport") != "rest":
-                warnings.add("Non-REST transports are not imported")
+            if record.get("transport") != transport:
+                warnings.add(
+                    "Non-REST transports are not imported"
+                    if transport == "rest"
+                    else "Other transports are not imported"
+                )
             elif record.get("version") != version:
-                warnings.add("REST bindings for other protocol versions are not imported")
+                warnings.add("Bindings for other protocol versions are not imported")
             else:
                 selected.append(record)
     if len(selected) != 1:
-        raise CompileError("UCP requires exactly one matching shopping REST binding")
+        raise CompileError("UCP requires exactly one matching shopping transport binding")
     return selected[0]
 
 

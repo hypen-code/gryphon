@@ -7,7 +7,7 @@ const { runInNewContext } = require("node:vm");
 const script = readFileSync(resolve(__dirname, "../../src/gryphon/static/specifications.js"), "utf8");
 
 function element(tag = "div", text = "", className = "") {
-  return { tag, textContent: text, className, value: "", checked: false, files: [], children: [], events: {},
+  return { tag, textContent: text, className, value: "", checked: false, files: [], children: [], events: {}, dataset: {},
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
     addEventListener(name, handler) { this.events[name] = handler; },
@@ -20,8 +20,8 @@ function element(tag = "div", text = "", className = "") {
 function setup() {
   const elements = new Map(); const handlers = {}; const calls = []; const messages = [];
   const $ = (id) => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); };
-  const state = { tenant: "tenant-a", epoch: 1, csrf: "test-session", settings: { max_spec_bytes: 128 }, specs: [] };
-  const sandbox = { $, state, URL, TextEncoder, count: String, segment: encodeURIComponent, node: element,
+  const state = { tenant: "tenant-a", epoch: 1, csrf: "test-session", settings: { max_spec_bytes: 128 }, specs: [], channels: [], me: { role: "platform_admin" } };
+  const sandbox = { $, state, URL, TextEncoder, count: String, segment: encodeURIComponent, node: element, isAdmin: () => state.me?.role === "platform_admin",
     tenantPath: (tail) => `/api/tenants/${state.tenant}${tail}`, bind: (id, fn) => { handlers[id] = fn; },
     action: (label, fn) => ({ textContent: label, click: fn }), emptyRow: () => {}, viewSource: () => {},
     run: async (fn) => { if (!state.busy) await fn(); },
@@ -29,7 +29,7 @@ function setup() {
     api: async (path, method, payload) => { calls.push({ path, method, payload }); return sandbox.result; },
     result: { id: "new", diagnostics: { total_operations: 5, available_operations: 2, filtered_operations: 2, unsupported_operations: 1 } },
   };
-  runInNewContext(`${script}\nspecifications.wire(); globalThis.render = specifications.render;`, sandbox);
+  runInNewContext(`${script}\nspecifications.wire(); globalThis.render = specifications.render; globalThis.specifications = specifications;`, sandbox);
   const open = () => { handlers["new-spec"](); $("spec-name").value = "Example"; };
   const file = (content = "{}", name = "source.yaml") => ({ name, size: content.length, text: async () => content });
   const edit = (spec) => { state.specs = [spec]; sandbox.render(); $("spec-rows").children[0].children[2].children[1].click(); };
@@ -37,14 +37,17 @@ function setup() {
 }
 function text(node) { return [node.textContent, ...(node.children || []).map(text)].join(" "); }
 
-test("superseded snapshots disable updates but retain source viewing", () => {
-  const ui = setup(); ui.state.specs = [{ id: "old", name: "Example" }, { id: "new", name: "Example", parent_id: "old" }];
+test("one logical row retains ordered history and exact pinned channel information", () => {
+  const ui = setup(); ui.state.specs = [{ id: "new", name: "Example", parent_id: "old" }, { id: "old", name: "Example" }];
+  ui.state.channels = [{ name: "Pinned channel", spec_ids: ["old"] }];
   ui.sandbox.render(); const rows = ui.$("spec-rows").children;
-  assert.equal(rows[0].children[2].children[1].disabled, true);
-  assert.equal(rows[0].children[2].children[1].textContent, "Superseded snapshot");
-  assert.match(text(rows[0]), /Superseded · retained snapshot/);
-  assert.equal(rows[0].children[2].children[0].textContent, "View source / download");
-  assert.equal(rows[1].children[2].children[1].disabled, false);
+  assert.equal(rows.length, 1); assert.equal(rows[0].dataset.specificationId, "old"); assert.equal(rows[0].dataset.specId, "new");
+  assert.match(text(rows[0]), /Older versions are pinned/);
+  rows[0].children[2].children[3].click(); const history = ui.$("spec-history-rows").children;
+  assert.equal(history.length, 2); assert.equal(history[1].dataset.specId, "old");
+  assert.match(text(history[1]), /Pinned channels: Pinned channel/);
+  assert.equal(history[1].children[2].children[0].textContent, "View source / download");
+  assert.equal(JSON.stringify(ui.state.channels[0].spec_ids), '["old"]');
 });
 
 for (const kind of ["openapi", "ucp"]) test(`${kind} URL imports keep source kind and use the shared tenant API`, async () => {
@@ -125,7 +128,7 @@ test("closing forms clears source text and stale refresh selection", async () =>
   await assert.rejects(ui.handlers["spec-refresh-form"](), /Workspace changed/); assert.equal(ui.calls.length, 0);
 });
 
-for (const kind of ["file", "openapi", "ucp"]) test(`${kind} import can disable only the visibility filter`, async () => {
+for (const kind of ["file", "openapi", "ucp"]) test(`${kind} import can include POST with no separate approval payload`, async () => {
   const ui = setup(); ui.open(); assert.equal(ui.$("spec-read-only-filter").checked, true);
   ui.$("spec-kind").value = kind; ui.$("spec-read-only-filter").checked = false;
   ui.$("spec-url").value = "https://example.com/spec"; ui.$("spec-file").files = [ui.file()];
@@ -153,20 +156,97 @@ test("stored false filter is displayed and refresh preserves it by default", asy
   await ui.handlers["spec-refresh-form"](); assert.equal(ui.calls[0].payload.read_only_filter, false);
 });
 
-test("busy, cancellation and superseded rows cannot change a saved filter", async () => {
+test("busy and cancellation cannot change a saved filter; successors replace main rows", async () => {
   const ui = setup(); ui.edit({ id: "old", name: "Example" }); ui.$("spec-refresh-dialog").close();
   ui.state.busy = true; const filter = rowFilter(ui); filter.checked = false; await filter.events.change();
   assert.equal(filter.checked, true); assert.equal(ui.$("spec-refresh-dialog").opened, false);
   ui.state.busy = false; filter.checked = false; await filter.events.change(); ui.$("spec-refresh-dialog").close();
   await assert.rejects(ui.handlers["spec-refresh-form"](), /Workspace changed/);
   ui.state.specs.push({ id: "new", name: "Example", parent_id: "old" }); ui.sandbox.render();
-  assert.equal(rowFilter(ui).disabled, true); assert.equal(rowFilter(ui).checked, true); assert.equal(ui.calls.length, 0);
+  assert.equal(ui.$("spec-rows").children.length, 1); assert.equal(ui.$("spec-rows").children[0].dataset.specId, "new");
+  assert.equal(rowFilter(ui).disabled, false); assert.equal(rowFilter(ui).checked, true); assert.equal(ui.calls.length, 0);
 });
 
 for (const change of ["tenant", "epoch", "csrf"]) test(`stale ${change} blocks saved filter changes`, async () => {
   const ui = setup(); ui.edit({ id: "old", name: "Example" }); const filter = rowFilter(ui);
   filter.checked = false; await filter.events.change(); ui.state[change] = change === "epoch" ? 2 : change === "tenant" ? "tenant-b" : "";
   await assert.rejects(ui.handlers["spec-refresh-form"](), /Workspace changed/); assert.equal(ui.calls.length, 0);
+});
+
+test("lineages are deterministic, tenant scoped and never grouped by name", () => {
+  const ui = setup(); const versions = [
+    { id: "third", parent_id: "second", name: "Same", tenant_id: "tenant-a" },
+    { id: "second", parent_id: "root", name: "Same", tenant_id: "tenant-a" },
+    { id: "root", name: "Same", tenant_id: "tenant-a" }, { id: "unrelated", name: "Same", tenant_id: "tenant-a" },
+    { id: "foreign", parent_id: "root", name: "Same", tenant_id: "tenant-b" },
+  ];
+  ui.state.specs = versions; const first = JSON.stringify(ui.sandbox.specifications.groups());
+  ui.state.specs = [...versions].reverse(); assert.equal(JSON.stringify(ui.sandbox.specifications.groups()), first);
+  ui.sandbox.render(); assert.equal(ui.$("spec-rows").children.length, 2);
+  assert.equal(ui.$("spec-rows").children[0].dataset.specId, "third");
+  const fresh = ui.sandbox.specifications.bindingChoices([]); assert.equal(fresh.length, 2); assert.equal(fresh[0].id, "third");
+  const pinned = ui.sandbox.specifications.bindingChoices(["second"]); assert.equal(pinned.length, 2);
+  assert.equal(pinned[0].id, "second"); assert.equal(pinned[0].latest_id, "third"); assert.match(pinned[0].name, /pinned/);
+  assert.match(ui.sandbox.specifications.bindingChoices(["unavailable"])[2].name, /pinned unavailable/);
+});
+
+test("repeated saved filter updates target latest IDs and survive workspace reload", async () => {
+  const ui = setup(); ui.state.specs = [{ id: "root", name: "Example" }];
+  ui.sandbox.refresh = async () => { ui.state.specs.push(ui.sandbox.result); ui.sandbox.render(); };
+  for (let index = 1; index <= 3; index++) {
+    ui.sandbox.render(); const previous = index === 1 ? "root" : `version-${index - 1}`;
+    ui.sandbox.result = { id: `version-${index}`, parent_id: previous, name: "Example", read_only_filter: index % 2 === 0 };
+    const filter = rowFilter(ui); filter.checked = !filter.checked; await filter.events.change(); await ui.handlers["spec-refresh-form"]();
+    assert.equal(ui.calls.at(-1).path, `/api/tenants/tenant-a/specs/${previous}/filter`);
+    assert.equal(ui.$("spec-rows").children.length, 1); assert.equal(ui.$("spec-rows").children[0].dataset.specificationId, "root");
+  }
+  const reloaded = setup(); reloaded.state.specs = JSON.parse(JSON.stringify(ui.state.specs)); reloaded.sandbox.render();
+  assert.equal(reloaded.$("spec-rows").children.length, 1); reloaded.$("spec-rows").children[0].children[2].children[3].click();
+  assert.equal(reloaded.$("spec-history-rows").children.length, 4);
+});
+
+for (const role of ["platform_admin", "tenant_user"]) test(`${role} has no manual POST permission controls or requests`, async () => {
+  const ui = setup(); ui.state.me.role = role;
+  ui.edit({ id: "snapshot/id", name: "Example", approved_post_reads: [{ function_name: "example.legacy" }] });
+  assert.equal(ui.$("spec-rows").children[0].children[2].children.length, 4);
+  assert.doesNotMatch(text(ui.$("spec-rows")), /POST read|permission|approval|attest/i);
+  assert.ok(Object.keys(ui.handlers).every((id) => !id.includes("permissions")));
+  const filter = rowFilter(ui); filter.checked = false; await filter.events.change();
+  assert.match(ui.$("spec-refresh-help").textContent, /Included POST operations execute automatically and may have side effects/);
+  await ui.handlers["spec-refresh-form"]();
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.calls)), [{ path: "/api/tenants/tenant-a/specs/snapshot%2Fid/filter", method: "POST", payload: { update_channels: true, read_only_filter: false } }]);
+});
+
+for (const url of ["https://coolbudget.lk", "https://coolbudget.lk/.well-known/ucp", "https://coolbudget.lk/api/ucp/mcp"]) test(`UCP source ${url} is sent unchanged for server discovery`, async () => {
+  const ui = setup(); ui.open(); ui.$("spec-kind").value = "ucp"; ui.$("spec-url").value = url;
+  ui.$("spec-read-only-filter").checked = false; await ui.handlers["spec-form"]();
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.calls)), [{ path: "/api/tenants/tenant-a/specs", method: "POST", payload: { name: "Example", url, kind: "ucp", read_only_filter: false } }]);
+});
+
+for (const url of ["http://example.com", "https://caller@example.com/api/ucp/mcp", "https://example.com/api/ucp/mcp?key=value", "https://example.com/#profile", `https://example.com/${"a".repeat(2048)}`]) test(`unsafe UCP source is rejected: ${url.slice(0, 80)}`, async () => {
+  const ui = setup(); ui.open(); ui.$("spec-kind").value = "ucp"; ui.$("spec-url").value = url;
+  await assert.rejects(ui.handlers["spec-form"]()); assert.deepEqual(ui.calls, []);
+});
+
+for (const fields of [
+  { ucp_transport: "mcp", resolved_url: "https://shop.myshopify.com/api/ucp/mcp" },
+  { source_transport: "mcp", resolved_endpoint: "https://shop.myshopify.com/api/ucp/mcp" },
+  { document: { "x-gryphon-ucp": { transport: "mcp", endpoint: "https://shop.myshopify.com/api/ucp/mcp" } } },
+]) test("resolved UCP metadata renders in rows and retained history", () => {
+  const ui = setup(); ui.edit({ id: "saved", name: "Example", source_type: "ucp_url", ...fields });
+  assert.match(text(ui.$("spec-rows")), /Resolved UCP transport: mcp/);
+  assert.match(text(ui.$("spec-rows")), /Resolved endpoint: https:\/\/shop.myshopify.com\/api\/ucp\/mcp/);
+  ui.$("spec-rows").children[0].children[2].children[3].click();
+  assert.match(text(ui.$("spec-history-rows")), /Resolved UCP transport: mcp/);
+  assert.deepEqual(ui.calls, []);
+});
+
+test("optional UCP metadata is inert, absent on legacy snapshots and never browser fetched", () => {
+  const ui = setup(); const attack = '<img src=x onerror="alert(1)">';
+  ui.edit({ id: "saved", name: "Example", source_type: "ucp_url", ucp_transport: attack, resolved_url: attack });
+  assert.ok(text(ui.$("spec-rows")).includes(attack));
+  assert.equal(ui.sandbox.specifications.sourceMetadata({ source_type: "ucp_url" }).length, 0);
+  assert.doesNotMatch(script, /fetch\(|post-reads|permissions|attest/);
 });
 
 function adminSetup() {
@@ -176,17 +256,53 @@ function adminSetup() {
     document: { getElementById: $, createElement: element, querySelector: () => inline, querySelectorAll: () => [] },
     window: { addEventListener() {} }, location: { hash: "#overview" }, analytics: { reset() {} },
     setTimeout: (fn, ms) => { timers.set(++next, { fn, due: now + ms }); return next; }, clearTimeout: (id) => timers.delete(id),
-    Intl, Option: function () { return element(); },
+    Intl, AbortSignal, Option: function () { return element(); },
   };
   const admin = readFileSync(resolve(__dirname, "../../src/gryphon/static/admin.js"), "utf8").split("wireForms(); wireActions();")[0];
   runInNewContext(`${admin}\nglobalThis.state = state;`, sandbox);
-  sandbox.refresh = async () => {}; sandbox.api = async (path, method, payload) => { calls.push({ path, method, payload }); };
+  sandbox.request = sandbox.api; sandbox.refresh = async () => {}; sandbox.api = async (path, method, payload) => { calls.push({ path, method, payload }); };
+  sandbox.audit = sandbox.renderAudit;
+  sandbox.specifications = { bindingChoices: () => [] };
   sandbox.renderUsers = sandbox.renderIdentity = sandbox.renderTenants = sandbox.renderSpecs = sandbox.renderChannels = sandbox.renderUsage = sandbox.renderAudit = () => {};
   sandbox.state.tenant = "tenant"; sandbox.state.settings = { docker_enabled: false, allowed_imports: [] };
   sandbox.wireActions();
   const tick = (ms) => { now += ms; for (const [id, timer] of [...timers]) if (timer.due <= now) { timers.delete(id); timer.fn(); } };
   return { $, sandbox, calls, timers, tick, inline };
 }
+
+for (const [category, message] of [["ucp_discovery", /UCP discovery failed/], ["ucp_transport", /UCP transport could not be used/], ["ucp_schema", /tool or schema contract is unsupported/], ["validation", /public source URL/]]) test(`${category} is a static relevant import error`, async () => {
+  const ui = adminSetup(); const requests = [];
+  ui.sandbox.fetch = async (path) => { requests.push(path); return { ok: false, status: 400, json: async () => ({ error: category, message: "unsafe upstream details" }) }; };
+  await assert.rejects(ui.sandbox.request("/api/tenants/tenant/specs", "POST", {}), (error) => {
+    assert.match(error.message, message); assert.match(error.message, /HTTP 400/);
+    assert.doesNotMatch(error.message, /approval|attest|unsafe upstream details/); return true;
+  });
+  assert.deepEqual(requests, ["/api/tenants/tenant/specs"]);
+});
+
+test("inline action buttons prevent label activation from reversing explicit binding selection", () => {
+  const ui = adminSetup(); let prevented = false; let selected = false;
+  const button = ui.sandbox.action("Use latest", () => { selected = true; });
+  button.events.click({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true); assert.equal(selected, true);
+});
+
+test("audit actor names are inert and separate from account subjects and event scope", () => {
+  const ui = adminSetup(); const attack = '<img src=x onerror="alert(1)">';
+  ui.sandbox.audit([
+    { event: "user.created", actor: { id: "actor-id", name: attack, username: "admin", display_source: "current" }, subject: { id: "subject-id", name: "New user" }, tenant_id: "tenant-id", channel_id: "channel-id" },
+    { event: "tenant.created", actor_id: "bootstrap", actor_name: "Bootstrap" },
+    { event: "legacy" }, { event: "channel.updated", actor_id: "fallback-id", actor_username: "fallback" },
+  ]);
+  const rows = ui.$("audit-rows").children; assert.equal(rows[0].children.length, 5);
+  assert.equal(rows[0].children[1].textContent, attack); assert.match(text(rows[0].children[1]), /Actor ID: actor-id/);
+  assert.match(text(rows[0].children[1]), /Current account name/);
+  assert.match(text(rows[0].children[0]), /Account subject: New user · subject-id/);
+  assert.equal(rows[0].children[2].textContent, "tenant-id"); assert.equal(rows[0].children[3].textContent, "channel-id");
+  assert.match(text(rows[1].children[1]), /Bootstrap administrator.*Actor ID: bootstrap/);
+  assert.equal(rows[2].children[1].textContent, "Unknown / legacy actor"); assert.equal(rows[3].children[1].textContent, "fallback");
+  assert.equal(ui.calls.length, 0);
+});
 
 test("notifications expire at exactly ten seconds and preserve inline form errors", () => {
   const ui = adminSetup(); ui.sandbox.notify("Useful validation error", true);

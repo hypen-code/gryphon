@@ -31,10 +31,45 @@ def document(version: int) -> dict[str, object]:
         "paths": {
             "/data": {
                 "get": {"operationId": f"read_v{version}", "responses": response},
-                "post": {"operationId": "create", "responses": response},
+                "post": {"operationId": "read_post", "responses": response},
             }
         },
     }
+
+
+def mcp_profile() -> dict[str, Any]:
+    """Delegate a synthetic storefront's shopping MCP binding to a canonical public host."""
+    profile = ucp_profile(expanded=True)
+    profile["ucp"]["services"]["dev.ucp.shopping"] = [
+        {"version": "2026-08-25", "transport": "mcp", "endpoint": "https://shop.myshopify.com/api/ucp/mcp"}
+    ]
+    return profile
+
+
+def mcp_response(request: httpx.Request) -> httpx.Response:
+    """Serve metadata discovery only, rejecting any accidental business-tool invocation."""
+    body = json.loads(request.content)
+    assert request.method == "POST"
+    if body["method"] == "notifications/initialized":
+        return httpx.Response(202)
+    if body["method"] == "initialize":
+        result: dict[str, Any] = {
+            "protocolVersion": body["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "browser-fixture", "version": "1"},
+        }
+    else:
+        assert body["method"] == "tools/list"
+        caller = {"type": "object", "properties": {"profile": {"type": "string"}}, "required": ["profile"]}
+        schema = {"type": "object", "properties": {"meta": caller}, "required": ["meta"]}
+        result = {
+            "tools": [
+                {"name": "get_cart", "inputSchema": schema},
+                {"name": "create_cart", "inputSchema": schema},
+                {"name": "unsupported_tool", "inputSchema": {"type": "object", "anyOf": [{"type": "object"}]}},
+            ]
+        }
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
 
 
 def network_factory() -> tuple[object, list[str]]:
@@ -44,8 +79,17 @@ def network_factory() -> tuple[object, list[str]]:
     def transport(request: httpx.Request) -> httpx.Response:
         """Advance a synthetic URL document once, then return it unchanged."""
         assert request.url.host == "93.184.216.34"
-        assert request.headers["host"] == "example.com"
         assert "authorization" not in request.headers and "cookie" not in request.headers
+        host = request.headers["host"]
+        if host == "shop.example.com":
+            assert request.method == "GET" and request.url.path == "/.well-known/ucp"
+            seen.append(host + request.url.path)
+            return httpx.Response(200, json=mcp_profile())
+        if host == "shop.myshopify.com":
+            assert request.url.path == "/api/ucp/mcp"
+            seen.append(host + ":" + json.loads(request.content)["method"])
+            return mcp_response(request)
+        assert host == "example.com"
         seen.append(request.url.path)
         if request.url.path == "/.well-known/ucp":
             return httpx.Response(200, json=ucp_profile(expanded=seen.count("/.well-known/ucp") > 1))
@@ -70,7 +114,11 @@ async def browser(origin: str, token: str, root: Path) -> int:
     )
     try:
         async with asyncio.timeout(120):
-            await process.communicate(json.dumps({"origin": origin, "token": token, "root": str(root)}).encode())
+            await process.communicate(
+                json.dumps(
+                    {"origin": origin, "token": token, "root": str(root), "password": secrets.token_urlsafe(24)}
+                ).encode()
+            )
         return process.returncode if process.returncode is not None else 1
     finally:
         if process.returncode is None:
@@ -99,12 +147,26 @@ async def main(root: Path) -> int:
         artifact_dir=str(root / "artifacts"),
     )
     factory, seen = network_factory()
-    with patch("gryphon.saas_spec_import.NetworkClient", factory), patch("gryphon.compiler.ucp.NetworkClient", factory):
+    with (
+        patch("gryphon.saas_spec_import.NetworkClient", factory),
+        patch("gryphon.compiler.ucp.NetworkClient", factory),
+        patch("gryphon.security.mcp_client.NetworkClient", factory),
+    ):
         async with _server(config, base) as (origin, _):
             result = await browser(origin, token, root)
     if result == 0:
         assert seen[:3] == ["/openapi.json"] * 3
-        assert seen[3:] == ["/.well-known/ucp", "/schemas/shopping.openapi.json"] * 2
+        assert seen[3:7] == ["/.well-known/ucp", "/schemas/shopping.openapi.json"] * 2
+        assert (
+            seen[7:]
+            == [
+                "shop.example.com/.well-known/ucp",
+                "shop.myshopify.com:initialize",
+                "shop.myshopify.com:notifications/initialized",
+                "shop.myshopify.com:tools/list",
+            ]
+            * 4
+        )
     return result
 
 

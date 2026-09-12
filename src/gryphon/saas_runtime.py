@@ -14,6 +14,7 @@ from gryphon.runtime.cache import CacheStore
 from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.runtime.executor import CodeExecutor
 from gryphon.saas_catalog import (
+    approved_spec_config,
     channel_config,
     compile_catalog,
     prepare_channel_storage,
@@ -76,6 +77,7 @@ class _Runtime:
     async def start(self, config: GryphonConfig, specs: Sequence[SaaSSpec], execution_slots: asyncio.Semaphore) -> None:
         """Initialize every dependency with rollback registered before each fallible stage."""
         try:
+            config = approved_spec_config(config, self.channel, specs)
             await finish_cleanup(asyncio.to_thread(prepare_channel_storage, config))
             registry = await compile_catalog(config, self.channel, specs)
             cache = CacheStore(config.cache_db_path, config.cache_ttl_seconds, config.cache_max_entries)

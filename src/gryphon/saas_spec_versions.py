@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def new_spec(
     tenant_id: str, name: str, document: dict[str, Any], limit: int, imported: SpecImport | None = None
 ) -> SaaSSpec:
-    """Canonicalize the stored snapshot without trusting import metadata as execution authority."""
+    """Canonicalize saved bytes and retain separately validated control-plane import metadata."""
     try:
         canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         encoded = canonical.encode("utf-8")
@@ -26,7 +26,11 @@ def new_spec(
         raise SaaSValidationError("Specification must be canonical JSON") from exc
     if len(encoded) > limit:
         raise SaaSQuotaError("Specification byte quota exceeded")
-    metadata = imported.model_dump(exclude={"document"}) if imported is not None else {}
+    metadata = (
+        SpecImport.model_validate(imported.model_dump()).model_dump(exclude={"document"})
+        if imported is not None
+        else {}
+    )
     return SaaSSpec(
         id=str(uuid4()),
         tenant_id=tenant_id,
@@ -58,15 +62,14 @@ async def refresh_spec(
         if any(SaaSSpec.model_validate_json(str(row["payload"])).parent_id == spec_id for row in rows):
             raise ConflictError("Refresh the latest specification version")
         item = new_spec(tenant_id, previous.name, imported.document, store._max_spec_bytes, imported)
-        if (item.sha256, item.diagnostics, item.warnings, item.read_only_filter) == (
-            previous.sha256,
-            previous.diagnostics,
-            previous.warnings,
-            previous.read_only_filter,
-        ):
+        current_metadata = SpecImport.model_validate(item.model_dump()).model_dump(exclude={"document"})
+        previous_metadata = SpecImport.model_validate(previous.model_dump()).model_dump(exclude={"document"})
+        if item.sha256 == previous.sha256 and current_metadata == previous_metadata:
             return previous, []
         item.parent_id = previous.id
         await insert_spec(store, item)
+        if item.approved_post_reads != previous.approved_post_reads:
+            await store._audit(tenant_id, "post_reads_updated")
         channels = await replace_bindings(store, item) if update_channels else []
         return item, channels
 

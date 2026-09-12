@@ -46,7 +46,7 @@ async def test_ucp_malformed_profiles_never_reach_schema_discovery(
             "gryphon.saas_spec_import.NetworkClient.request",
             AsyncMock(return_value=httpx.Response(200, content=profile)),
         ),
-        patch("gryphon.saas_spec_import.profile_to_openapi", AsyncMock()) as adapter,
+        patch("gryphon.compiler.ucp_discovery.profile_to_openapi", AsyncMock()) as adapter,
         pytest.raises(CompileError),
     ):
         await SpecImporter(gryphon_config, 8192).load("shop", url="https://example.com", kind="ucp")

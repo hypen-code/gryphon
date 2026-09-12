@@ -87,6 +87,7 @@ class GryphonConfig(BaseSettings):
     max_code_size_bytes: int = Field(default=65536, ge=1, le=262144)  # 64KB default
     allow_private_networks: bool = False
     allow_writes: bool = False
+    allow_catalog_posts: bool = False
     allowed_write_operations: list[str] = Field(default_factory=list)
     allowed_read_only_post_operations: list[ReadOnlyPostOperation] = Field(default_factory=list, max_length=1000)
     http_timeout_seconds: int = Field(default=15, ge=1, le=60)

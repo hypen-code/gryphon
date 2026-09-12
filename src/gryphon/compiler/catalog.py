@@ -172,8 +172,31 @@ def validate_endpoint(endpoint: EndpointSpec | EndpointManifest) -> None:
         except ValueError:
             raise CompileError("Invalid form body contract") from None
     input_schema(endpoint)
+    if isinstance(endpoint, EndpointManifest) and endpoint.mcp_binding is not None:
+        _validate_mcp_endpoint(endpoint)
     output = endpoint.response_json_schema if isinstance(endpoint, EndpointSpec) else endpoint.output_schema
     check_schema(output)
+
+
+def _validate_mcp_endpoint(endpoint: EndpointManifest) -> None:
+    """Reject forged or inconsistent transport metadata before granting broker dispatch authority."""
+    binding = endpoint.mcp_binding
+    assert binding is not None
+    validate_base_url(binding.endpoint)
+    if (
+        endpoint.method != "POST"
+        or endpoint.read_only_post
+        or endpoint.request_body_media_type != "application/json"
+        or endpoint.request_body_schema is None
+        or endpoint.request_body_schema.get("type") != "object"
+        or endpoint.path != f"/__mcp__/{endpoint.function_name}"
+        or endpoint.base_url.rstrip("/") != binding.endpoint.rstrip("/")
+        or len(endpoint.parameters) != 1
+        or endpoint.parameters[0].name != "json_body"
+        or endpoint.parameters[0].location != "body"
+        or not endpoint.parameters[0].required
+    ):
+        raise CompileError("MCP binding requires a fixed POST endpoint and required JSON object arguments")
 
 
 def load_manifest(path: Path) -> ServerManifest:

@@ -303,8 +303,11 @@ def test_admin_specification_source_modes_and_refresh_confirmation() -> None:
         "invalidates running work",
         "catalog drift",
         "exact old version",
-        "POST read endpoints require exact operator read-only approvals",
-        "Unsupported transports are not callable",
+        "Included POST operations in bound catalogs execute automatically and may have side effects",
+        "unsupported tools, transports, and contracts are reported explicitly",
+        "https://coolbudget.lk/api/ucp/mcp",
+        "call_tool json_body wrapper",
+        "never fabricated by Gryphon",
     ):
         assert text in template
     script = _SPECIFICATIONS.read_text()
@@ -317,8 +320,8 @@ def test_admin_specification_source_modes_and_refresh_confirmation() -> None:
     assert "const content = await file.text(); current(snapshot)" in script
 
 
-def test_admin_discovery_checkboxes_defaults_and_permission_explanation() -> None:
-    """Visibility defaults do not imply execution approval or expanded UCP support."""
+def test_admin_discovery_checkboxes_defaults_and_automatic_post_explanation() -> None:
+    """Read filters explain automatic POST effects without implying all methods are executable."""
     fields = {attrs.get("id"): attrs for _, attrs in _document().elements if "id" in attrs}
     for identifier in ("spec-read-only-filter", "spec-refresh-read-only-filter"):
         assert fields[identifier]["type"] == "checkbox"
@@ -327,10 +330,11 @@ def test_admin_discovery_checkboxes_defaults_and_permission_explanation() -> Non
     assert "checked" not in fields["channel-function-summaries"]
     template = _TEMPLATE.read_text()
     for text in (
-        "Included in discovery does not mean callable",
-        "include all supported OpenAPI operations",
-        "without granting execution permission",
-        "UCP remains the adapter-supported REST GET subset",
+        "normally GET, HEAD, and OPTIONS for OpenAPI",
+        "Uncheck to include POST operations",
+        "POST does not mean read-only",
+        "PUT, PATCH, and DELETE remain subject to hosted execution restrictions",
+        "UCP supports compatible REST and MCP bindings",
         "Include function names and descriptions in list_servers",
         "follow bounded continuation",
     ):
@@ -359,3 +363,30 @@ def test_admin_notification_dismiss_is_accessible_and_independent_of_busy() -> N
     assert "const NOTICE_DURATION_MS = 10000" in script
     assert "if (revision === noticeRevision) dismissNotice()" in script
     assert "clearTimeout(noticeTimer)" in script
+
+
+def test_admin_logical_specs_history_and_pinned_binding_controls() -> None:
+    """Lineage grouping and retained history are explicit, never name-based deduplication."""
+    script = _SPECIFICATIONS.read_text()
+    assert "spec.tenant_id === state.tenant" in script
+    assert "root = byId.get(root.parent_id)" in script
+    assert "spec.specification_id || root.parent_id || root.id" in script
+    assert "row.dataset.specificationId = group.id" in script
+    assert "group.versions.forEach" in script and 'showDialog("spec-history-dialog")' in script
+    assert "pinned older version" in script and "pinned unavailable version" in script
+    assert "specifications.bindingChoices(channel?.spec_ids || [])" in _SCRIPT.read_text()
+    assert "Viewing or downloading a version never changes channel bindings" in _TEMPLATE.read_text()
+
+
+def test_admin_manual_post_controls_absent_and_actor_column_preserved() -> None:
+    """Retired POST review has no controls or requests; actors remain distinct from subjects."""
+    assets = _SPECIFICATIONS.read_text() + _SCRIPT.read_text() + _TEMPLATE.read_text() + _STYLE.read_text()
+    for stale in ("spec-permissions", "post-reads", "POST read permissions", "POST read status", "attest"):
+        assert stale not in assets
+    script = _SCRIPT.read_text()
+    assert all(category in script for category in ("ucp_discovery", "ucp_transport", "ucp_schema"))
+    assert "x-gryphon-ucp" in _SPECIFICATIONS.read_text()
+    assert "sourceMetadata(source)" in script
+    assert "<th>Actor</th>" in _TEMPLATE.read_text()
+    assert "Unknown / legacy actor" in script
+    assert "Account subject:" in script

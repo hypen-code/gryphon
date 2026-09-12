@@ -24,8 +24,10 @@ from gryphon.errors import (
     SaaSStoreError,
     SaaSValidationError,
     SecurityViolationError,
+    UCPImportError,
 )
 from gryphon.runtime.execution_validation import json_bytes
+from gryphon.saas_audit import audit_actor, request_actor
 from gryphon.saas_auth import COOKIE_NAME, AdminSessions, RateLimiter
 from gryphon.utils.logging import get_logger
 
@@ -57,6 +59,7 @@ def _safe_failure(exc: Exception) -> JSONResponse:
         (CapacityError, "capacity", 429),
         (ConflictError, "conflict", 409),
         (InputValidationError, "validation", 400),
+        (UCPImportError, "ucp_discovery", 400),
         (CompileError, "validation", 400),
         (SecurityViolationError, "validation", 400),
         (ValueError, "validation", 400),
@@ -108,7 +111,8 @@ def admin_endpoint(
             denied = await authorize(request)
             if denied is not None:
                 return denied
-        return await handler(request)
+        with audit_actor(request_actor(request)):
+            return await handler(request)
 
     return guarded
 

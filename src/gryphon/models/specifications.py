@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from gryphon.models.mcp import MCPBinding
+from gryphon.models.operation_policy import ReadOnlyPostOperation
+
 
 class SpecDiagnostics(BaseModel):
     """Describe policy filtering without implying that unsupported operations are callable."""
@@ -17,12 +20,23 @@ class SpecDiagnostics(BaseModel):
 
 
 class SpecImport(BaseModel):
-    """A validated snapshot and provenance, not authority for remote execution."""
+    """A validated snapshot with separately reviewed, spec-scoped POST read grants.
+
+    Grants are trusted control-plane metadata, never parsed from document hints or
+    accepted as ordinary browser import fields. Legacy snapshots default to no grants.
+    """
 
     document: dict[str, Any] = Field(default_factory=dict, repr=False)
     read_only_filter: bool = Field(default=True, strict=True)
+    approved_post_reads: list[ReadOnlyPostOperation] = Field(
+        default_factory=list[ReadOnlyPostOperation], max_length=1000
+    )
     source_type: Literal["file", "openapi_url", "ucp_url"] = "file"
     source_url: str | None = Field(default=None, max_length=2048)
+    resolved_profile_url: str | None = Field(default=None, max_length=2048)
+    resolved_endpoint: str | None = Field(default=None, max_length=2048)
+    source_transport: Literal["rest", "mcp"] | None = None
+    mcp_bindings: dict[str, MCPBinding] = Field(default_factory=dict[str, MCPBinding], max_length=1000, repr=False)
     diagnostics: SpecDiagnostics | None = None
     warnings: list[str] = Field(default_factory=list, max_length=100)
 

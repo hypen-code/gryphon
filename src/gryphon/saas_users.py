@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from gryphon.errors import ConflictError, SaaSDisabledError, SaaSNotFoundError, SaaSQuotaError, SaaSValidationError
 from gryphon.models import UserAccount, UserAudit, UserRole
 from gryphon.models.users import UserAuditEvent, normalize_username
+from gryphon.saas_audit import account_actor
 from gryphon.saas_passwords import password_bytes
 
 if TYPE_CHECKING:
@@ -273,4 +274,7 @@ class UserStore:
                 f"SELECT * FROM saas_user_audit{clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             )
-            return [UserAudit.model_validate(row) for row in rows]
+            actors = {
+                actor_id: await account_actor(self._db, actor_id) for actor_id in {str(row["actor_id"]) for row in rows}
+            }
+            return [UserAudit.model_validate(row | {"actor": actors[str(row["actor_id"])]}) for row in rows]

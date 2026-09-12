@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from gryphon.models.audit import AuditActor
+
 UserRole = Literal["platform_admin", "tenant_user"]
 UserAuditEvent = Literal[
     "user_created", "user_updated", "user_disabled", "user_enabled", "password_reset", "password_changed"
@@ -68,7 +70,7 @@ class UserAccount(BaseModel):
 
 
 class UserAudit(BaseModel):
-    """Static account administration metadata, without names or login inputs."""
+    """Static account events with public actor display metadata, never login inputs."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -78,3 +80,4 @@ class UserAudit(BaseModel):
     tenant_id: str | None
     event: UserAuditEvent
     created_at: float
+    actor: AuditActor = Field(default_factory=AuditActor)

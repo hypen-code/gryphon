@@ -226,6 +226,7 @@ class AdminAPI:
             url=previous.source_url,
             kind="ucp" if previous.source_type == "ucp_url" else "openapi",
             read_only_filter=data.get("read_only_filter", previous.read_only_filter),
+            previous=previous,
         )
         denied = await self.access.authorize(request)
         if denied is not None:

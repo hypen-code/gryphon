@@ -16,24 +16,81 @@ const specifications = (() => {
     if (!d) return "Operation counts unavailable for this snapshot. Refresh to compile diagnostics.";
     return `${count(d.available_operations)} included in discovery · ${count(d.filtered_operations)} filtered · ${count(d.unsupported_operations)} unsupported · ${count(d.total_operations)} total operations`;
   }
+  const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  function groups() {
+    const specs = state.specs.filter((spec) => !spec.tenant_id || spec.tenant_id === state.tenant);
+    const byId = new Map(specs.map((spec) => [spec.id, spec])); const lineages = new Map();
+    specs.forEach((spec) => {
+      let root = spec; const seen = new Set([root.id]); let depth = 0;
+      while (root.parent_id && byId.has(root.parent_id) && !seen.has(root.parent_id)) {
+        root = byId.get(root.parent_id); seen.add(root.id); depth += 1;
+      }
+      const id = spec.specification_id || root.parent_id || root.id;
+      const key = `${spec.tenant_id || state.tenant}:${id}`;
+      if (!lineages.has(key)) lineages.set(key, { id, versions: [] });
+      lineages.get(key).versions.push({ spec, depth });
+    });
+    return [...lineages.values()].map((group) => {
+      group.versions.sort((a, b) => b.depth - a.depth || compare(String(b.spec.created_at || ""), String(a.spec.created_at || "")) || compare(b.spec.id, a.spec.id));
+      return { id: group.id, versions: group.versions.map((entry) => entry.spec), latest: group.versions[0].spec };
+    }).sort((a, b) => compare(a.latest.name, b.latest.name) || compare(a.id, b.id));
+  }
+  function bindingChoices(selected) {
+    const items = groups().map((group) => {
+      const pinned = group.versions.find((spec) => selected.includes(spec.id)); const spec = pinned || group.latest;
+      const older = spec.id !== group.latest.id;
+      return { id: spec.id, name: `${spec.name}${older ? " · pinned older version" : " · latest version"}`, ...(older ? { latest_id: group.latest.id, latest_name: `${group.latest.name} · latest version` } : {}) };
+    });
+    selected.filter((id) => !items.some((item) => item.id === id)).forEach((id) => items.push({ id, name: `${id} · pinned unavailable version` }));
+    return items;
+  }
+  function bindingLabel(spec, latest) {
+    const channels = state.channels.filter((channel) => channel.spec_ids.includes(spec.id));
+    return channels.length ? `${latest ? "Bound" : "Pinned"} channels: ${channels.map((channel) => channel.name).join(", ")}` : "No channels bound to this version";
+  }
+  function sourceMetadata(spec) {
+    const saved = spec.document?.["x-gryphon-ucp"];
+    if (!saved && spec.source_type !== "ucp_url") return [];
+    const transport = spec.ucp_transport || spec.source_transport || saved?.transport;
+    const endpoint = spec.resolved_url || spec.resolved_endpoint || saved?.resolved_url || saved?.endpoint || spec.document?.servers?.[0]?.url;
+    return [typeof transport === "string" && `Resolved UCP transport: ${transport}`, typeof endpoint === "string" && `Resolved endpoint: ${endpoint}`].filter(Boolean);
+  }
+  function versionCell(spec) {
+    const version = node("td", spec.id);
+    sourceMetadata(spec).forEach((value) => version.append(node("small", value, "source-location")));
+    version.append(node("span", diagnostics(spec), `spec-diagnostics${spec.diagnostics?.available_operations === 0 ? " negative" : ""}`));
+    (spec.warnings || []).filter((warning) => typeof warning === "string").slice(0, 10).forEach((warning) => version.append(node("small", warning)));
+    return version;
+  }
+  function history(group) {
+    $("spec-history-title").textContent = `${group.latest.name} · version history`;
+    $("spec-history-rows").replaceChildren();
+    group.versions.forEach((spec) => {
+      const row = node("tr"); row.dataset.specId = spec.id;
+      const identity = versionCell(spec); identity.append(node("small", spec.id === group.latest.id ? "Latest version" : "Retained snapshot"));
+      identity.append(node("small", `Read-only filter: ${spec.read_only_filter ?? true ? "on" : "off"}`));
+      if (spec.parent_id) identity.append(node("small", `Previous version: ${spec.parent_id}`));
+      const actions = node("td"); actions.append(action("View source / download", () => viewSource(spec)));
+      row.append(identity, node("td", bindingLabel(spec, spec.id === group.latest.id)), actions); $("spec-history-rows").append(row);
+    });
+    showDialog("spec-history-dialog");
+  }
   function render() {
-    $("spec-rows").replaceChildren();
-    state.specs.forEach((spec) => {
-      const row = node("tr"); const name = node("td"); name.append(node("strong", spec.name), node("small", sourceLabel(spec)));
+    $("spec-rows").replaceChildren(); const logical = groups();
+    logical.forEach((group) => {
+      const spec = group.latest; const row = node("tr"); row.dataset.specificationId = group.id; row.dataset.specId = spec.id;
+      const name = node("td"); name.append(node("strong", spec.name), node("small", sourceLabel(spec)));
       if (remote(spec)) name.append(node("small", spec.source_url || "Source URL unavailable", "source-location"));
-      const version = node("td", spec.id);
-      if (spec.parent_id) version.append(node("small", `Previous version: ${spec.parent_id}`));
-      version.append(node("span", diagnostics(spec), `spec-diagnostics${spec.diagnostics?.available_operations === 0 ? " negative" : ""}`));
-      (spec.warnings || []).filter((warning) => typeof warning === "string").slice(0, 10).forEach((warning) => version.append(node("small", warning)));
+      const version = versionCell(spec); version.append(node("small", `Latest version · ${group.versions.length} retained snapshot${group.versions.length === 1 ? "" : "s"}`));
+      version.append(node("small", bindingLabel(spec, true)));
+      const pinned = group.versions.slice(1).some((old) => state.channels.some((channel) => channel.spec_ids.includes(old.id)));
+      if (pinned) version.append(node("small", "Older versions are pinned to channels. See History for bindings."));
       const actions = node("td", "", "spec-actions");
-      const superseded = state.specs.some((item) => item.parent_id === spec.id);
-      const update = action(superseded ? "Superseded snapshot" : remote(spec) ? "Refresh from URL" : "Update / replace file", () => openRefresh(spec));
-      update.disabled = superseded;
-      if (superseded) { update.title = "Refresh the latest version instead. This snapshot remains available to view and download."; version.append(node("small", "Superseded · retained snapshot")); }
-      actions.append(action("View source / download", () => viewSource(spec)), update, filterControl(spec, superseded));
+      actions.append(action("View source / download", () => viewSource(spec)), action(remote(spec) ? "Refresh from URL" : "Update / replace file", () => openRefresh(spec)), filterControl(spec, false));
+      actions.append(action(`History (${group.versions.length})`, () => history(group)));
       row.append(name, version, actions); $("spec-rows").append(row);
     });
-    if (!state.specs.length) emptyRow("spec-rows", 3, "No specifications yet. Upload a JSON or YAML file, or import a Swagger/OpenAPI or UCP URL.");
+    if (!logical.length) emptyRow("spec-rows", 3, "No specifications yet. Upload a JSON or YAML file, or import a Swagger/OpenAPI or UCP URL.");
   }
   function filterControl(spec, superseded) {
     const label = node("label", "", "check-label"); const input = node("input");
@@ -69,6 +126,7 @@ const specifications = (() => {
     const value = $("spec-url").value.trim(); let url;
     try { url = new URL(value); } catch { throw new Error("Enter a complete public HTTP(S) specification URL."); }
     if (value.length > 2048 || !["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Use an HTTP(S) URL of at most 2,048 characters without credentials, query strings, or fragments. Operator network policy still applies.");
+    if ($("spec-kind").value === "ucp" && url.protocol !== "https:") throw new Error("UCP sources require a public HTTPS website root, discovery profile, or MCP endpoint.");
     return value;
   }
   async function importSpec() {
@@ -93,7 +151,7 @@ const specifications = (() => {
     $("spec-refresh-title").textContent = filterOnly ? "Confirm discovery filter change" : "Update / refresh specification";
     $("spec-refresh-submit").textContent = filterOnly ? "Confirm filter change" : "Confirm update / refresh";
     $("spec-refresh-source").textContent = `${spec.name} · ${sourceLabel(spec)}${fromURL ? `: ${spec.source_url || "Source URL unavailable"}` : ""}`;
-    $("spec-refresh-help").textContent = filterOnly ? "Create a new immutable version from the saved document only. No URL refetch or replacement upload. The old version and its filter remain unchanged. This changes discovery visibility, never execution permission." : fromURL ? "Refetch the saved URL using its original source kind and name. A changed document or filter creates a new immutable version." : "Choose a replacement file. The API name stays the same; a changed document or filter creates a new immutable version.";
+    $("spec-refresh-help").textContent = filterOnly ? "Create a new immutable version from the saved document only. No URL refetch or replacement upload. The old version and its filter remain unchanged. Uncheck the read-only filter to include POST operations. Included POST operations execute automatically and may have side effects." : fromURL ? "Refetch the saved URL using its original source kind and name. A changed document or filter creates a new immutable version." : "Choose a replacement file. The API name stays the same; a changed document or filter creates a new immutable version.";
     $("spec-replacement-fields").hidden = noFile; $("spec-replacement").disabled = noFile; $("spec-replacement").required = !noFile;
     $("spec-refresh-read-only-filter").checked = filterOnly ? requestedFilter : (spec.read_only_filter ?? true);
     $("spec-replacement-limit").textContent = `Maximum file size: ${count(state.settings.max_spec_bytes)} bytes.`;
@@ -110,11 +168,12 @@ const specifications = (() => {
     notify(`${outcome} ${diagnostics(result)}`);
   }
   function wire() {
+    $("spec-history-dialog").addEventListener("close", () => { $("spec-history-rows").replaceChildren(); $("spec-history-title").textContent = "Version history"; });
     bind("new-spec", openImport); bind("spec-form", importSpec, "submit"); bind("spec-refresh-form", refreshSpec, "submit");
     $("spec-kind").addEventListener("change", sourceKind);
     $("spec-file").addEventListener("change", () => { if (!$("spec-name").value) $("spec-name").value = $("spec-file").files[0]?.name.replace(/\.(json|ya?ml)$/i, "").replace(/[^a-z0-9_ -]/gi, "-").slice(0, 120) || ""; });
     $("spec-dialog").addEventListener("close", () => { draft = null; $("spec-form").reset(); sourceKind(); });
     $("spec-refresh-dialog").addEventListener("close", () => { updating = null; $("spec-refresh-form").reset(); $("spec-refresh-source").textContent = ""; });
   }
-  return { render, wire };
+  return { render, wire, groups, bindingChoices, sourceMetadata };
 })();

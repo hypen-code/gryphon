@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from gryphon.errors import ExecutionError, SecurityViolationError
+from gryphon.runtime.execution_cleanup import finish_cleanup
+from gryphon.security.mcp_protocol import consume_sse
 from gryphon.security.policies import check_address_allowed, check_domain_allowed, check_metadata_host, validated_url
 
 if TYPE_CHECKING:
@@ -154,6 +156,7 @@ class NetworkClient:
         content: bytes | None = None,
         timeout: float | None = None,
         max_bytes: int | None = None,
+        rpc_response_id: str | None = None,
     ) -> httpx.Response:
         """Send once and consume a hard-bounded, uncompressed response.
 
@@ -167,6 +170,7 @@ class NetworkClient:
             content: Broker-encoded bounded multipart bytes, never a file or stream.
             timeout: Optional remaining scope budget.
             max_bytes: Optional response size limit, including compiler document limits.
+            rpc_response_id: Opt-in owned MCP response identity for bounded SSE consumption.
 
         Returns:
             Fully read response; error bodies are never returned.
@@ -183,7 +187,7 @@ class NetworkClient:
         request = self._build_request(
             method, checked, headers or {}, json_body, data, duration, json_body_present, content
         )
-        return await self._send(request, duration, limit)
+        return await self._send(request, duration, limit, rpc_response_id)
 
     def _build_request(
         self,
@@ -225,20 +229,27 @@ class NetworkClient:
         except (httpx.HTTPError, ValueError, TypeError):
             raise ExecutionError("Upstream request could not be encoded safely") from None
 
-    async def _send(self, request: httpx.Request, duration: float, limit: int) -> httpx.Response:
+    async def _send(
+        self, request: httpx.Request, duration: float, limit: int, rpc_response_id: str | None = None
+    ) -> httpx.Response:
         """Apply a total deadline, bounded read and sanitized network failures."""
         try:
             async with asyncio.timeout(duration):
                 response = await self._client.send(request, stream=True)
                 try:
-                    return await self._consume(response, limit)
+                    return await self._consume(response, limit, rpc_response_id)
                 finally:
-                    await response.aclose()
+                    if rpc_response_id is not None:
+                        await finish_cleanup(response.aclose())
+                    else:
+                        await response.aclose()
                     self._client.cookies.clear()
         except (httpx.HTTPError, OSError, TimeoutError, ValueError):
             raise ExecutionError("Upstream request failed") from None
 
-    async def _consume(self, response: httpx.Response, limit: int) -> httpx.Response:
+    async def _consume(
+        self, response: httpx.Response, limit: int, rpc_response_id: str | None = None
+    ) -> httpx.Response:
         """Reject HTTP failures, compression and size overflows without body disclosure."""
         if not 200 <= response.status_code < 300:
             raise ExecutionError(f"Upstream returned HTTP {response.status_code}")
@@ -247,6 +258,9 @@ class NetworkClient:
         length = response.headers.get("content-length")
         if length is not None and (not length.isdecimal() or int(length) > limit):
             raise ExecutionError("Upstream response exceeds size limit")
+        media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if rpc_response_id is not None and media_type == "text/event-stream":
+            return await consume_sse(response, limit, rpc_response_id)
         content = bytearray()
         if response.is_stream_consumed:
             if len(response.content) > limit:
