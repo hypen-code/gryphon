@@ -33,6 +33,8 @@ class ToolBroker:
         config: GryphonConfig,
         registry: Registry,
         auth_configs: dict[str, AuthConfig] | None = None,
+        *,
+        allow_environment: bool = True,
     ) -> None:
         """Create the broker-local verified connection pool and credential cache.
 
@@ -40,12 +42,13 @@ class ToolBroker:
             config: Trusted administrator network/write/resource policy.
             registry: Loaded v2 manifest registry.
             auth_configs: Host-only authentication configuration by server.
+            allow_environment: False forbids environment fallback and interpolation for hosted channels.
         """
         self._config = config
         self._registry = registry
         self._auth_configs = dict(auth_configs or {})
         self._network = NetworkClient(config)
-        self._vault = AsyncVault(self._network)
+        self._vault = AsyncVault(self._network, allow_environment=allow_environment)
         self._closed = False
 
     async def invoke(
@@ -158,8 +161,12 @@ class ToolBroker:
         if credentials and (base.scheme, base.host, base.port) != (target.scheme, target.host, target.port):
             raise SecurityViolationError("Credentials cannot be delegated to a different upstream origin")
 
-    async def close(self) -> None:
-        """Revoke future calls, erase cached credentials and close all connections."""
+    def revoke(self) -> None:
+        """Immediately revoke hosted authority before waiting for in-flight requests to drain."""
         self._closed = True
         self._vault.close()
+
+    async def close(self) -> None:
+        """Revoke future calls, erase cached credentials and close all connections."""
+        self.revoke()
         await self._network.close()

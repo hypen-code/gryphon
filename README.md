@@ -7,119 +7,121 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Named for the legendary guardian, **Gryphon** sits between an agent's code and
-its API authority. It compiles OpenAPI catalogs, lets agents discover only the
-operations they need, and runs bounded Python through a credential-holding
-broker—not through unrestricted host execution.
-
-The original idea remains: **a small set of meta-tools, not one MCP tool per API
-endpoint**. Discover → inspect → execute → reuse. Compose calls and reduce data
-in code before returning it to the model.
+its API authority. Compile OpenAPI → discover → inspect → execute → reuse:
+**a small set of meta-tools, not one MCP tool per API endpoint**. Compose calls
+and reduce data in bounded Python through a host-owned capability broker.
 
 **Version 2.0.0** · Python **3.13+** · FastMCP **4.0.2** ·
-`pydantic-monty` **0.0.18**. Real-client conformance tests cover MCP
-**2026-07-28** negotiation and legacy initialization. Native MCP Tasks are not
-implemented or advertised; background runs use portable application handles.
+`pydantic-monty` **0.0.18**. Real-client tests cover MCP **2026-07-28** and legacy
+initialization. Native MCP Tasks are not implemented or advertised.
 
-Gryphon is a **local/operator deployment**, not a completed multi-tenant SaaS.
-The distribution name is `gryphon-runtime`; the import package and CLI are
-`gryphon`. This version is **not published to PyPI**: install from this checkout.
+Choose **local stdio**, **operator-token HTTP**, or **admin-managed hosted tenants
+and channels**. Hosted mode is single-worker, not a horizontally scalable or
+certified SaaS platform. The distribution is `gryphon-runtime`; package/CLI:
+`gryphon`. No PyPI or container-registry publication is claimed.
 
-## Quick start
+## Install and try it
 
-Prerequisites: Git, [uv](https://docs.astral.sh/uv/), and Python 3.13+.
-Use Linux/macOS, or the container deployment on Windows; persistent-store locks
-require POSIX support. The default restricted profile needs **no Docker, model,
-model API key, or upstream credentials** for the included offline demo.
-
-Run these commands from the repository root:
+Use Python 3.13+ on Linux/macOS; persistent-store locks require POSIX support.
+Windows users can use containers. Restricted execution needs **no Docker or
+model API key**. From the repository root:
 
 ```bash
 git clone https://github.com/hypen-code/gryphon.git
 cd gryphon
-uv sync --frozen --extra dev
+uv sync --frozen --extra dev --extra saas
 cp .env.example .env
 cp config/swaggers.yaml.example config/swaggers.yaml
 uv run --frozen gryphon compile
 uv run --frozen python examples/demo.py
 ```
 
-The config example uses [`examples/weather.yaml`](examples/weather.yaml), a
-local OpenAPI description of the public Open-Meteo forecast API. Compilation
-does not call the forecast endpoint. The demo uses a **real in-process MCP
-client**, computes a sum offline, then reuses the same recipe with new inputs.
-Compilation is optional for that computation; it adds weather discovery.
+The local [`examples/weather.yaml`](examples/weather.yaml) describes the public
+Open-Meteo API. Compilation does not call its forecast endpoint. The demo uses
+a **real in-process MCP client** to sum inputs offline and reuse the recipe;
+compilation is optional for computation and adds weather discovery only.
+Development's `saas` extra requires system **libpq** (Debian/Ubuntu: `libpq5`).
 
-### Connect an MCP client over stdio
+Alternatively, build with `uv build`, then install a local wheel:
 
-`uv run --frozen gryphon compile` prints MCP client JSON to **stdout**, even
-when all sources are already up to date. Logs stay on **stderr**. Copy its
-`mcpServers` entry into your client's configuration; no client settings are
-changed automatically. Dry runs, failed/empty compilations, and compilation
-inside `serve`/`run` do not print client JSON.
+```bash
+python -m pip install /absolute/path/to/gryphon_runtime-2.0.0-py3-none-any.whl
+python -m pip install '/absolute/path/to/gryphon_runtime-2.0.0-py3-none-any.whl[saas]'
+```
 
-The generated entry uses absolute storage paths, disables startup recompilation,
-and references the selected env-file path without copying its credentials.
-Keep operator settings/credentials in that private file or the launch environment.
-For this manual equivalent, replace `/absolute/path/to/gryphon` with
-your actual checkout path; clients may not expand `~`.
+The second command includes hosted dependencies (`psycopg==3.2.9`, using system
+libpq). **Only after an actual public-index release** would
+`python -m pip install gryphon-runtime` or `python -m pip install 'gryphon-runtime[saas]'`
+be public-index installation instructions. They are not current release claims.
+
+### One MCP entry: stdio
+
+After installing, add this entry to your MCP client. Replace both paths with
+absolute paths on your machine; clients may not expand `~` or find your shell's
+`PATH`. `GRYPHON_SWAGGERS` is a JSON array encoded as an environment string:
 
 ```json
 {
   "mcpServers": {
     "gryphon": {
-      "command": "/absolute/path/to/gryphon/.venv/bin/gryphon",
-      "args": ["serve", "--env-file", "/absolute/path/to/gryphon/.env"],
+      "command": "/absolute/path/to/venv/bin/gryphon",
+      "args": ["stdio"],
       "env": {
-        "GRYPHON_COMPILE_ON_STARTUP": "false",
-        "GRYPHON_COMPILED_OUTPUT_DIR": "/absolute/path/to/gryphon/compiled",
-        "GRYPHON_SWAGGER_CONFIG_FILE": "/absolute/path/to/gryphon/config/swaggers.yaml",
-        "GRYPHON_CACHE_DB_PATH": "/absolute/path/to/gryphon/data/cache.db",
-        "GRYPHON_RUN_DB_PATH": "/absolute/path/to/gryphon/data/runs.db",
-        "GRYPHON_ARTIFACT_DIR": "/absolute/path/to/gryphon/data/artifacts"
+        "GRYPHON_SWAGGERS": "[{\"name\":\"weather\",\"swagger_url\":\"/absolute/path/to/gryphon/examples/weather.yaml\",\"is_read_only\":true}]",
+        "GRYPHON_STATE_DIR": "/absolute/path/to/private/gryphon-state"
       }
     }
   }
 }
 ```
 
-Stdio trusts the local operator. Run only one Gryphon process per run database:
-stop the demo or existing server before starting another against the same paths.
-Logs go to stderr so stdout remains available for the MCP protocol.
+`gryphon stdio` compiles then serves, using **launch environment only** unless
+`--env-file /absolute/path/to/private.env` is explicit. It never discovers an
+ambient `.env` or writes into an installed package. `GRYPHON_STATE_DIR` is an
+optional absolute root; default: `$XDG_STATE_HOME/gryphon` when XDG is absolute,
+otherwise `~/.local/state/gryphon`. Default catalog/cache/receipt/artifact paths
+are private, source-scoped subdirectories; explicit storage overrides are kept.
+Use `GRYPHON_SWAGGERS="[]"` (or omit sources) for **empty-catalog offline compute**.
+An explicitly configured `GRYPHON_SWAGGER_CONFIG_FILE` also works. Local paths
+should be absolute to avoid depending on the client's launch directory.
+
+Stdio trusts its launcher (`local` owner). Run **one process per run database**;
+use separate state roots for simultaneous clients. Logs stay on stderr; stdout
+is MCP only. The legacy `serve`/`run` commands remain supported. Standalone
+`compile` prints non-secret MCP client JSON even for unchanged catalogs, with
+absolute storage paths, a referenced env-file path, and recompilation disabled.
+Dry runs, failed/empty compilations, and startup compilation emit no client JSON.
+No client configuration is changed automatically or populated with credentials.
 
 ## The MCP interface
 
 | Core tool | Purpose |
 |---|---|
 | `list_servers` | Compact, paginated API summaries |
-| `search_functions` | Find relevant capabilities without loading the whole catalog |
-| `get_functions` | Inspect schemas and invocation metadata for 1–5 functions |
-| `execute_code` | Execute code with structured `inputs` and optional `input_schema` |
-| `run_cached_code` | Reuse unchanged source with a complete new `params` object |
+| `search_functions` | Discover capabilities without loading the whole catalog |
+| `get_functions` | Inspect schemas/invocation metadata for 1–5 functions |
+| `execute_code` | Run code with structured `inputs` and optional `input_schema` |
+| `run_cached_code` | Reuse exact source with a complete new `params` object |
 | `submit_code` | Submit work and receive a persistent run receipt |
-| `get_run` | Poll a caller-owned run |
-| `cancel_run` | Revoke an active run and wait for its worker to stop |
-| `list_recipes` | Search the caller's cached recipe summaries |
-| `read_artifact` | Read caller-owned JSON output in bounded chunks |
+| `get_run` / `cancel_run` | Poll caller-owned work / revoke and await cleanup |
+| `list_recipes` | Search caller-owned cached recipe summaries |
+| `read_artifact` | Read caller-owned JSON in bounded chunks |
 
-The `reusable_code_guide` prompt explains the execution contract on demand.
-With `GRYPHON_ENABLE_ADDITIONAL_TOOLS=true`, `list_skills` and
-`get_server_skills` expose optional server guides. Guides are **untrusted data**,
-not embedded in initialization instructions and never write approval.
+`reusable_code_guide` explains execution on demand.
+`GRYPHON_ENABLE_ADDITIONAL_TOOLS=true` adds only `list_skills` and
+`get_server_skills` in local/operator mode. Guides are bounded, untrusted data,
+not initialization instructions or write approval. Discovery includes registry
+fingerprints and truncation metadata: follow `next_cursor` or narrow searches.
+MCP `readOnlyHint` is a client hint, **not authorization**.
 
-Discovery responses include a registry fingerprint and truncation metadata.
-Follow `next_cursor` where provided; narrow searches when truncated. MCP
-`readOnlyHint` annotations are client hints, **not authorization**.
-
-### Call an API, then reuse the program
-
-First search for weather, then call `get_functions` with:
+### Execute, then reuse
+Search for weather, then inspect:
 
 ```json
 {"functions": [{"server_name": "weather", "function_name": "get_forecast"}]}
 ```
 
-Use the inspected schema, not guessed parameter names. This `execute_code`
-payload calls the public API, unlike the offline demo:
+Use inspected names; unlike the demo, this `execute_code` calls a public API:
 
 ```json
 {
@@ -138,63 +140,48 @@ payload calls the public API, unlike the offline demo:
 }
 ```
 
-Inside restricted Python, the only external capability has **two arguments**:
-
-```python
-result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"], "longitude": inputs["longitude"], "current": "temperature_2m"})
-```
-
-Pass the returned `cache_id` to `run_cached_code`:
+The only restricted external capability takes **two arguments**:
+`await call_tool("server.function", arguments)`. Pass the returned `cache_id` to
+`run_cached_code`:
 
 ```json
 {"cache_id": "<returned-cache-id>", "params": {"latitude": 48.8566, "longitude": 2.3522}}
 ```
 
-- `inputs` and `params` are JSON objects. `params` replaces the **entire** input
-  object; it is not a patch and does not recover previous input values.
-- Assign `result` to a JSON-native value. No `main()` is required; if you define
-  one, call it explicitly. Gryphon never auto-executes it.
-- Restricted Python supports no imports, filesystem, direct network, or host
-  environment access. It is a subset, not a drop-in CPython environment.
-- `input_schema` is bounded. References, regex constraints, and combinators such
-  as `$ref`, `pattern`, `allOf`, `anyOf`, and `oneOf` are rejected.
-- Recipe identity includes owner, exact source, schema, and catalog/policy
-  digest. Replay repeats validation and authorization; catalog or policy drift
-  rejects stale recipes. Reordering or repeating the same exact write permits
-  does not change policy identity; adding or removing a permit does.
-  **Input values are never rewritten into source.**
-- A recipe caches code, not an API response. Reuse can call the API again.
+- `inputs`/`params` are JSON objects; replay replaces the **entire** input object.
+  Values are never rewritten into source. A recipe caches code, not API results.
+- Assign JSON-native `result`. `main()` is neither required nor auto-called.
+- Restricted Python has no imports, filesystem, direct network, or host
+  environment access. It is not a drop-in CPython environment.
+- Bounded `input_schema` rejects references, regexes, and combinators including
+  `$ref`, `pattern`, `allOf`, `anyOf`, and `oneOf`.
+- Recipe identity binds owner, exact source, schema, and catalog/policy digest.
+  Replay reruns validation/authorization; drift rejects stale recipes. Reordering
+  or duplicating exact write permits does not change identity; changing the set does.
 
-### Results, background runs, and cancellation
+### Results, receipts, and cancellation
 
-Execution returns native structured MCP data with `success`, result `data`,
-handles when available, and stable `error_type` categories on failure. Docker
-backend unavailability retains `sandbox_unavailable` in tool results and saved
-receipts. Raw prints, upstream error bodies, and exception traces are omitted.
-A print-byte summary may be returned; do not use printing to deliver results.
+Native structured results contain `success`, result `data`, available handles,
+and stable `error_type` categories. `sandbox_unavailable` survives sanitization
+and receipt storage. Raw prints, stderr, upstream errors, and traces are omitted;
+a print-byte summary is not a way to deliver results. Large permitted JSON uses
+owner-scoped artifacts; follow `next_offset` to `eof` with `read_artifact`.
+Chunks are at most **8192 bytes**, possibly smaller under the context budget;
+artifacts never bypass the full-result limit.
 
-Large successful results within the full-result limit become owner-scoped JSON
-artifacts. Use `read_artifact` with the returned `artifact_id`, then follow
-`next_offset` until `eof`. Requested chunks are at most **8192 bytes** and may be
-smaller to fit the context budget. Artifacts do not bypass the full-result cap.
-
-`submit_code` accepts the same code/input contract as `execute_code`, returns an
-`id`, and can be polled with `get_run(run_id=...)`. Receipt states are `queued`,
-`running`, `succeeded`, `failed`, `cancelled`, and `interrupted`.
-
-Optional `idempotency_key` values deduplicate matching requests within an owner
-while the receipt is retained; conflicting requests fail. This is **not
-exactly-once delivery**. On restart, persisted queued/running receipts become
-`interrupted`; code and writes are **not automatically replayed or resumed**.
-Check upstream state before deliberately retrying an interrupted write.
-
-Cancellation revokes broker authority and waits for worker cleanup. It cannot
-undo an API action already accepted upstream. Receipt and artifact retention
-are bounded; they are not a permanent audit archive or durable workflow engine.
+`submit_code` accepts the execution contract, returns an `id`, and is polled
+with `get_run(run_id=...)`. States: `queued`, `running`, `succeeded`, `failed`,
+`cancelled`, `interrupted`. Optional `idempotency_key` deduplicates matching
+owner-scoped requests only while retained; conflicting requests fail.
+Restart marks queued/running work **interrupted**, with **no automatic replay,
+crash resume, or exactly-once external effects**. Check upstream state before
+retrying. Cancellation revokes authority and awaits cleanup, but cannot undo
+accepted upstream actions. Bounded receipts/artifacts are not a workflow engine
+or permanent audit archive.
 
 ## Configure APIs and policy
 
-The public example is deliberately small:
+Local/operator catalog example:
 
 ```yaml
 servers:
@@ -203,25 +190,21 @@ servers:
     is_read_only: true
 ```
 
-`swagger_url` accepts local files or policy-approved HTTP(S) documents. Relative
-paths use the compilation working directory. `base_url` overrides the spec's URL.
-OpenAPI **3.0/3.1** and Swagger **2.0** produce v2 manifests with native parameter,
-JSON-body, and supported response schemas; OpenAPI 3.2 is not yet supported.
-Unsupported request semantics fail closed. Unsupported response schemas are
-reported and omitted, never presented as a validation guarantee. Supported
-output schemas are validated by the broker before results enter the sandbox.
-Optional query/header `null` means omission. Required/path null values and null
-query-array elements are rejected; JSON-body null is supported when declared.
-
-Generated Python is documentation/SDK output, **never imported or executed by
-the MCP host**. Legacy `top_level_functions` selections do not promote direct
-MCP tools. `--llm-enhance` and `GRYPHON_LLM_ENHANCE=true` are explicitly rejected
-in v2: compilation is deterministic and needs no model key.
+`swagger_url` accepts local files or policy-approved HTTP(S) documents; relative
+paths use the compilation directory. `base_url` overrides the spec URL.
+OpenAPI **3.0/3.1** and Swagger **2.0** produce deterministic v2 manifests;
+OpenAPI 3.2 is not supported. Unsupported request semantics fail closed;
+unsupported response schemas are reported/omitted rather than falsely validated.
+Supported response schemas are broker-validated. Optional query/header null
+means omission; required/path null and null query-array elements are rejected.
+Declared JSON-body null is supported. Generated Python is SDK documentation,
+**never imported/executed by the host**. Legacy `top_level_functions` promotes no
+MCP tools. `--llm-enhance` / `GRYPHON_LLM_ENHANCE=true` are explicitly rejected.
 
 ### Credentials and writes
 
-Public APIs need no auth block. For authenticated APIs, put environment
-references in trusted configuration, for example:
+For **local/operator mode**, public APIs need no auth block. Authenticated APIs
+use trusted environment references, not secrets in code or committed YAML:
 
 ```yaml
 auth:
@@ -229,165 +212,189 @@ auth:
   value: "Bearer ${UPSTREAM_API_TOKEN}"
 ```
 
-Supported host-side auth types are `static`, `jwt`, `basic`, OAuth2 client
-credentials (`oauth2`), `keycloak`, and `session`. Dynamic tokens are fetched and
-cached by the broker. Set secrets in the operator environment or a private env
-file—not in code, tool inputs, committed YAML, or client configuration snippets.
-`GRYPHON_{SERVER}_AUTH` and JSON `GRYPHON_{SERVER}_EXTRA_HEADERS` are host-side
-options. Credentials are **never injected into either execution sandbox**.
+Host auth supports `static`, `jwt`, `basic`, OAuth2 client credentials (`oauth2`),
+`keycloak`, and `session`, with broker-managed refresh. Host-only alternatives:
+`GRYPHON_{SERVER}_AUTH` and JSON `GRYPHON_{SERVER}_EXTRA_HEADERS`. Neither sandbox
+receives credentials. **Hosted channels currently support public APIs only**:
+no host credential inheritance or tenant upstream secret manager is implemented.
 
-`is_read_only: true` excludes write methods during compilation and is checked
-again by the broker. To permit a write, its source must allow writes, and the
-administrator must set **both** of these settings with exact inspected names
-(the operation below is illustrative):
+`is_read_only: true` filters writes at compile time and dispatch. Local/operator
+writes additionally require a write-enabled source and **both** administrator
+settings, using exact inspected operation names (illustrative):
 
 ```dotenv
 GRYPHON_ALLOW_WRITES=true
 GRYPHON_ALLOWED_WRITE_OPERATIONS=["orders.create_order"]
 ```
 
-These are administrator permits, not an LLM approval flag. There is no
-interactive approval UI. API descriptions, guides, user code, and tool hints
-cannot change policy.
+No model flag, guide, idempotency key, or tool hint authorizes writes; there is
+no interactive write-approval UI. **Hosted catalogs remain read-only**, even if
+the base operator write settings are enabled.
 
-### Important settings
+### Runtime settings
 
-See [`.env.example`](.env.example) and [`GryphonConfig`](src/gryphon/config.py)
-for the complete settings. Explicit environment variables override the env file.
-The default env file is `.env` in the working directory, with checkout-root
-fallback; use `--env-file` for an unambiguous location.
+See [`.env.example`](.env.example), [`GryphonConfig`](src/gryphon/config.py), and
+[`SaaSConfig`](src/gryphon/saas_config.py). Explicit environment wins over dotenv.
+Legacy `compile`/`serve`/`run` discover `.env` in the working directory with
+checkout-root fallback; **`stdio` and `saas` require explicit `--env-file`**.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `GRYPHON_HOST` / `GRYPHON_PORT` | `127.0.0.1` / `8000` | HTTP listener |
-| `GRYPHON_HTTP_AUTH_TOKEN` | unset | Required for HTTP; at least 32 characters |
-| `GRYPHON_COMPILE_ON_STARTUP` | `true` | `serve` compiles before startup |
-| `GRYPHON_SANDBOX_MODE` | `restricted` | Restricted API execution or offline `docker` |
-| `GRYPHON_CONTEXT_BUDGET_BYTES` | `16384` | Discovery response budget |
-| `GRYPHON_DISCOVERY_LIMIT` | `10` | Maximum items returned per discovery page |
-| `GRYPHON_MAX_CODE_SIZE_BYTES` | `65536` | Source byte limit |
-| `GRYPHON_MAX_OUTPUT_SIZE_BYTES` | `65536` | Inline output/print budget |
-| `GRYPHON_MAX_RESPONSE_SIZE_BYTES` | `2097152` | Full JSON/upstream response limit |
-| `GRYPHON_EXECUTION_TIMEOUT_SECONDS` | `30` | Deadline; restricted VM has a 30-second hard ceiling |
-| `GRYPHON_MAX_CONCURRENT_EXECUTIONS` | `4` | Active execution limit |
-| `GRYPHON_QUEUE_TIMEOUT_SECONDS` | `5` | Bounded admission wait |
-| `GRYPHON_MAX_TOOL_CALLS` | `50` | Per-run capability budget |
-| `GRYPHON_SANDBOX_MEMORY_BYTES` | `64000000` | Restricted VM memory budget |
-| `GRYPHON_ALLOWED_DOMAINS` | `[]` | Additional exact-host restriction; JSON array |
-| `GRYPHON_ALLOW_PRIVATE_NETWORKS` | `false` | Explicit private/loopback API opt-in |
-| `GRYPHON_ALLOW_WRITES` / `GRYPHON_ALLOWED_WRITE_OPERATIONS` | `false` / `[]` | Two-part write policy |
-| `GRYPHON_CACHE_TTL_SECONDS` / `GRYPHON_CACHE_MAX_ENTRIES` | `3600` / `500` | Recipe retention |
-| `GRYPHON_RUN_TTL_SECONDS` / `GRYPHON_RUN_MAX_ENTRIES` | `86400` / `1000` | Receipt retention |
-| `GRYPHON_ARTIFACT_MAX_ENTRIES` | `100` | Retained artifacts per owner |
+Key defaults: restricted execution; 30-second deadline (also Monty's hard
+ceiling), 64,000,000-byte VM memory, four active runs **shared across hosted channels**,
+five-second admission wait, 50 calls, 65,536-byte source/inline and 2,097,152-byte full-result budgets,
+16,384-byte discovery context, ten items per discovery page. Recipe retention:
+3600 seconds/500 entries; receipts: 86400 seconds/1000 entries; artifacts: 100
+per owner. Configure these through the documented `GRYPHON_*` settings.
 
-Public API, authentication, and document destinations **require HTTPS**.
-`GRYPHON_ALLOWED_DOMAINS` additionally restricts exact hostnames; use a JSON array,
-not wildcards or CSV. HTTP is allowed only with private-network opt-in and solely
-approved private/loopback DNS answers. Metadata, link-local, reserved, and mixed
-public/private destinations remain denied. Clients use DNS pinning, origin-scoped
-pools, verified TLS, no environment proxies, and no redirects. See [SECURITY.md](SECURITY.md).
+Public API/auth/spec destinations **require HTTPS**. `GRYPHON_ALLOWED_DOMAINS`
+is an additional exact-host JSON array, not wildcard/CSV authority. Private or
+loopback HTTP needs explicit `GRYPHON_ALLOW_PRIVATE_NETWORKS=true` and approved
+DNS answers. Metadata, link-local, reserved, and mixed public/private destinations
+remain denied. DNS pinning, original Host/SNI, origin-specific pools, verified
+TLS, no environment proxies/redirects, and response bounds remain mandatory.
 
-## Operate Gryphon
+## Operate local/operator mode
 
-```bash
-uv run --frozen gryphon --version
-uv run --frozen gryphon doctor
-uv run --frozen gryphon compile --dry-run
-uv run --frozen gryphon serve
-uv run --frozen gryphon run
-uv run --frozen gryphon --env-file /absolute/path/to/operator.env doctor
-uv run --frozen gryphon doctor --env-file /absolute/path/to/operator.env
-```
+`gryphon --version` reports the version; `doctor` emits read-only JSON without
+compiling, opening runtime stores, calling APIs, or probing/starting Docker.
+`compile --dry-run` validates without output writes (remote specs may be fetched).
+`serve` respects `GRYPHON_COMPILE_ON_STARTUP`; `run` compiles once then serves.
+`--env-file` works before or after the subcommand.
 
-`serve` respects `GRYPHON_COMPILE_ON_STARTUP`; `run` compiles **once**, then serves.
-`doctor` reports read-only JSON diagnostics: it does not compile, open runtime
-stores, call APIs, or probe/start Docker. `--env-file` works before or after the
-subcommand.
+**Stop before `clean --yes`.** It archives recognized compiled output and a
+closed recipe cache to adjacent `.gryphon-archive-...` paths; it retains runs,
+artifacts, and config. `clean --yes --dry-run` only validates; `clean compile
+--yes` archives then compiles. Links, unknown files, unsafe/overlapping paths,
+and SQLite sidecars are refused. Restore manually while stopped without
+overwriting newer data. This is not arbitrary deletion or a hosted backup tool.
 
-**Stop the server before cleaning.** `gryphon clean --yes` reversibly renames
-only recognized compiled output and a closed recipe cache to adjacent
-`.gryphon-archive-...` paths. `clean --yes --dry-run` validates without moving;
-`clean compile --yes` archives then compiles. Unknown files, unsafe paths, links,
-and active SQLite sidecars are refused. Runs, artifacts, and config are retained.
-Restore manually while stopped by renaming an archive to its original path,
-without overwriting newer data. This is not an arbitrary-directory delete tool.
-
-### Authenticated HTTP
+For operator-token HTTP:
 
 ```bash
 export GRYPHON_HTTP_AUTH_TOKEN="$(uv run --frozen python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 uv run --frozen gryphon serve --transport http
 ```
 
-Connect to `http://127.0.0.1:8000/mcp` with an MCP client using
-`Authorization: Bearer <your-token>`. HTTP startup refuses missing/short tokens;
-settings use `SecretStr` and the verified token maps to a fixed `operator`
-identity, distinct from stdio's `local` owner. Sharing a token shares that
-identity. Use a **TLS reverse proxy before public exposure**; bearer auth alone
-does not encrypt traffic or provide multi-tenant identity management.
+Connect to `http://127.0.0.1:8000/mcp` with `Authorization: Bearer <your-token>`.
+Startup rejects missing/short tokens (minimum 32 characters, `SecretStr`). The
+verified owner is fixed `operator`, not tenant identity; sharing tokens shares
+ownership. Public exposure requires TLS termination and operator controls.
 
-### Container service
+For the existing container service, prepare the quick-start config and token,
+then `docker compose up --build -d gryphon`. Compose **2.24+** is required.
+The UID-1000 image includes the locked `saas` extra and system `libpq5`; legacy
+HTTP remains the default command. The service keeps read-only configuration,
+private named data/catalog volumes, resource limits, loopback port 8000, and
+**no Docker socket**. `.env` is optional; the HTTP token is checked at application
+startup. Its TCP health check is not authenticated MCP readiness or `/health`.
 
-After the quick-start config copies, set the random token above, then:
+## Hosted tenants and channels
+
+Install the `saas` extra and libpq, or use the same container image above. Supply
+`GRYPHON_SAAS_ADMIN_TOKEN` (random, at least 32 characters),
+`GRYPHON_SAAS_DATABASE_URL` (`postgresql://...`), and
+`GRYPHON_SAAS_PUBLIC_ORIGIN` (canonical HTTPS origin, no path/credentials/query).
+Set `GRYPHON_SAAS_STATE_DIR` to private persistent storage; native defaults are
+`./data/saas`, host `127.0.0.1`, port `8000`. Start with `gryphon saas`, or
+`gryphon saas --env-file /absolute/path/to/private-hosted.env`. No ambient dotenv
+is loaded. Protect the admin token and database URL; example values are blank.
+
+### Compose hosted profile
+
+Provision a TLS reverse proxy yourself, forwarding to `127.0.0.1:8001` and
+preserving the canonical **Host** header. The app does not trust proxy headers.
+Set a real origin before running these commands; secrets remain in your shell:
 
 ```bash
-docker compose up --build -d
+export GRYPHON_SAAS_ADMIN_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export GRYPHON_POSTGRES_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export GRYPHON_SAAS_PUBLIC_ORIGIN=https://gryphon.example.com
+docker compose --env-file /dev/null --profile hosted up --build -d gryphon-hosted
 ```
 
-The root image uses the lockfile and runs as UID 1000. Compose uses restricted
-execution, read-only configuration, named volumes for compiled/data storage,
-resource limits, loopback port publishing, and **no Docker socket mount**. It
-requires `.env` and the auth token. Its health check is TCP connectivity only,
-not authenticated MCP readiness; there is no `/health` endpoint.
+The explicit service target avoids starting legacy HTTP. Hosted dependencies
+include isolated **PostgreSQL 17.6**, no published DB port, and separate named
+volumes for PostgreSQL and local channel state. The app is non-root, read-only,
+resource-limited, restricted by default, and has **no Docker socket**. Password,
+admin token, and origin are required when selected services start, not during
+inactive-profile interpolation; missing hosted settings do not break legacy mode.
+Use a URL-safe database password (the command generates hex); retain it across
+restarts. Changing the environment does not rotate an initialized DB password.
+For native startup, supply the database URL separately; Compose derives its URL.
 
-### Optional offline full Python
+Only for loopback development, set `GRYPHON_SAAS_PUBLIC_ORIGIN=http://127.0.0.1:8001`
+and `GRYPHON_SAAS_ALLOW_INSECURE_HTTP=true` (native default port: 8000). This
+explicit exception disables Secure cookies; never use it for public traffic.
+`/health` checks database readiness. Canonical Host validation applies there too;
+the hosted container health check sends that Host, not a channel/admin token.
 
-Use Docker only when computation needs CPython and the libraries in
-[`sandbox/requirements.txt`](sandbox/requirements.txt). Provision the Docker
-daemon and **gVisor `runsc`** yourself, then build the tagged image:
+### Admin workflow and limits
+
+1. Open `/` on the canonical origin and exchange the admin token for a session.
+2. Create a tenant; upload immutable Swagger/OpenAPI **JSON or YAML** versions.
+3. Create a channel and bind only that tenant's uploaded versions (or none for
+   offline computation). Choose restricted mode, or operator-enabled Docker and
+   a narrowed subset of approved preinstalled imports.
+4. Generate/rotate its key and copy it **once**. Only the hash is stored; lost
+   keys must be rotated. Connect an MCP streamable-HTTP client to
+   `https://your-origin/mcp/{channelUUID}` with `Authorization: Bearer <channel-key>`.
+5. Use the UI to revise/disable channels, revoke keys, disable tenants, and view
+   aggregate usage/audit events. Channel keys cannot administer `/api`.
+
+Admin `/api` sessions use **Secure, HttpOnly, SameSite=Strict** cookies, bounded
+lifetimes, and session-bound CSRF checks on mutations. Restart invalidates admin
+sessions. Host/origin validation and bounded requests complement authentication.
+Uploads cannot reference external documents or interpolate host environment.
+Channel auth and ownership are verified against the control database, not IDs
+asserted by a client; channels have independent runtime stores and authority.
+
+**Exactly one active hosted worker per database**, enforced by a lease. Do not
+scale replicas: PostgreSQL stores control metadata (including immutable specs),
+key hashes, aggregate usage, and audit events—not recipe code, receipts, or
+artifacts. Those remain in a private **local persistent volume per channel**.
+Back up/restore the database **and** state volume together while the worker is
+stopped; protect disks/backups and test restoration. TLS, backup scheduling,
+key rotation, monitoring, and incident response are operator responsibilities.
+There is no HA/horizontal SaaS, billing, SSO, user invitation flow, tenant secret
+manager, encryption-at-rest guarantee, or security certification. See [SECURITY.md](SECURITY.md).
+
+## Optional offline full Python
+
+Docker is only for offline CPython using [`sandbox/requirements.txt`](sandbox/requirements.txt).
+Provision the daemon, image, and **gVisor `runsc`** manually:
 
 ```bash
 docker build -t gryphon-sandbox:2.0.0 sandbox/
 GRYPHON_SANDBOX_MODE=docker uv run --frozen gryphon serve
 ```
 
-Missing daemon, image, or configured runtime fails closed—no automatic startup
-or weaker-runtime fallback. Each execution gets a fresh container: UID 1000,
-all capabilities dropped, 64-PID limit, 256 MiB RAM/swap cap, half-core CPU quota,
-read-only root, bounded `/tmp` tmpfs, and no host mounts or network. Docker gets
-only code and explicit inputs, **no credentials and no `call_tool`/API access**.
-AST restrictions still apply; full Python does not mean unrestricted host access.
-This profile is separate from the default Compose service.
-
-## Measure local execution
-
-```bash
-uv run --frozen python examples/benchmark.py --iterations 25 --concurrency 1
-uv run --frozen python examples/benchmark.py --iterations 100 --concurrency 4
-```
-
-This repeatable offline benchmark verifies each result and reports startup,
-median/p95 latency, and throughput including durable receipts. It performs no
-model or upstream API calls; these timings are not end-to-end agent benchmarks.
+Missing daemon/image/runtime fails closed, never autostarts or downgrades.
+Each run uses UID 1000, dropped capabilities, no-new-privileges, read-only root,
+bounded tmpfs, 64-PID/256-MiB RAM-and-swap/half-core limits, and no host mounts,
+network, credentials, or `call_tool`. AST checks still apply. Hosted Docker also
+requires `GRYPHON_SAAS_DOCKER_ENABLED=true` and manual daemon access provisioning
+outside Compose. `GRYPHON_SANDBOX_ALLOWED_IMPORTS` is a JSON list: `[]` denies
+imports; unset preserves offline defaults. Only approved preinstalled imports can be selected.
 
 ## Development and support
 
 ```bash
-uv run --frozen ruff check src/ tests/
-uv run --frozen ruff format --check src/ tests/
-uv run --frozen mypy --strict src/ tests/
-uv run --frozen pytest --cov-fail-under=90
-uv run --frozen pre-commit install
-uv run --frozen pre-commit run --all-files
+uv sync --frozen --extra dev --extra saas
+uv run --frozen --extra saas ruff check src/ tests/
+uv run --frozen --extra saas ruff format --check src/ tests/
+uv run --frozen --extra saas mypy --strict src/ tests/
+uv run --frozen --extra saas pytest --cov-fail-under=90
+uv run --frozen --extra saas pre-commit install
+uv run --frozen --extra saas pre-commit run --all-files
 ```
 
-The **90% coverage floor** remains mandatory; the target is **100%**. The normal
-suite needs no live upstream API or Docker. Optional Docker checks and developer
-rules are in [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+The **90% coverage floor** is mandatory; target **100%**. Normal tests need no
+live upstream, Docker, or PostgreSQL, but import hosted dependencies. Optional
+`GRYPHON_TEST_POSTGRES=1` / Docker checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
+For offline startup/median/p95/throughput measurements including receipts, run
+`uv run --frozen python examples/benchmark.py --iterations 25 --concurrency 1`;
+use `--iterations 100 --concurrency 4` for bounded concurrency. These are not
+model/API or end-to-end agent benchmarks.
 
-See [CHANGELOG.md](CHANGELOG.md) for v2 changes and [ROADMAP.md](ROADMAP.md) for
-work that is not implemented. Report bugs through the
-[issue tracker](https://github.com/hypen-code/gryphon/issues);
-report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-
-MIT licensed; see [LICENSE](LICENSE).
+See [AGENTS.md](AGENTS.md), [CHANGELOG.md](CHANGELOG.md), and [ROADMAP.md](ROADMAP.md).
+Report [bugs](https://github.com/hypen-code/gryphon/issues) publicly and
+[vulnerabilities](SECURITY.md) privately. MIT licensed; see [LICENSE](LICENSE).

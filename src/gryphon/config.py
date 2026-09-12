@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from gryphon.models import SwaggerSource
 
 # Resolve .env with a fallback chain:
 #   1. CWD/.env      — works when the server is launched from the project root
@@ -40,6 +43,8 @@ class GryphonConfig(BaseSettings):
     compile_on_startup: bool = True
     compiled_output_dir: str = "./compiled"
     swagger_config_file: str = "./config/swaggers.yaml"
+    swaggers: Annotated[list[SwaggerSource] | None, NoDecode] = Field(default=None, repr=False, validate_default=False)
+    state_dir: str | None = None
     # LiteLLM model string — use provider/model format, e.g.:
     #   openai/gpt-4o  |  anthropic/claude-3-5-sonnet-20241022
     #   gemini/gemini-2.0-flash  |  openrouter/mistralai/mistral-7b-instruct
@@ -57,6 +62,7 @@ class GryphonConfig(BaseSettings):
     network_mode: Literal["none"] = "none"
     # Restricted Python is the default; Docker is an explicit offline compute profile.
     sandbox_mode: Literal["restricted", "docker"] = "restricted"
+    sandbox_allowed_imports: list[str] | None = None
     # Admission is bounded; completed execution environments are never reused.
     max_concurrent_executions: int = Field(default=4, ge=1, le=64)
     queue_timeout_seconds: int = Field(default=5, ge=1, le=60)
@@ -91,6 +97,18 @@ class GryphonConfig(BaseSettings):
     # Optional tools — disabled by default; set GRYPHON_ENABLE_ADDITIONAL_TOOLS=true to enable
     enable_additional_tools: bool = False
 
+    @field_validator("swaggers", mode="before")
+    @classmethod
+    def _validate_swagger_sources(cls, value: object) -> list[SwaggerSource] | None:
+        """Require an environment JSON list while retaining the programmatic YAML fallback sentinel."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, list):
+            raise ValueError("GRYPHON_SWAGGERS must be a JSON list")
+        return [SwaggerSource.model_validate(entry) for entry in value]
+
     @field_validator("http_auth_token")
     @classmethod
     def _validate_token(cls, value: SecretStr | None) -> SecretStr | None:
@@ -109,15 +127,16 @@ class GryphonConfig(BaseSettings):
         return normalized
 
 
-def load_config(env_file: str | None = None) -> GryphonConfig:
+def load_config(env_file: str | None = None, *, discover_env: bool = True) -> GryphonConfig:
     """Load and return the Gryphon configuration.
 
     Args:
         env_file: Optional path to a custom .env file. Overrides the default CWD/.env.
+        discover_env: Whether to read the default env file when no explicit path is supplied.
 
     Returns:
         Populated GryphonConfig instance.
     """
-    if env_file is not None:
+    if env_file is not None or not discover_env:
         return GryphonConfig(_env_file=env_file)  # type: ignore[call-arg]
     return GryphonConfig()

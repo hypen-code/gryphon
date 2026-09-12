@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Gryphon · Control plane</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314212c'/%3E%3Cpath d='M23 10a10 10 0 1 0 0 12v-7h-8v4h4v1a6 6 0 1 1 0-8z' fill='%23e5c584'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/admin.css">
+  <script src="/static/admin.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <section id="login" class="login-screen">
+    <div class="login-story">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">G</span> gryphon<span class="brand-label">CONTROL PLANE</span></div>
+      <div><p class="eyebrow">CAPABILITY, WITH BOUNDARIES</p><h1>One place to manage<br>every connection.</h1><p class="story-copy">Connect API catalogs to isolated channels. Define execution policy. Keep access in your hands.</p></div>
+      <p class="muted">Purpose-built for operator-managed agent infrastructure.</p>
+    </div>
+    <main class="login-panel">
+      <form method="post" id="login-form" class="login-card">
+        <p class="eyebrow">OPERATOR ACCESS</p><h2>Welcome to Gryphon</h2>
+        <p class="muted">Sign in with your administrator token to manage tenants and channels.</p>
+        <label for="login-token">Administrator token</label>
+        <input id="login-token" name="token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="login-hint">
+        <p id="login-hint" class="hint">Your token is exchanged for a secure session. It is not saved in browser storage.</p>
+        <button class="primary full" type="submit">Sign in to control plane <span aria-hidden="true">→</span></button>
+        <p class="login-footnote">Private access · Use HTTPS for remote connections</p>
+      </form>
+    </main>
+  </section>
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">G</span> gryphon</a>
+      <p class="sidebar-caption">CONTROL PLANE</p>
+      <nav aria-label="Main navigation">
+        <a href="#overview" data-page="overview" aria-current="page"><span aria-hidden="true">◈</span> Overview</a>
+        <a href="#channels" data-page="channels"><span aria-hidden="true">⇄</span> Channels <span id="nav-channel-count" class="nav-count">0</span></a>
+        <a href="#specs" data-page="specs"><span aria-hidden="true">▤</span> API specifications</a>
+        <a href="#audit" data-page="audit"><span aria-hidden="true">◷</span> Audit trail</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="operator-avatar" aria-hidden="true">OP</div><div><strong>Operator</strong><small>Administrator session</small></div><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out">↗</button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="workspace-label">Workspace <span aria-hidden="true">/</span> <strong id="tenant-heading">Select a tenant</strong></div><div class="tenant-tools"><label class="sr-only" for="tenant-select">Current tenant</label><select id="tenant-select"><option value="">Loading tenants…</option></select><button id="new-tenant" class="secondary">New tenant</button></div></header>
+      <main id="main" tabindex="-1">
+        <div class="page-heading"><div><p class="eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</p><h1 id="page-title">Overview</h1><p id="page-description" class="muted">A clear view of your channels, capabilities, and activity.</p></div><button id="refresh" class="secondary">Refresh data</button></div>
+        <div class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><button id="toggle-tenant" class="text-button" disabled>Disable tenant</button></div>
+        <p id="loading" class="loading-state" role="status" hidden>Loading workspace data…</p>
+        <div id="tenant-empty" class="empty-state" hidden><span class="empty-symbol" aria-hidden="true">◈</span><h2>Your first workspace starts here</h2><p>Create a tenant, upload an API specification, then bind it to a channel.</p><button id="empty-new-tenant" class="primary">Create a tenant</button></div>
+        <div id="tenant-content">
+          <section id="page-overview" class="page-section" aria-label="Overview">
+            <div class="metrics"><article class="metric"><p>Total calls</p><strong id="metric-calls">—</strong><small>Recorded tool invocations</small></article><article class="metric"><p>Successful calls</p><strong id="metric-success">—</strong><small id="metric-success-detail">Across all channels</small></article><article class="metric"><p>Average latency</p><strong id="metric-latency">—</strong><small>Weighted by call count</small></article><article class="metric"><p>Enabled channels</p><strong id="metric-channels">—</strong><small id="metric-channel-detail">Ready for connection</small></article></div>
+            <div class="overview-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">TRAFFIC DISTRIBUTION</p><h2>Calls by channel</h2></div><span class="badge neutral">Recorded totals</span></div><div id="usage-chart" class="chart-list"></div></article><article class="panel policy-panel"><p class="eyebrow">ISOLATION BY DESIGN</p><h2>The right boundaries.<br>For every channel.</h2><p>Restricted execution exposes bound APIs through the broker, with no imports.</p><p>Docker is offline computation: no network or API access. Only operator-approved, preinstalled libraries are available.</p><a href="#channels" class="text-link">Manage execution policies <span aria-hidden="true">→</span></a></article></div>
+            <article class="panel"><div class="panel-heading"><div><p class="eyebrow">EXECUTION INSIGHTS</p><h2>Tool activity</h2></div><span class="subtle">Aggregate usage · not a time series</span></div><div class="table-wrap"><table><caption class="sr-only">Recorded tool usage by channel and status</caption><thead><tr><th>Channel / tool</th><th>Status</th><th>Calls</th><th>Average latency</th></tr></thead><tbody id="usage-rows"></tbody></table></div></article>
+          </section>
+          <section id="page-channels" class="page-section" aria-label="Channels" hidden><div class="section-toolbar"><p class="muted">Dedicated MCP endpoints with explicit capabilities and policy.</p><button id="new-channel" class="primary">Create channel</button></div><div id="channel-list" class="channel-grid"></div></section>
+          <section id="page-specs" class="page-section" aria-label="API specifications" hidden><div class="section-toolbar"><p class="muted">Immutable API catalogs. Upload a new version to change a specification.</p><button id="new-spec" class="primary">Upload specification</button></div><article class="panel"><div class="table-wrap"><table><caption class="sr-only">Uploaded API specifications</caption><thead><tr><th>Specification</th><th>Version ID</th><th>Actions</th></tr></thead><tbody id="spec-rows"></tbody></table></div></article></section>
+        </div>
+        <section id="page-audit" class="page-section" aria-label="Audit trail" hidden><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OPERATOR VISIBILITY</p><h2>Recent administrative activity</h2></div><span class="badge neutral">All tenants</span></div><div class="table-wrap"><table><caption class="sr-only">Recent administrative events across tenants</caption><thead><tr><th>Event</th><th>Tenant</th><th>Channel</th><th>Recorded at</th></tr></thead><tbody id="audit-rows"></tbody></table></div></article></section>
+        <footer class="workspace-footer"><span>Gryphon control plane</span><span>Explicit capabilities. Bounded execution.</span></footer>
+      </main>
+    </div>
+  </div>
+  <dialog id="tenant-dialog" aria-labelledby="tenant-dialog-title"><form method="post" id="tenant-form"><div class="dialog-heading"><h2 id="tenant-dialog-title">Create a tenant</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p class="muted">A separate workspace for specifications, channels, and usage.</p><label for="tenant-name">Tenant name</label><input id="tenant-name" required maxlength="120" autocomplete="off"><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Create tenant</button></div></form></dialog>
+  <dialog id="spec-dialog" aria-labelledby="spec-dialog-title"><form method="post" id="spec-form"><div class="dialog-heading"><h2 id="spec-dialog-title">Upload specification</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p class="muted">Upload an OpenAPI or Swagger document. Each upload creates an immutable version.</p><label for="spec-name">Specification name</label><input id="spec-name" required maxlength="120" autocomplete="off" aria-describedby="spec-name-help"><p id="spec-name-help" class="hint">Use letters, digits, spaces, underscores, or hyphens. Bind only one version of each API name to a channel.</p><label for="spec-file">JSON or YAML file</label><input id="spec-file" type="file" accept=".json,.yaml,.yml" required aria-describedby="file-limit"><p id="file-limit" class="hint"></p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Upload specification</button></div></form></dialog>
+  <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><form method="post" id="channel-form"><div class="dialog-heading"><h2 id="channel-dialog-title">Create channel</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><label for="channel-name">Channel name</label><input id="channel-name" required maxlength="120" autocomplete="off"><fieldset><legend>Bound specifications</legend><p class="hint">Select the immutable versions this channel can discover.</p><div id="spec-options" class="check-list"></div></fieldset><label for="sandbox-mode">Execution sandbox</label><select id="sandbox-mode" aria-describedby="sandbox-help"><option value="restricted">Restricted Python · broker API access</option><option value="docker">Docker · offline computation</option></select><p id="sandbox-help" class="hint"></p><fieldset id="library-fieldset"><legend>Library allowlist</legend><p class="hint">Only operator-approved, preinstalled libraries. No package installation.</p><div id="library-options" class="check-list"></div></fieldset><label class="check-label" id="channel-enabled-label"><input id="channel-enabled" type="checkbox" checked> Channel enabled</label><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save channel</button></div></form></dialog>
+  <dialog id="source-dialog" class="wide-dialog" aria-labelledby="source-title"><div class="dialog-heading"><h2 id="source-title">Specification source</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p class="hint">Normalized JSON document. Original YAML formatting is not retained.</p><pre id="source-content" tabindex="0"></pre><p class="dialog-message" role="status"></p><div class="dialog-actions"><button id="download-source" class="primary">Download JSON</button></div></dialog>
+  <dialog id="connect-dialog" class="wide-dialog" aria-labelledby="connect-title"><div class="dialog-heading"><h2 id="connect-title">Connect your MCP client</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><label for="endpoint">Channel endpoint</label><div class="copy-row"><input id="endpoint" readonly><button id="copy-endpoint" class="secondary">Copy endpoint</button></div><h3>Client configuration</h3><pre id="client-config" tabindex="0"></pre><p class="hint">Replace <code>&lt;YOUR_CHANNEL_TOKEN&gt;</code> with the channel key shown once when you rotated it, keeping it in your client's secure credential store instead of a shared file. The placeholder is not a real secret, and the key must never be added to the URL.</p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button id="copy-config" class="primary">Copy configuration</button></div></dialog>
+  <dialog id="key-dialog" aria-labelledby="key-title"><div class="dialog-heading"><h2 id="key-title">Your new channel key</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><div class="security-note"><strong>Copy it now. It is shown only once.</strong><p>The previous key is invalid. Store this key securely; it cannot be retrieved after closing this dialog.</p></div><label for="channel-token">Channel token</label><input id="channel-token" type="password" readonly autocomplete="off" spellcheck="false"><div class="key-actions"><button id="reveal-key" class="secondary" aria-pressed="false">Reveal key</button><button id="copy-key" class="primary">Copy key</button></div><p class="dialog-message" role="status"></p><div class="dialog-actions"><button class="secondary" data-close>Done, clear key</button></div></dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form method="post" id="confirm-form"><div class="dialog-heading"><h2 id="confirm-title">Confirm action</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p id="confirm-description" class="muted"></p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close autofocus>Cancel</button><button id="confirm-submit" class="danger" type="submit">Confirm</button></div></form></dialog>
+  <noscript><p class="noscript">JavaScript is required for the Gryphon control plane. Enable it for this origin to continue.</p></noscript>
+</body>
+</html>

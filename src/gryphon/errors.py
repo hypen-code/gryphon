@@ -70,3 +70,23 @@ class CapacityError(ExecutionError):
 
 class ConflictError(GryphonError):
     """An idempotency key was reused for a different request."""
+
+
+class SaaSStoreError(GryphonError):
+    """Control-plane persistence failed without exposing backend details."""
+
+
+class SaaSNotFoundError(SaaSStoreError):
+    """The requested tenant-scoped resource does not exist."""
+
+
+class SaaSDisabledError(SaaSStoreError):
+    """A disabled tenant cannot mutate execution configuration."""
+
+
+class SaaSQuotaError(SaaSStoreError):
+    """A control-plane resource or listing quota would be exceeded."""
+
+
+class SaaSValidationError(SaaSStoreError):
+    """Control-plane input violates a bounded storage contract."""

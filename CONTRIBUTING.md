@@ -13,13 +13,16 @@ Read [AGENTS.md](AGENTS.md) for architecture and coding rules,
 You need Git, [uv](https://docs.astral.sh/uv/), and Python **3.13+**. Use
 Linux/macOS for native development; persistent-store locking uses POSIX APIs.
 Windows users can run the container deployment. Docker is optional for the
-normal test suite and default restricted execution profile.
+normal test suite and default restricted execution profile. Install system
+**libpq** (Debian/Ubuntu: `libpq5`); the `saas` extra uses pure `psycopg==3.2.9`.
+Default test collection imports hosted modules, so include `--extra saas` even
+when no live PostgreSQL service is used.
 
 ```bash
 git clone https://github.com/hypen-code/gryphon.git
 cd gryphon
-uv sync --frozen --extra dev
-uv run --frozen pre-commit install
+uv sync --frozen --extra dev --extra saas
+uv run --frozen --extra saas pre-commit install
 ```
 
 This installs the checkout's `gryphon-runtime` distribution and `gryphon` CLI.
@@ -33,8 +36,8 @@ Tests need no API keys or real `.env`. To try the example from the checkout root
 ```bash
 cp .env.example .env
 cp config/swaggers.yaml.example config/swaggers.yaml
-uv run --frozen gryphon compile
-uv run --frozen python examples/demo.py
+uv run --frozen --extra saas gryphon compile
+uv run --frozen --extra saas python examples/demo.py
 ```
 
 The demo uses a real in-process MCP client, sums explicit inputs, and reuses its
@@ -55,11 +58,11 @@ run database before running it.
 5. Run the complete quality suite and include actual results in your PR.
 
 ```bash
-uv run --frozen ruff check src/ tests/
-uv run --frozen ruff format --check src/ tests/
-uv run --frozen mypy --strict src/ tests/
-uv run --frozen pytest --cov-fail-under=90
-uv run --frozen pre-commit run --all-files
+uv run --frozen --extra saas ruff check src/ tests/
+uv run --frozen --extra saas ruff format --check src/ tests/
+uv run --frozen --extra saas mypy --strict src/ tests/
+uv run --frozen --extra saas pytest --cov-fail-under=90
+uv run --frozen --extra saas pre-commit run --all-files
 ```
 
 **90% coverage is the hard floor; 100% is the target.** The local
@@ -72,14 +75,14 @@ For focused iteration, run the relevant test file. Focused checks do not replace
 the full gate:
 
 ```bash
-uv run --frozen pytest tests/unit/test_server.py
-uv run --frozen pytest tests/integration/test_protocol.py
+uv run --frozen --extra saas pytest tests/unit/test_server.py
+uv run --frozen --extra saas pytest tests/integration/test_protocol.py
 ```
 
 Compiler changes also need a dry run against safe fixture/example configuration:
 
 ```bash
-uv run --frozen gryphon compile --dry-run
+uv run --frozen --extra saas gryphon compile --dry-run
 ```
 
 `--dry-run` does not write output but can fetch a configured remote spec. Use
@@ -100,13 +103,33 @@ local fixtures when an offline check is required.
   Exercise malformed schemas, owner isolation, DNS rebinding, write permits,
   cancellation, drift, bounded output, crash receipts, and safe cleanup.
 
+### Optional PostgreSQL control-plane tests
+
+```bash
+GRYPHON_TEST_POSTGRES=1 uv run --frozen --extra saas pytest tests/integration/test_saas_postgres.py
+```
+
+Read [`test_saas_postgres.py`](tests/integration/test_saas_postgres.py) first.
+It creates and removes its own disposable **postgres:17.6** Docker container,
+using temporary storage, a generated password, and a random loopback port.
+It may pull the pinned image. Never substitute an operator database URL or run
+Compose against real operator configuration for verification. Coverage includes
+tenant isolation, immutable specs, hashed-key lifecycle, quotas/aggregate usage,
+and refusal of a second hosted worker. Normal tests use isolated temporary
+SQLite control stores or fakes; they need no live PostgreSQL.
+
+Hosted review must preserve independent administrator sessions/CSRF and channel
+keys, read-only uploaded catalogs, disabled host-auth inheritance, and per-channel
+local execution state. PostgreSQL stores control metadata only. Docker imports
+may only narrow preinstalled approved libraries; arbitrary installs are forbidden.
+
 ### Optional live Docker smoke tests
 
 Build the image and opt in explicitly:
 
 ```bash
 docker build -t gryphon-sandbox:2.0.0 sandbox/
-GRYPHON_TEST_DOCKER=1 uv run --frozen pytest tests/integration/test_execution_docker.py
+GRYPHON_TEST_DOCKER=1 uv run --frozen --extra saas pytest tests/integration/test_execution_docker.py
 ```
 
 Read [`test_execution_docker.py`](tests/integration/test_execution_docker.py)
@@ -178,7 +201,7 @@ Before requesting review:
 For ordinary bugs, open an
 [issue](https://github.com/hypen-code/gryphon/issues) with:
 
-- `uv run --frozen gryphon --version`, Python/OS, and relevant installed versions;
+- `uv run --frozen --extra saas gryphon --version`, Python/OS, and relevant installed versions;
 - execution profile, transport, and Docker/runtime details if applicable;
 - a minimal sanitized reproduction and expected versus actual behavior;
 - relevant safe diagnostics from `gryphon doctor` and the exact failing command.

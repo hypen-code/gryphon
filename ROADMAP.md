@@ -9,20 +9,24 @@ The guiding purpose remains an API-agent backend: discover a bounded catalog,
 compose governed API calls in code, and reuse programs with structured inputs.
 Any extension must preserve that model and the [security boundaries](SECURITY.md).
 
-## Multi-tenant cloud deployment
+## Hosted service expansion
 
-Not implemented as a completed service:
+Admin-managed tenants, immutable JSON/YAML uploads, channel bindings and keys,
+a browser administration UI, per-channel runtime isolation, aggregate usage,
+and a PostgreSQL control plane are implemented; see README. Remaining work:
 
-- Per-tenant identity provisioning, verified identity federation, and scoped
-  administrator policy instead of the current fixed operator token.
-- Tenant-isolated credential management, storage, quotas, and audit retention.
-- Multi-worker ownership, distributed admission, coordinated recovery, and
-  deployment lifecycle controls beyond a single-process run-ledger lock.
-- Public-service abuse controls, incident response procedures, and reviewed
-  tenant isolation boundaries.
-
-Owner-scoped recipes/receipts/artifacts are useful foundations, not evidence
-that the current local/operator deployment is a multi-tenant SaaS.
+- Self-service user invitation, SSO/identity federation, scoped administrator
+  roles, billing, and subscription lifecycle management.
+- Tenant upstream credential storage/rotation with a reviewed secret-management
+  boundary. Current channels are public-API-only and cannot inherit host auth.
+- Multi-worker ownership, distributed admission, coordinated recovery, shared
+  execution storage, and HA deployment. The current database lease permits
+  exactly one active hosted worker; PostgreSQL does not store execution data.
+- Automated coordinated backups/restores, TLS provisioning, operational metrics,
+  public-service abuse controls, and tested incident response procedures beyond
+  the implemented bounded request/rate limits.
+- Independent tenant-isolation assessment, penetration testing, and formal
+  security assurance; implemented controls do not imply certification.
 
 ## Stronger execution backends and independent verification
 
@@ -41,9 +45,10 @@ bytes, admission under load, memory use, and recipe reuse on disclosed hardware
 and pinned dependencies. It should compare representative API workloads and
 report distributions and failure cases rather than single best-case numbers.
 
-A reviewed, privacy-preserving metrics interface and operator dashboard could
-follow. These are not implemented measurement products. Runtime counters and
-pooled connections do not substantiate an unmeasured performance claim.
+A reviewed metrics export and performance dashboard could follow the existing
+hosted aggregate usage/audit UI. Those operational measurement products are not
+implemented. Runtime counters and pooled connections do not substantiate an
+unmeasured performance claim.
 
 ## Durable workflow integration
 

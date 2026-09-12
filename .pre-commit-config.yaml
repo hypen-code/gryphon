@@ -20,7 +20,7 @@ repos:
       - id: mypy
         name: mypy strict
         language: system
-        entry: uv run --frozen mypy
+        entry: uv run --frozen --extra saas mypy
         args: [--strict, --config-file=pyproject.toml, src, tests]
         pass_filenames: false
         always_run: true
@@ -31,7 +31,7 @@ repos:
       - id: pytest-coverage
         name: pytest (coverage >= 90%)
         language: system
-        entry: uv run --frozen pytest --cov=gryphon --cov-report=term-missing --cov-fail-under=90 -q
+        entry: uv run --frozen --extra saas pytest --cov=gryphon --cov-report=term-missing --cov-fail-under=90 -q
         pass_filenames: false
         always_run: true
         stages: [pre-commit]

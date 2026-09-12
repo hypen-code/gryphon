@@ -19,7 +19,7 @@ from gryphon.errors import (
     ServerNotFoundError,
 )
 from gryphon.models import ExecutionResult
-from gryphon.runtime.execution_validation import json_bytes
+from gryphon.runtime.execution_validation import effective_imports, json_bytes
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -62,6 +62,7 @@ def fingerprint(config: GryphonConfig, registry: Registry) -> str:
         )
     }
     policy["allowed_write_operations"] = sorted(set(config.allowed_write_operations))
+    policy["sandbox_allowed_imports"] = sorted(effective_imports(config))
     return hashlib.sha256(json.dumps([catalog, policy], sort_keys=True).encode()).hexdigest()
 
 

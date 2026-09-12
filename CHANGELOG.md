@@ -8,6 +8,23 @@ Notable changes to Gryphon, following
 
 ### Added
 
+- `gryphon stdio`: launch-environment source configuration through JSON
+  `GRYPHON_SWAGGERS`, optional absolute `GRYPHON_STATE_DIR`, private source-scoped
+  user state, and empty-catalog compute without ambient dotenv or package writes.
+- `gryphon saas`: admin-managed tenants, immutable Swagger JSON/YAML uploads,
+  revisioned channel bindings, one-time channel keys stored as hashes, and
+  streamable-HTTP MCP at `/mcp/{channelUUID}`. Hosted settings are environment-only
+  unless `--env-file` is explicit; upstream host credentials are never inherited.
+- Browser administration at `/`, session/CSRF-protected `/api`, database-readiness
+  `/health`, key rotation/revocation, tenant/channel disabling, aggregate usage,
+  and audit events. Admin and channel authentication are independent.
+- PostgreSQL control metadata through optional `saas` dependencies with
+  `psycopg==3.2.9`; exclusive hosted-worker lease and private local per-channel
+  recipes/receipts/artifacts. PostgreSQL is not execution storage.
+- Opt-in hosted Compose profile with isolated PostgreSQL 17.6, explicit secrets,
+  loopback publishing, separate persistent volumes, and no Docker socket. The
+  shared application image installs the locked `saas` extra and system `libpq5`.
+- Opt-in disposable PostgreSQL integration tests (`GRYPHON_TEST_POSTGRES=1`).
 - Credential-free restricted Python execution using `pydantic-monty` 0.0.18,
   with a fresh VM, bounded resources, and a single two-argument capability:
   `await call_tool("server.function", arguments)`.
@@ -36,7 +53,8 @@ Notable changes to Gryphon, following
 - Branding is **Gryphon**, the legendary guardian: distribution `gryphon-runtime`,
   import package and CLI `gryphon`, environment prefix `GRYPHON_`. The existing
   GitHub repository URL is unchanged.
-- Version 2.0.0 is installed **from the checkout**, not a published PyPI package.
+- Version 2.0.0 is installed **from the checkout or a local wheel**, not a
+  published PyPI package.
   Python 3.13+ remains required; FastMCP is pinned to exactly 4.0.2. `uv.lock`,
   CI, container builds, and local hooks support locked environments.
 - Restricted execution is the default. Optional full-Python Docker is a separate
@@ -97,9 +115,12 @@ Notable changes to Gryphon, following
 - Persisted queued/running work becomes `interrupted` on restart. No automatic
   crash resume or write replay occurs, and no exactly-once external effect is
   promised. Cancellation cannot undo API actions already accepted upstream.
-- Owner-scoped storage and fixed operator auth support a local/operator profile,
-  not a completed multi-tenant SaaS. Public exposure requires TLS termination and
-  appropriate additional deployment controls.
+- Local/operator modes remain supported separately from admin-managed hosted
+  tenants/channels. Hosted mode permits exactly one active worker per database,
+  is read-only and public-API-only upstream, and is not horizontal/HA SaaS.
+  No billing, SSO, user invitations, tenant secret manager, independent security
+  certification, or zero-vulnerability claim is provided. Operators must provision
+  TLS and coordinated PostgreSQL/local-state backups themselves.
 
 ## [0.1.0] — 2026-03-14
 

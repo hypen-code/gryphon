@@ -48,7 +48,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Compile once, then start the MCP server")
     _transport_options(run_parser)
     doctor_parser = subparsers.add_parser("doctor", help="Read-only JSON diagnostics; never starts services")
-    for subparser in (clean_parser, compile_parser, serve_parser, run_parser, doctor_parser):
+    stdio_parser = subparsers.add_parser("stdio", help="Compile environment sources and serve using private user state")
+    saas_parser = subparsers.add_parser("saas", help="Start hosted administration and tenant/channel HTTP endpoints")
+    for subparser in (clean_parser, compile_parser, serve_parser, run_parser, doctor_parser, stdio_parser, saas_parser):
         subparser.add_argument("--env-file", default=argparse.SUPPRESS, metavar="PATH", help="Use a custom .env file")
     return parser
 
@@ -68,9 +70,15 @@ def _transport_options(parser: argparse.ArgumentParser) -> None:
 
 def _config_for(args: argparse.Namespace) -> GryphonConfig:
     """Reuse one validated settings instance across composed commands."""
+    from gryphon.cli_setup import load_stdio_config
+
     config = getattr(args, "_config", None)
     if not isinstance(config, GryphonConfig):
-        config = load_config(getattr(args, "env_file", None))
+        loader = load_stdio_config if getattr(args, "command", None) == "stdio" else load_config
+        if getattr(args, "command", None) == "saas":
+            config = load_config(getattr(args, "env_file", None), discover_env=False)
+        else:
+            config = loader(getattr(args, "env_file", None))
         args._config = config
     return config
 
@@ -202,9 +210,13 @@ async def _serve_started(args: argparse.Namespace, config: GryphonConfig) -> int
 
 async def _cmd_run(args: argparse.Namespace) -> int:
     """Compile exactly once and serve using the same validated settings."""
+    from gryphon.cli_setup import prepare_stdio_state
+
     config = _config_for(args)
     if not _prepare_transport(args, config):
         return 1
+    if args.command == "stdio":
+        await asyncio.to_thread(prepare_stdio_state, config)
     if await _cmd_compile(args):
         return 1
     return await _cmd_serve(args, compiled=True)
@@ -216,6 +228,15 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
     sys.stdout.write(doctor_report(_config_for(args), getattr(args, "env_file", None)) + "\n")
     return 0
+
+
+async def _cmd_saas(args: argparse.Namespace) -> int:
+    """Start the hosted application with explicit environment-only operator settings."""
+    from gryphon.saas import serve
+    from gryphon.saas_config import SaaSConfig
+
+    options: dict[str, Any] = {"_env_file": getattr(args, "env_file", None)}
+    return await serve(SaaSConfig(**options), _config_for(args))
 
 
 def main() -> None:
@@ -233,8 +254,9 @@ def main() -> None:
     try:
         # Load .env into os.environ early so vault.py can read server credentials.
         # override=False means explicit env vars always win over .env values.
-        env_file_path = args.env_file if args.env_file else str(_ENV_FILE)
-        load_dotenv(env_file_path, override=False)
+        env_file_path = args.env_file if args.env_file is not None else str(_ENV_FILE)
+        if args.command not in {"stdio", "saas"} or args.env_file is not None:
+            load_dotenv(env_file_path, override=False)
         # Load config early for log level
         config = _config_for(args)
         setup_logging(config.log_level)
@@ -243,6 +265,8 @@ def main() -> None:
             "compile": _cmd_compile,
             "serve": _cmd_serve,
             "run": _cmd_run,
+            "stdio": _cmd_run,
+            "saas": _cmd_saas,
             "doctor": _cmd_doctor,
         }
         exit_code = asyncio.run(command_map[args.command](args))

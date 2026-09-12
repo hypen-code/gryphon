@@ -158,6 +158,40 @@ _BLOCKED_ATTRIBUTES: frozenset[str] = frozenset(
 )
 
 
+def available_imports() -> list[str]:
+    """Return sorted selectable offline module names, excluding compiler directives.
+
+    Returns:
+        A detached list of existing standard and numeric profile names. This is
+        a static policy inventory, not a probe of installed host packages.
+    """
+    return sorted((_ALLOWED_MODULES | _NUMERIC_PROFILE_MODULES) - {"__future__"})
+
+
+def configured_imports(modules: list[str] | None) -> frozenset[str]:
+    """Resolve a narrowing-only offline profile and reject invalid configuration.
+
+    Args:
+        modules: None preserves the full existing profile; an empty list denies
+            imports. Explicit names must exactly match existing allowed modules.
+
+    Returns:
+        Immutable deduplicated module names, retaining __future__ compatibility.
+
+    Raises:
+        SecurityViolationError: The setting is malformed or attempts to widen policy.
+    """
+    maximum = _ALLOWED_MODULES | _NUMERIC_PROFILE_MODULES
+    if modules is None:
+        return maximum
+    if not isinstance(modules, list) or any(not isinstance(module, str) for module in modules):
+        raise SecurityViolationError("Invalid offline import profile")
+    selected = frozenset(modules)
+    if not selected <= maximum:
+        raise SecurityViolationError("Invalid offline import profile")
+    return selected
+
+
 class ASTGuard:
     """Static analyzer; runtime isolation remains the authoritative security boundary."""
 
@@ -166,13 +200,16 @@ class ASTGuard:
         code: str,
         context: str = "",
         additional_allowed_modules: frozenset[str] = frozenset(),
+        *,
+        allowed_modules: frozenset[str] | None = None,
     ) -> None:
-        """Validate Python with an optional server-owned offline numeric import grant.
+        """Validate Python with an optional narrowing of the server-owned import grant.
 
         Args:
             code: Python source code to validate.
             context: Compatibility context, never logged as untrusted text.
             additional_allowed_modules: Only numpy/pandas, chosen by the Docker executor.
+            allowed_modules: Exact subset of the granted profile; empty denies imports.
 
         Raises:
             SecurityViolationError: If a blocked pattern or invalid profile is found.
@@ -182,11 +219,16 @@ class ASTGuard:
             or not additional_allowed_modules <= _NUMERIC_PROFILE_MODULES
         ):
             raise SecurityViolationError("Invalid offline import profile")
+        maximum = _ALLOWED_MODULES | additional_allowed_modules
+        if allowed_modules is not None and (
+            not isinstance(allowed_modules, frozenset) or not allowed_modules <= maximum
+        ):
+            raise SecurityViolationError("Invalid offline import profile")
         try:
             tree = ast.parse(code, mode="exec")
         except (SyntaxError, RecursionError, ValueError):
             raise SecurityViolationError("Invalid Python syntax") from None
-        visitor = _SecurityVisitor(_ALLOWED_MODULES | additional_allowed_modules)
+        visitor = _SecurityVisitor(maximum if allowed_modules is None else allowed_modules)
         visitor.visit(tree)
         if visitor.violations:
             violation = visitor.violations[0]

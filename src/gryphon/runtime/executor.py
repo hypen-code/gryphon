@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING, Any
 from gryphon.errors import CacheError, CapacityError, ConflictError, ExecutionError
 from gryphon.models import ExecutionResult, ExecutionScope, RunRecord
 from gryphon.runtime.artifacts import ArtifactStore
-from gryphon.runtime.execution_cleanup import acquire_slot, finish_cleanup
+from gryphon.runtime.execution_cleanup import SlotLease, finish_cleanup
 from gryphon.runtime.execution_results import bound_result, fingerprint
 from gryphon.runtime.execution_results import failure as _failure
-from gryphon.runtime.execution_validation import prepare_source, request_digest, validate_request
+from gryphon.runtime.execution_validation import effective_imports, prepare_source, request_digest, validate_request
 from gryphon.runtime.recovery_lease import RecoveryLease
 from gryphon.runtime.runs import RunStore
 from gryphon.runtime.sandboxes import DockerSandbox, RestrictedSandbox
@@ -50,6 +50,8 @@ class CodeExecutor:
         registry: Registry,
         broker: ToolBroker | None = None,
         runs: RunStore | None = None,
+        *,
+        execution_slots: asyncio.Semaphore | None = None,
     ) -> None:
         """Configure services without performing I/O.
 
@@ -59,6 +61,7 @@ class CodeExecutor:
             registry: Loaded authoritative capability catalog.
             broker: Host broker; constructed here when omitted, closed on shutdown.
             runs: Run ledger; this executor exclusively owns its recovery lifecycle.
+            execution_slots: Optional hosted capacity shared across channel executors.
         """
         self._config: GryphonConfig = config
         self._cache, self._registry = cache, registry
@@ -74,6 +77,7 @@ class CodeExecutor:
         )
         self._ast_guard = ASTGuard()
         self._semaphore = asyncio.Semaphore(config.max_concurrent_executions)
+        self._execution_slots = execution_slots
         self._admission = asyncio.Lock()
         self._jobs: dict[str, asyncio.Task[ExecutionResult]] = {}
         self._scopes: dict[str, ExecutionScope] = {}
@@ -94,6 +98,7 @@ class CodeExecutor:
             if self._started:
                 return
             try:
+                effective_imports(self._config)
                 self._lease.acquire()
                 await self._runs.initialize()
                 await self._runs.recover_interrupted()
@@ -313,9 +318,11 @@ class CodeExecutor:
         return prepare_source(code, self._config.sandbox_mode), values, contract
 
     def _guard(self, code: str) -> None:
-        """Grant only the fixed numeric import profile, never caller-selected modules."""
+        """Recheck the narrowing-only import policy on every execution and replay."""
         modules = _DOCKER_MODULES if self._config.sandbox_mode == "docker" else frozenset()
-        self._ast_guard.validate(code, additional_allowed_modules=modules)
+        self._ast_guard.validate(
+            code, additional_allowed_modules=modules, allowed_modules=effective_imports(self._config)
+        )
 
     async def _work(
         self,
@@ -329,11 +336,11 @@ class CodeExecutor:
         identity: str,
     ) -> ExecutionResult:
         """Bound queue wait, execute once, and durably persist a terminal receipt."""
-        started, acquired, status = time.monotonic(), False, None
+        started, slots, status = time.monotonic(), SlotLease(self._semaphore, self._execution_slots), None
         try:
-            await acquire_slot(self._semaphore, scope.deadline)
-            acquired = True
+            await slots.acquire_local(scope.deadline)
             await self._runs.start(record.id, record.owner)
+            await slots.acquire_shared(scope.deadline)
             if identity != self._fingerprint():
                 raise ConflictError("Catalog or execution profile changed after admission")
             duration = self._config.execution_timeout_seconds
@@ -345,6 +352,7 @@ class CodeExecutor:
                 result.run_id, result.tool_calls = record.id, scope.calls
                 result.execution_time_ms = int((time.monotonic() - started) * 1000)
                 result = await bound_result(result, record.owner, self._config, self.artifacts)
+                slots.release_shared()
                 # Cache on success
                 if result.success and self._config.cache_enabled:
                     result.cache_id = await self._cache.store(
@@ -362,8 +370,7 @@ class CodeExecutor:
             result = _failure(exc, record.id)
         finally:
             scope.cancelled = True
-            if acquired:
-                self._semaphore.release()
+            slots.release()
         result.run_id, result.tool_calls = record.id, scope.calls
         await finish_cleanup(self._runs.finish(record.id, record.owner, result, status=status))
         return result

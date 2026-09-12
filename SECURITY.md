@@ -15,10 +15,13 @@ with maintainers; this document makes no guaranteed response-time commitment.
 
 ## Threat model
 
-Gryphon is an API-agent backend for a **trusted local operator**. Agent code,
-OpenAPI descriptions, skills guides, tool inputs, and upstream data are
-untrusted. The host process, its configuration, catalog storage, and credential
-vault are inside the trusted computing boundary. Protect the host accordingly.
+Gryphon is an API-agent backend with local/operator modes and **admin-managed
+hosted tenants and channels**. Agent code, uploaded OpenAPI descriptions, skills
+guides, tool inputs, and upstream data are untrusted. The host process, operator
+configuration, control database, catalog storage, and local-mode credential
+vault are trusted. Hosted tenant/channel identity is server-verified, not a claim
+from tool arguments. The administrator controls every tenant: this is not
+self-service identity federation or an independently certified SaaS boundary.
 
 The default runtime is a bounded Python subset in **pydantic-monty 0.0.18**,
 not host CPython. The only external capability is an asynchronous broker call
@@ -141,7 +144,57 @@ The HTTP listener defaults to loopback. Before public exposure, require a
 network, and operational controls. Do not mistake bearer authentication for
 transport encryption or a complete public hosting security model.
 
-### 7. Optional Docker is offline computation only
+### 7. Hosted administration and channels
+
+`gryphon saas` uses independent `GRYPHON_SAAS_ADMIN_TOKEN` (at least 32 random
+characters), `GRYPHON_SAAS_DATABASE_URL`, and `GRYPHON_SAAS_PUBLIC_ORIGIN` settings.
+Like `gryphon stdio`, it reads no ambient dotenv; `--env-file` must be explicit.
+Stdio derives private source-scoped paths below an optional absolute
+`GRYPHON_STATE_DIR`, or the XDG/home state directory, without package writes.
+Protect explicit storage overrides and stop competing processes using a ledger.
+
+Hosted `/api/login` exchanges the operator's bootstrap token for a bounded,
+in-memory administrator session. Cookies are Secure, HttpOnly, SameSite=Strict;
+mutations require the session-bound CSRF token. Sessions expire and are lost
+on restart. Canonical Host and browser Origin checks, CSP, no-store responses,
+request-size/deadline/concurrency limits, and bounded login/request rate limits
+complement authentication; they are not comprehensive public-service DDoS defense.
+Plain HTTP requires **both** a loopback canonical origin and explicit
+`GRYPHON_SAAS_ALLOW_INSECURE_HTTP=true`; that development exception removes Secure
+cookies. Never use it for public traffic. Public deployments need manual TLS
+termination preserving canonical Host; forwarded proxy headers are not trusted.
+
+Each `/mcp/{channelUUID}` request authenticates a channel key against the control
+database and verifies tenant/channel status. Keys are shown once when generated,
+stored only as hashes, and cannot access the administrator API. Rotate lost keys;
+revocation, tenant disable, and policy revision invalidate runtime authority.
+Multiple clients with the same channel key share that channel's ownership.
+Admin sessions can manage all tenants; there are no tenant-user login, invitation,
+SSO, or scoped administrator roles. Keep the admin credential out of MCP clients.
+
+Uploaded JSON/YAML versions are immutable and tenant-bound. External references,
+environment interpolation, and caller-supplied host paths/auth configuration are
+rejected. The compiler constructs **read-only** sources and the channel runtime
+disables writes regardless of base permits. Hosted upstream access is currently
+**public-API-only**: broker host environment credential/header inheritance is
+explicitly disabled. No tenant credential vault or secret manager is implemented.
+Base AST, execution, egress, output, and ownership restrictions still apply.
+A manager-owned execution budget is shared across channels, including background
+runs and result serialization; independent bounded channel queues remain in place.
+Channel state directories are created private (0700) before opening SQLite;
+existing non-private or foreign-owned channel directories are rejected.
+Docker channel settings can only narrow the approved preinstalled import list;
+restricted mode permits no imports. No arbitrary pip installation is supported.
+
+Exactly **one hosted worker per database** is enforced by an exclusive lease.
+PostgreSQL holds tenant/channel metadata, immutable specs, hashed keys, aggregate
+usage, and audit events. Recipe source, run receipts, and artifacts remain in
+private per-channel local storage, not PostgreSQL. Both stores may contain
+sensitive information; hashed keys do not imply encryption at rest. Do not scale
+replicas or replace the local volume with an unreviewed network filesystem.
+`/health` checks database readiness only—not all channels, TLS, or API reachability.
+
+### 8. Optional Docker is offline computation only
 
 Docker is not required for normal restricted execution. If selected explicitly,
 it requires a reachable daemon, existing image, and the configured runtime
@@ -157,9 +210,12 @@ Each run creates its own container with:
 - bounded execution/output and cleanup of only the executor's own containers.
 
 AST policy remains active even with CPython libraries. This is not unrestricted
-host execution. The default Compose service instead runs the restricted profile,
-uses named storage volumes and a non-root host process, and mounts no Docker
-socket. Its TCP health check is not authenticated protocol readiness.
+host execution. Both shipped Compose modes use restricted execution, named
+storage volumes, non-root application processes, and no Docker socket. Legacy
+HTTP's TCP check is not authenticated readiness; hosted `/health` checks the DB.
+Hosted Docker additionally requires operator `GRYPHON_SAAS_DOCKER_ENABLED=true`
+and separately provisioned daemon access/image/runsc; the UI does not provision
+infrastructure or install arbitrary libraries.
 
 ## Persistence, cancellation, and external effects
 
@@ -179,7 +235,17 @@ upstream idempotency, and operator reconciliation remain separate concerns.
 
 ## Operator checklist
 
-- Run one process per run database under a dedicated, least-privileged OS user.
+- Run one process per run database and one hosted worker per control database
+  under dedicated least-privileged OS/database users. The included PostgreSQL
+  container is a dedicated instance; restrict its credentials/network access.
+- Back up hosted PostgreSQL **and** the local channel-state volume together while
+  the worker is stopped. Protect backups and test restoring both to one worker;
+  a database-only backup loses recipes/receipts/artifacts. Backup scheduling,
+  encryption, TLS termination, certificate renewal, and incident response are
+  manual operator responsibilities, not automatic platform features.
+- Keep the database password explicit and URL-safe in the hosted Compose profile.
+  It has no external DB port. Changing an env value does not rotate an initialized
+  PostgreSQL role's password; coordinate DB and application credential changes.
 - Review trusted catalogs and auth configuration; keep secrets in private env
   files or the operator environment, never committed YAML or client examples.
 - Leave private-network access and writes disabled unless deliberately required.
@@ -207,5 +273,7 @@ A compromised host/operator, malicious behavior inside an already authorized
 upstream service, and deployment outside the documented trust model cannot be
 made safe by tool annotations or AST filtering. Third-party vulnerabilities that
 affect Gryphon should be coordinated with both maintainers and upstream. No
-claim is made of multi-tenant cloud readiness, formal isolation verification,
-exactly-once effects, or protection against all side channels.
+claim is made of complete SaaS certification, zero vulnerabilities, formal
+isolation verification, exactly-once effects, or protection against all side
+channels. Admin-managed tenancy is implemented, but HA/horizontal scaling,
+billing, SSO, user invitations, and tenant upstream secret management are not.

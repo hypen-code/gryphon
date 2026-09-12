@@ -23,6 +23,8 @@ from gryphon.models import EndpointManifest, ServerManifest, ServerSpec, Swagger
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from gryphon.config import GryphonConfig
 
 logger = get_logger(__name__)
@@ -54,6 +56,8 @@ class Orchestrator(ClientConfigSupport):
 
     def load_swagger_sources(self) -> list[SwaggerSource]:
         """Load sources, rejecting malformed or normalization-colliding names without exposing auth."""
+        if self._config.swaggers is not None:
+            return self._validate_sources(self._config.swaggers)
         path = Path(self._config.swagger_config_file)
         if not path.exists():
             logger.warning("swagger_config_not_found")
@@ -66,9 +70,14 @@ class Orchestrator(ClientConfigSupport):
             return []
         if not isinstance(raw, dict) or not isinstance(raw.get("servers", []), list):
             raise CompileError("Swagger config must contain a servers list")
+        return self._validate_sources(raw.get("servers", []))
+
+    @staticmethod
+    def _validate_sources(entries: Sequence[object]) -> list[SwaggerSource]:
+        """Apply identical source and name validation to environment and YAML inputs."""
         sources: list[SwaggerSource] = []
         names: set[str] = set()
-        for entry in raw.get("servers", []):
+        for entry in entries:
             try:
                 source = SwaggerSource.model_validate(entry)
                 name = module_name(source.name)

@@ -19,7 +19,7 @@ jobs:
           cache: pip
 
       - run: python -m pip install uv==0.12.9
-      - run: uv sync --frozen --extra dev
+      - run: uv sync --frozen --extra dev --extra saas
 
       - name: ruff check
         shell: bash
@@ -52,7 +52,7 @@ jobs:
           cache: pip
 
       - run: python -m pip install uv==0.12.9
-      - run: uv sync --frozen --extra dev
+      - run: uv sync --frozen --extra dev --extra saas
 
       - name: mypy
         shell: bash
@@ -78,7 +78,7 @@ jobs:
           cache: pip
 
       - run: python -m pip install uv==0.12.9
-      - run: uv sync --frozen --extra dev
+      - run: uv sync --frozen --extra dev --extra saas
 
       - name: pytest
         shell: bash

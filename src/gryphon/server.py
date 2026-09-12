@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
+from fastmcp.server.auth import StaticTokenVerifier, TokenVerifier
 
 from gryphon.errors import InputValidationError
 from gryphon.runtime.context import (
@@ -350,6 +350,8 @@ def create_server(
     registry: Registry | None = None,
     cache: CacheStore | None = None,
     executor: CodeExecutor | None = None,
+    *,
+    auth: TokenVerifier | None = None,
 ) -> FastMCP:
     """Create the server without importing generated host code or initializing supplied objects.
 
@@ -358,6 +360,7 @@ def create_server(
         registry: Preloaded CLI-owned registry, or None for lifespan-owned loading.
         cache: Initialized CLI-owned cache, or None for lifespan-owned initialization/close.
         executor: Started CLI-owned engine, or None for lifespan-owned startup/shutdown.
+        auth: Explicit trusted verifier for hosted ownership, overriding the static operator token.
 
     Returns:
         FastMCP server using SDK protocol negotiation and native structured tool results.
@@ -374,7 +377,7 @@ def create_server(
     mcp = FastMCP(
         name="Gryphon",
         instructions=_BASE_INSTRUCTIONS,
-        auth=_token_verifier(config),
+        auth=auth if auth is not None else _token_verifier(config),
         lifespan=deps.lifespan,
         tasks=False,
         mask_error_details=True,

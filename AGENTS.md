@@ -17,9 +17,12 @@ use `GRYPHON_`. Installation is from the checkout, not a claimed PyPI release.
 Keep the actual repository URL:
 `https://github.com/hypen-code/gryphon`.
 
-The implemented deployment is **single-process, local/operator managed**.
-Owner-scoped storage is not a completed multi-tenant SaaS. Persistent receipts
-are not exactly-once external effects or a resumable workflow engine.
+Deployments include **local stdio, operator-token HTTP, and admin-managed hosted
+tenants/channels**. Hosted mode has exactly one active worker per control database,
+enforced by a lease; it is not horizontal/HA SaaS, billing, SSO, or user invitations.
+PostgreSQL holds control metadata, key hashes, aggregate usage, and audit only;
+per-channel recipes/receipts/artifacts remain on private local persistent storage.
+Persistent receipts are not exactly-once effects or a resumable workflow engine.
 
 ## 2. Locked technology and reproducibility
 
@@ -32,7 +35,8 @@ are not exactly-once external effects or a resumable workflow engine.
 | Optional execution | Offline per-run Docker via `aiodocker`; `runsc` default |
 | Configuration | `GryphonConfig`, pydantic-settings, `SecretStr` for HTTP token |
 | HTTP | Broker-owned `httpx`, DNS pinning, verified origin-specific pools |
-| State | SQLite/`aiosqlite` recipes and receipts; private JSON artifacts |
+| State | SQLite/`aiosqlite` recipes/receipts and private artifacts; hosted PostgreSQL control plane only |
+| Hosted dependencies | `saas` extra; pure `psycopg==3.2.9` requires system libpq |
 | Compiler | Deterministic manifests and Jinja2 SDK documentation |
 | Logging | `structlog`, structured safe metadata to stderr |
 | Quality | Ruff, strict mypy, pytest/pytest-asyncio, mandatory coverage gate |
@@ -48,6 +52,11 @@ must fail explicitly, not call a provider or silently change compilation.
 | Location | Responsibility |
 |---|---|
 | `src/gryphon/__main__.py` | CLI parsing, env selection, transport preflight, lifecycle |
+| `src/gryphon/cli_setup.py` | Environment-only stdio, private source-scoped user state |
+| `src/gryphon/saas.py`, `saas_config.py` | Single-worker hosted lifecycle and explicit operator settings |
+| `src/gryphon/saas_api.py`, `saas_auth.py`, `saas_http.py` | Admin sessions, CSRF, bounded HTTP and UI API |
+| `src/gryphon/saas_store.py`, `saas_database.py` | Tenant control metadata, hashed keys, quotas and worker lease |
+| `src/gryphon/saas_gateway.py`, `saas_runtime.py`, `saas_catalog.py` | Verified channel auth, isolated runtimes, read-only uploaded catalogs |
 | `src/gryphon/cli_doctor.py` | Read-only, allowlisted JSON diagnostics |
 | `src/gryphon/cli_clean.py` | Recognized-output archival, never arbitrary deletion |
 | `src/gryphon/config.py` | Validated operator settings |
@@ -117,6 +126,13 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 - `submit_code`/`get_run`/`cancel_run` are application handles. Keep native MCP
   Tasks disabled and unadvertised until a real protocol implementation exists.
 - `readOnlyHint` is metadata, never an authorization decision.
+- `stdio` consumes JSON `GRYPHON_SWAGGERS`, permits empty-catalog compute, and
+  derives private source-scoped user state under optional absolute `GRYPHON_STATE_DIR`.
+  `stdio` and `saas` must not discover ambient dotenv; only explicit `--env-file`.
+- Hosted UI `/`, admin `/api`, DB-readiness `/health`, and per-channel
+  `/mcp/{channelUUID}` are distinct surfaces. Channel bearer keys cannot administer
+  tenants; administrator sessions require HttpOnly/SameSite=Strict cookies and CSRF.
+  Secure cookies/HTTPS are mandatory except explicitly selected loopback development.
 - Successful standalone `compile` (including unchanged catalogs) prints non-secret
   MCP client JSON to stdout; logs stay on stderr. Dry runs, failures, and startup
   compilation inside `serve`/`run` must not emit client JSON on MCP stdout.
@@ -164,7 +180,15 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 6. HTTP startup requires a token of at least 32 characters. Derive owner from
    verified auth, not arguments/headers containing unverified identity. Current
    static auth maps to `operator`; stdio uses trusted `local`. Public deployment
-   needs TLS termination and additional operator controls.
+   needs TLS termination and additional operator controls. Hosted channel identity
+   must come from database-verified keys/status, never the URL alone or client claims.
+7. Hosted catalogs are read-only, with no source-auth or host credential/header
+   inheritance; current upstream support is public APIs only. Do not invent a
+   tenant secret manager. Uploaded versions are immutable and tenant-bound; deny
+   external references, environment interpolation, and caller-selected host paths.
+8. Hosted Docker requires explicit operator enablement and manually provisioned
+   daemon/image/runsc. Channel imports only narrow preinstalled approved libraries;
+   no arbitrary pip installs. Shipped Compose profiles must not mount a Docker socket.
 
 ### Persistence and cleanup
 
@@ -182,6 +206,10 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
    config; reject links, unknown content, overlapping paths, and DB sidecars.
 6. Close all partially initialized dependencies. Do not use process-global
    mutable state for credentials or execution authority.
+7. Hold the hosted control-database lease for the entire single-worker lifespan.
+   PostgreSQL control metadata does not replace per-channel local run-ledger locks
+   or store execution data. Operators must stop the worker and coordinate backups
+   of PostgreSQL and private local state; no automatic HA/backup guarantee exists.
 
 ## 6. Code quality
 
@@ -217,19 +245,31 @@ checks, or weaken controls to make a run pass. Regressions need fixes and tests.
 Report actual command results, not invented test counts or performance numbers.
 
 ```bash
-uv sync --frozen --extra dev
-uv run --frozen ruff check src/ tests/
-uv run --frozen ruff format --check src/ tests/
-uv run --frozen mypy --strict src/ tests/
-uv run --frozen pytest --cov-fail-under=90
-uv run --frozen pre-commit install
-uv run --frozen pre-commit run --all-files
+uv sync --frozen --extra dev --extra saas
+uv run --frozen --extra saas ruff check src/ tests/
+uv run --frozen --extra saas ruff format --check src/ tests/
+uv run --frozen --extra saas mypy --strict src/ tests/
+uv run --frozen --extra saas pytest --cov-fail-under=90
+uv run --frozen --extra saas pre-commit install
+uv run --frozen --extra saas pre-commit run --all-files
 ```
 
-Local pre-commit hooks invoke `uv run --frozen`; mypy covers `src` and `tests`,
-and `pytest-coverage` enforces `--cov=gryphon --cov-fail-under=90`. Do not bypass
-hooks with `--no-verify` or disable the coverage gate.
+Local pre-commit hooks invoke locked `uv run --frozen` commands; mypy and pytest
+include `--extra saas`. Mypy covers `src` and `tests`, and `pytest-coverage`
+enforces `--cov=gryphon --cov-fail-under=90`. Do not bypass hooks with
+`--no-verify` or disable the coverage gate.
 
+- Install `--extra saas` and system libpq even for default tests: hosted modules
+  are imported during collection. Normal tests need no live PostgreSQL.
+- `GRYPHON_TEST_POSTGRES=1 uv run --frozen --extra saas pytest tests/integration/test_saas_postgres.py`
+  opts into disposable PostgreSQL 17.6 Docker tests with temporary storage, generated
+  credentials, and a loopback port. Read the fixture first; never use an operator
+  database URL or run Compose with real operator env/config for verification.
+- `GRYPHON_TEST_HOSTED_DOCKER=1 uv run --frozen --extra saas pytest tests/integration/test_saas_container.py`
+  builds the shipped image and verifies a disposable hosted Compose stack with
+  PostgreSQL, real MCP calls, and UI assets. It removes only its own test resources.
+- Hosted runtime managers share the operator's `max_concurrent_executions` budget
+  across channels; retain independent per-channel admission queues and store ownership.
 - Normal tests need no live Docker or upstream service. Use `tmp_path` for all
   files/databases and isolated settings with `_env_file=None`; never touch an
   operator's compiled catalog, cache, receipts, artifacts, or secrets.
@@ -246,7 +286,7 @@ hooks with `--no-verify` or disable the coverage gate.
   including HTTP authentication, structured results, and no Tasks advertising.
 - `tests/unit/test_cli_lifecycle.py` also runs real CLI compilation, stdio, and
   the shipped demo using temporary configuration/stores and no upstream calls.
-  Run it with `uv run --frozen pytest tests/unit/test_cli_lifecycle.py`.
+  Run it with `uv run --frozen --extra saas pytest tests/unit/test_cli_lifecycle.py`.
 - Live offline Docker smoke tests are opt-in with `GRYPHON_TEST_DOCKER=1` after
   building `gryphon-sandbox:2.0.0`. They explicitly choose `runc` for benign
   transport checks, **not proof of gVisor isolation**. Never change deployment
@@ -268,5 +308,6 @@ hooks with `--no-verify` or disable the coverage gate.
 6. Run lint, format check, strict types, full tests with the 90% floor, and hooks.
    Report blockers truthfully with reproduction steps; a failing gate is not done.
 7. Summarize files changed, validation actually run, and remaining risks. Do not
-   claim multi-tenant readiness, exactly-once behavior, automatic crash resume,
-   published distributions, isolation certification, or unmeasured speedups.
+   claim complete SaaS/HA readiness, exactly-once behavior, automatic crash resume,
+   published distributions, zero vulnerabilities, isolation certification, or
+   unmeasured speedups. Document implemented admin-managed tenancy precisely.

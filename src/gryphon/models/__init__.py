@@ -325,3 +325,70 @@ class ArtifactRecord(BaseModel):
     size_bytes: int
     sha256: str
     media_type: str = "application/json"
+
+
+class Tenant(BaseModel):
+    """Administrative tenant identity; disabled tenants cannot authenticate."""
+
+    id: str
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    created_at: float
+
+
+class SaaSSpec(BaseModel):
+    """Immutable tenant-owned canonical JSON specification."""
+
+    id: str
+    tenant_id: str
+    name: str = Field(min_length=1, max_length=128)
+    document: dict[str, Any] = Field(default_factory=dict, repr=False)
+    sha256: str
+    created_at: float
+
+
+class Channel(BaseModel):
+    """Server-owned execution namespace and revisioned channel configuration."""
+
+    id: str
+    tenant_id: str
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    spec_ids: list[str] = Field(default_factory=list, max_length=100)
+    sandbox_mode: Literal["restricted", "docker"] = "restricted"
+    allowed_imports: list[str] = Field(default_factory=list, max_length=100)
+    revision: int = 1
+    key_active: bool = False
+    created_at: float
+
+
+class ChannelUsage(BaseModel):
+    """Aggregate counters with no request, code, result, or credential content."""
+
+    channel_id: str
+    tool: str
+    status: Literal["success", "error"]
+    calls: int
+    latency_ms: float
+
+
+AuditEvent = Literal[
+    "tenant_created",
+    "tenant_disabled",
+    "tenant_enabled",
+    "spec_created",
+    "channel_created",
+    "channel_updated",
+    "key_rotated",
+    "key_revoked",
+]
+
+
+class AdminAudit(BaseModel):
+    """Static administrative event containing only server-owned identifiers."""
+
+    id: str
+    tenant_id: str
+    channel_id: str | None = None
+    event: AuditEvent
+    created_at: float
