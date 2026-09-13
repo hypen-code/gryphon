@@ -18,7 +18,7 @@ from gryphon.security.encoding import encode_request, validate_arguments
 from gryphon.security.network import NetworkClient, PinnedTransport, resolve_addresses
 from gryphon.security.policies import validated_url
 from gryphon.security.response import validate_response
-from gryphon.security.schema import validate_contract
+from gryphon.security.schema import check_schema, validate_contract
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -120,6 +120,57 @@ def test_unsafe_or_invalid_schema_fails_sanitized(schema: dict[str, Any]) -> Non
     """Equality work and malformed contracts cannot bypass schema admission."""
     with pytest.raises(ExecutionError, match="^Upstream response violated its declared schema$"):
         validate_response({}, schema, {})
+
+
+@pytest.mark.parametrize(
+    ("schema", "value"),
+    [
+        ({"type": "string"}, None),
+        ({"type": "number"}, None),
+        ({"type": "integer"}, None),
+        ({"type": "boolean"}, None),
+        ({"type": "array", "items": {"type": "string"}}, None),
+        ({"type": "object", "required": ["count"], "properties": {"count": {"type": "integer"}}}, {"count": None}),
+        ({"type": "string", "enum": ["approved"]}, None),
+        ({"type": "string", "const": "fixed"}, None),
+        (
+            {"type": "object", "properties": {"nested": {"type": "array", "items": {"type": "number"}}}},
+            {"nested": None},
+        ),
+    ],
+)
+def test_output_contract_accepts_null_for_declared_values(schema: dict[str, Any], value: Any) -> None:
+    """Upstreams that return null for typed fields must not fail the whole response."""
+    assert validate_response(value, schema, {}) == value
+
+
+@pytest.mark.parametrize("value", [{"count": "not-an-integer"}, {"count": 1.5}, {"count": True}])
+def test_output_contract_still_rejects_wrong_non_null_types(value: dict[str, Any]) -> None:
+    """Null tolerance does not relax validation of any present, non-null value."""
+    schema = {"type": "object", "required": ["count"], "properties": {"count": {"type": "integer"}}}
+    with pytest.raises(ExecutionError, match="^Upstream response violated its declared schema$"):
+        validate_response(value, schema, {})
+
+
+def test_input_contract_keeps_rejecting_null_for_non_nullable_fields() -> None:
+    """Input validation remains strict; only output contracts tolerate null."""
+    with pytest.raises(ValueError, match="does not match declared schema"):
+        validate_contract({"wire-name": None}, _endpoint({"type": "string"}).input_schema)
+
+
+def test_output_work_budget_ignores_documentation_annotations() -> None:
+    """Description-heavy contracts must not reject legitimate large upstream arrays."""
+    properties = {f"x{index}": {"type": "integer", "description": "d" * 400} for index in range(300)}
+    schema = {"type": "array", "items": {"type": "object", "properties": properties}}
+    value: list[Any] = [{} for _ in range(1800)]
+    assert validate_response(value, schema, {}) == value
+
+
+def test_check_schema_counts_only_validation_relevant_nodes() -> None:
+    """Annotation keywords never inflate the validation-work admission count."""
+    annotated = {"type": "object", "properties": {"a": {"type": "string", "title": "T", "description": "d" * 1000}}}
+    plain = {"type": "object", "properties": {"a": {"type": "string"}}}
+    assert check_schema(annotated) == check_schema(plain)
 
 
 def test_wide_output_has_bounded_rejection() -> None:

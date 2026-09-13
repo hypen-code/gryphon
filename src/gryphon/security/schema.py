@@ -48,6 +48,9 @@ _ALLOWED_KEYWORDS = frozenset(
         "deprecated",
     }
 )
+_ANNOTATION_KEYWORDS = frozenset(
+    {"title", "description", "default", "examples", "example", "format", "readOnly", "writeOnly", "deprecated"}
+)
 
 
 def walk_json(value: Any, max_nodes: int = _MAX_DATA_NODES, max_depth: int = _MAX_DATA_DEPTH) -> Iterator[Any]:
@@ -94,9 +97,9 @@ def check_schema(schema: dict[str, Any]) -> int:
         schema: A normalized, local-only supported JSON Schema.
 
     Returns:
-        Bounded schema node count for validation-work admission.
+        Bounded count of validation-relevant schema nodes for work admission.
     """
-    count = sum(1 for _ in walk_json(schema, _MAX_SCHEMA_NODES, _MAX_SCHEMA_DEPTH))
+    sum(1 for _ in walk_json(schema, _MAX_SCHEMA_NODES, _MAX_SCHEMA_DEPTH))
     pending = [schema]
     while pending:
         node = pending.pop()
@@ -117,7 +120,24 @@ def check_schema(schema: dict[str, Any]) -> int:
         Draft202012Validator.check_schema(schema)
     except (SchemaError, ValueError, TypeError, RecursionError):
         raise ValueError("Invalid JSON schema") from None
-    return count
+    return sum(1 for _ in walk_json(_validation_schema(schema), _MAX_SCHEMA_NODES, _MAX_SCHEMA_DEPTH))
+
+
+def _validation_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Copy a schema without documentation-only keywords that never affect validation."""
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in _ANNOTATION_KEYWORDS:
+            continue
+        if key == "properties" and isinstance(value, dict):
+            result[key] = {
+                name: _validation_schema(child) if isinstance(child, dict) else child for name, child in value.items()
+            }
+        elif key in ("items", "additionalProperties") and isinstance(value, dict):
+            result[key] = _validation_schema(value)
+        else:
+            result[key] = value
+    return result
 
 
 def _check_scalar_choices(schema: dict[str, Any]) -> None:
@@ -132,16 +152,20 @@ def _check_scalar_choices(schema: dict[str, Any]) -> None:
             raise ValueError("Complex schema enums are unsupported")
 
 
-def validate_contract(value: Any, schema: dict[str, Any]) -> None:
+def validate_contract(value: Any, schema: dict[str, Any], *, allow_null: bool = False) -> None:
     """Apply the shared bounded contract without reflecting values or schema text.
 
     Args:
         value: Strict JSON input or output value.
         schema: Supported normalized schema; an empty schema permits any bounded JSON.
+        allow_null: Accept JSON null for any declared value. Upstream responses routinely
+            return null for fields a document types without marking nullable; inputs stay strict.
     """
     data_nodes = sum(1 for _ in walk_json(value))
     if not schema:
         return
+    if allow_null:
+        schema = _nullable_schema(schema)
     schema_nodes = check_schema(schema)
     if data_nodes * schema_nodes > _MAX_VALIDATION_WORK:
         raise ValueError("JSON schema validation work exceeds supported limits")
@@ -149,3 +173,27 @@ def validate_contract(value: Any, schema: dict[str, Any]) -> None:
         Draft202012Validator(schema).validate(value)
     except (ValidationError, SchemaError, ValueError, TypeError, RecursionError, ArithmeticError):
         raise ValueError("JSON value does not match declared schema") from None
+
+
+def _nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Copy a bounded schema so every declared value may also be JSON null."""
+    result = dict(schema)
+    kind = result.get("type")
+    if isinstance(kind, str):
+        result["type"] = [kind, "null"] if kind != "null" else "null"
+    elif isinstance(kind, list):
+        result["type"] = list(dict.fromkeys([*kind, "null"]))
+    enum = result.get("enum")
+    if isinstance(enum, list) and None not in enum:
+        result["enum"] = [*enum, None]
+    if "const" in result and result["const"] is not None:
+        result["enum"] = [result.pop("const"), None]
+    properties = result.get("properties")
+    if isinstance(properties, dict):
+        result["properties"] = {
+            key: _nullable_schema(child) if isinstance(child, dict) else child for key, child in properties.items()
+        }
+    for key in ("items", "additionalProperties"):
+        if isinstance(result.get(key), dict):
+            result[key] = _nullable_schema(result[key])
+    return result

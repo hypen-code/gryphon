@@ -18,7 +18,9 @@ def validate_response(value: Any, schema: dict[str, Any], headers: dict[str, str
 
     Args:
         value: Already size-bounded parsed upstream JSON.
-        schema: Normalized output contract; empty means bounded JSON only.
+        schema: Normalized output contract; empty means bounded JSON only. Declared
+            values may also be JSON null, matching real upstreams that return null for
+            fields their document types without marking nullable.
         headers: Host-resolved credential headers, never sandbox supplied.
 
     Returns:
@@ -28,7 +30,7 @@ def validate_response(value: Any, schema: dict[str, Any], headers: dict[str, str
         ExecutionError: On schema mismatch, excessive structure, or credential reflection.
     """
     try:
-        validate_contract(value, schema)
+        validate_contract(value, schema, allow_null=True)
     except (ValueError, RecursionError):
         raise ExecutionError("Upstream response violated its declared schema") from None
     secrets = _secret_values(headers)
