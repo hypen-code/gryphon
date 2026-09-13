@@ -29,6 +29,8 @@ class ClientConfigSupport:
         compiler = Path(__file__).parent
         paths = sorted(compiler.glob("*.py")) + sorted((compiler / "templates").glob("*.j2"))
         paths.append(compiler.parent / "models" / "__init__.py")
+        paths.append(compiler.parent / "models" / "operation_policy.py")
+        paths.append(compiler.parent / "security" / "form_encoding.py")
         digest = hashlib.sha256()
         for path in paths:
             digest.update(path.name.encode())
@@ -42,6 +44,13 @@ class ClientConfigSupport:
             "base_url": source.base_url,
             "swagger_url": source.swagger_url,
             "is_read_only": source.is_read_only,
+            "allowed_read_only_post_operations": sorted(
+                {
+                    permit.model_dump_json()
+                    for permit in self._config.allowed_read_only_post_operations
+                    if permit.server_name == module_name(source.name)
+                }
+            ),
             "top_level_functions": sorted(source.top_level_functions),
             "skills_url": source.skills_url,
             "max_spec_size_bytes": self._config.max_spec_size_bytes,

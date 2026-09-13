@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from gryphon.models import ReadOnlyPostOperation, SwaggerSource
+from gryphon.security.ucp_identity import validate_profile
 
 # Resolve .env with a fallback chain:
 #   1. CWD/.env      — works when the server is launched from the project root
@@ -35,11 +39,14 @@ class GryphonConfig(BaseSettings):
     http_auth_token: SecretStr | None = None
     context_budget_bytes: int = Field(default=16384, ge=1024, le=262144)
     discovery_limit: int = Field(default=10, ge=1, le=100)
+    include_function_summaries: bool = False
 
     # Compiler
     compile_on_startup: bool = True
     compiled_output_dir: str = "./compiled"
     swagger_config_file: str = "./config/swaggers.yaml"
+    swaggers: Annotated[list[SwaggerSource] | None, NoDecode] = Field(default=None, repr=False, validate_default=False)
+    state_dir: str | None = None
     # LiteLLM model string — use provider/model format, e.g.:
     #   openai/gpt-4o  |  anthropic/claude-3-5-sonnet-20241022
     #   gemini/gemini-2.0-flash  |  openrouter/mistralai/mistral-7b-instruct
@@ -57,6 +64,7 @@ class GryphonConfig(BaseSettings):
     network_mode: Literal["none"] = "none"
     # Restricted Python is the default; Docker is an explicit offline compute profile.
     sandbox_mode: Literal["restricted", "docker"] = "restricted"
+    sandbox_allowed_imports: list[str] | None = None
     # Admission is bounded; completed execution environments are never reused.
     max_concurrent_executions: int = Field(default=4, ge=1, le=64)
     queue_timeout_seconds: int = Field(default=5, ge=1, le=60)
@@ -68,7 +76,15 @@ class GryphonConfig(BaseSettings):
     run_db_path: str = "./data/runs.db"
     run_ttl_seconds: int = Field(default=86400, ge=60)
     run_max_entries: int = Field(default=1000, ge=1)
+    # Startup recovery only interrupts active receipts older than this, so concurrent
+    # processes sharing one run ledger keep their live runs. The effective threshold is
+    # never below the maximum possible run duration.
+    run_recovery_stale_seconds: int = Field(default=600, ge=0, le=86400)
 
+    # Stdio servers with no inbound MCP message for this long exit, releasing the advisory
+    # run-ledger lock and resources when a host abandons a connection without closing it.
+    # Zero disables reaping.
+    stdio_idle_timeout_seconds: int = Field(default=1800, ge=0, le=86400)
     # Cache
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=3600, ge=1)
@@ -77,10 +93,13 @@ class GryphonConfig(BaseSettings):
 
     # Security
     allowed_domains: list[str] = Field(default_factory=list)
+    ucp_agent_profile: str | None = Field(default=None, repr=False)
     max_code_size_bytes: int = Field(default=65536, ge=1, le=262144)  # 64KB default
     allow_private_networks: bool = False
     allow_writes: bool = False
+    allow_catalog_posts: bool = False
     allowed_write_operations: list[str] = Field(default_factory=list)
+    allowed_read_only_post_operations: list[ReadOnlyPostOperation] = Field(default_factory=list, max_length=1000)
     http_timeout_seconds: int = Field(default=15, ge=1, le=60)
     max_response_size_bytes: int = Field(default=2097152, ge=1024, le=16777216)
     max_spec_size_bytes: int = Field(default=5242880, ge=1024, le=16777216)
@@ -90,6 +109,25 @@ class GryphonConfig(BaseSettings):
 
     # Optional tools — disabled by default; set GRYPHON_ENABLE_ADDITIONAL_TOOLS=true to enable
     enable_additional_tools: bool = False
+
+    @model_validator(mode="after")
+    def _validate_ucp_agent_profile(self) -> GryphonConfig:
+        """Require an explicit public HTTPS profile under the operator domain policy."""
+        if self.ucp_agent_profile is not None:
+            validate_profile(self.ucp_agent_profile, self.allowed_domains)
+        return self
+
+    @field_validator("swaggers", mode="before")
+    @classmethod
+    def _validate_swagger_sources(cls, value: object) -> list[SwaggerSource] | None:
+        """Require an environment JSON list while retaining the programmatic YAML fallback sentinel."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, list):
+            raise ValueError("GRYPHON_SWAGGERS must be a JSON list")
+        return [SwaggerSource.model_validate(entry) for entry in value]
 
     @field_validator("http_auth_token")
     @classmethod
@@ -109,15 +147,16 @@ class GryphonConfig(BaseSettings):
         return normalized
 
 
-def load_config(env_file: str | None = None) -> GryphonConfig:
+def load_config(env_file: str | None = None, *, discover_env: bool = True) -> GryphonConfig:
     """Load and return the Gryphon configuration.
 
     Args:
         env_file: Optional path to a custom .env file. Overrides the default CWD/.env.
+        discover_env: Whether to read the default env file when no explicit path is supplied.
 
     Returns:
         Populated GryphonConfig instance.
     """
-    if env_file is not None:
+    if env_file is not None or not discover_env:
         return GryphonConfig(_env_file=env_file)  # type: ignore[call-arg]
     return GryphonConfig()

@@ -1,0 +1,250 @@
+name: Publish PyPI
+
+"on":
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'hypen-code/gryphon' &&
+      github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') &&
+      ((github.event_name == 'release' && github.event.action == 'published' &&
+        !github.event.release.draft && !github.event.release.prerelease) ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      EVENT_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+      UV_NO_CACHE: "1"
+    steps:
+      - name: Require a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$EVENT_TAG" == "$RELEASE_TAG" ]]
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable tag checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+      - uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca
+        with:
+          version: "0.12.9"
+          python-version: "3.13"
+          enable-cache: false
+      - name: Install system libpq
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libpq5
+      - name: Install locked development and hosted environment
+        run: uv sync --locked --extra dev --extra saas
+      - name: Verify source versions
+        run: |
+          uv run --frozen --extra dev --extra saas python - <<'PY'
+          import ast
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) is None:
+              raise SystemExit("A canonical vX.Y.Z tag is required")
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          module = ast.parse(Path("src/gryphon/__init__.py").read_text())
+          versions = [ast.literal_eval(node.value) for node in module.body
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "__version__"
+                              for target in node.targets)]
+          if project["name"] != "gryphon-runtime" or versions != [project["version"]] or tag != "v" + project["version"]:
+              raise SystemExit("Tag, project metadata, and gryphon.__version__ must match")
+          PY
+      - name: Ruff lint
+        run: uv run --frozen --extra dev --extra saas ruff check src/ tests/
+      - name: Ruff format
+        run: uv run --frozen --extra dev --extra saas ruff format --check src/ tests/
+      - name: Strict typing
+        run: uv run --frozen --extra dev --extra saas mypy --strict src/ tests/
+      - name: Tests with mandatory coverage
+        run: uv run --frozen --extra dev --extra saas pytest --cov=gryphon --cov-fail-under=90
+      - name: Build sdist and wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv build --no-sources --exclude-newer "$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)" --no-create-gitignore --out-dir "$RUNNER_TEMP/release-dist"
+      - name: Verify distribution metadata and assets
+        env:
+          DIST_DIR: ${{ runner.temp }}/release-dist
+        run: |
+          uv run --frozen --extra dev --extra saas python - <<'PY'
+          import os
+          import tarfile
+          import tomllib
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          version = project["version"]
+          root = Path(os.environ["DIST_DIR"])
+          stem = f"gryphon_runtime-{version}"
+          expected = {f"{stem}.tar.gz", f"{stem}-py3-none-any.whl"}
+          assert {path.name for path in root.iterdir()} == expected
+          assert all(path.is_file() and not path.is_symlink() for path in root.iterdir())
+          assets = {"gryphon/templates/admin.html", "gryphon/static/admin.css", "gryphon/static/admin.js",
+                    "gryphon/static/analytics.js",
+                    "gryphon/compiler/templates/function.py.j2",
+                    "gryphon/compiler/templates/top_level_functions.py.j2", "gryphon/__main__.py"}
+          with zipfile.ZipFile(root / f"{stem}-py3-none-any.whl") as wheel:
+              assert assets <= set(wheel.namelist())
+              metadata = BytesParser().parsebytes(wheel.read(f"{stem}.dist-info/METADATA"))
+              assert "gryphon = gryphon.__main__:main" in wheel.read(f"{stem}.dist-info/entry_points.txt").decode()
+              assert any(name.endswith("/LICENSE") for name in wheel.namelist())
+          with tarfile.open(root / f"{stem}.tar.gz") as sdist:
+              assert {f"{stem}/src/{asset}" for asset in assets} <= set(sdist.getnames())
+              assert {f"{stem}/README.md", f"{stem}/LICENSE", f"{stem}/pyproject.toml"} <= set(sdist.getnames())
+              member = sdist.extractfile(f"{stem}/PKG-INFO")
+              assert member is not None
+              source_metadata = BytesParser().parsebytes(member.read())
+          for item in (metadata, source_metadata):
+              assert item["Name"] == "gryphon-runtime" and item["Version"] == version
+              assert item["Requires-Python"] == project["requires-python"]
+              assert "saas" in item.get_all("Provides-Extra", [])
+              assert item.get_all("Requires-Dist") and item.get_payload()
+          PY
+      - name: Install wheel with locked runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv export --frozen --no-dev --no-emit-project --no-header --no-annotate --output-file "$RUNNER_TEMP/runtime-requirements.txt" --quiet
+          uv venv --python 3.13 "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" --require-hashes -r "$RUNNER_TEMP/runtime-requirements.txt"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" --no-deps "$RUNNER_TEMP/release-dist/gryphon_runtime-${RELEASE_TAG#v}-py3-none-any.whl"
+          uv pip check --python "$RUNNER_TEMP/wheel-venv/bin/python"
+      - name: Installed wheel automatic stdio and MCP smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(mktemp -d "$RUNNER_TEMP/gryphon-smoke.XXXXXX")"
+          cd "$SMOKE_DIR"
+          env -i HOME="$SMOKE_DIR" PATH="$RUNNER_TEMP/wheel-venv/bin:/usr/bin:/bin" \
+            EXPECTED_VERSION="${RELEASE_TAG#v}" CHECKOUT="$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/wheel-venv/bin/python" -I - <<'PY'
+          import asyncio
+          import json
+          import os
+          import subprocess
+          import sys
+          from importlib.metadata import version
+          from importlib.resources import files
+          from pathlib import Path
+
+          import gryphon
+          from fastmcp import Client
+          from fastmcp.client.transports import StdioTransport
+
+          root = Path.cwd()
+          checkout = Path(os.environ["CHECKOUT"]).resolve()
+          assert not (root / ".env").exists()
+          assert not root.is_relative_to(checkout)
+          assert Path(gryphon.__file__).resolve().is_relative_to(Path(sys.prefix))
+          assert not Path(gryphon.__file__).resolve().is_relative_to(checkout)
+          assert gryphon.__version__ == version("gryphon-runtime") == os.environ["EXPECTED_VERSION"]
+          assert files("gryphon").joinpath("templates/admin.html").is_file()
+          assert files("gryphon").joinpath("compiler/templates/function.py.j2").is_file()
+          cli = str(Path(sys.executable).parent / "gryphon")
+          result = subprocess.run([cli, "--version"], check=True, capture_output=True, text=True, timeout=30)
+          assert os.environ["EXPECTED_VERSION"] in result.stdout
+          spec = root / "offline.json"
+          spec.write_text(json.dumps({"openapi": "3.0.3", "info": {"title": "Offline", "version": "1"},
+              "servers": [{"url": "https://offline.invalid"}], "paths": {"/ping": {"get": {
+                  "operationId": "ping", "responses": {"200": {"description": "OK"}}}}}}))
+          env = {"HOME": str(root), "PATH": os.environ["PATH"], "GRYPHON_STATE_DIR": str(root / "state"),
+                 "GRYPHON_SWAGGERS": json.dumps([{"name": "offline", "swagger_url": str(spec), "is_read_only": True}])}
+
+          async def smoke() -> None:
+              """Exercise installed CLI compilation and offline MCP without checkout imports."""
+              transport = StdioTransport(command=cli, args=["stdio"], cwd=str(root), env=env,
+                                         keep_alive=False, log_file=root / "stdio.log")
+              async with Client(transport, timeout=60, init_timeout=60) as client:
+                  tools = {tool.name for tool in await client.list_tools()}
+                  assert len(tools) == 10 and {"execute_code", "run_cached_code", "get_functions"} <= tools
+                  servers = await client.call_tool("list_servers", {})
+                  assert not servers.is_error and servers.data["servers"][0]["name"] == "offline"
+                  details = await client.call_tool("get_functions", {"functions": [
+                      {"server_name": "offline", "function_name": "ping"}]})
+                  assert not details.is_error and details.data["functions"][0]["function_name"] == "ping"
+                  executed = await client.call_tool("execute_code", {
+                      "code": "result = sum(inputs['values'])", "description": "offline wheel smoke",
+                      "inputs": {"values": [2, 3, 5]}})
+                  assert not executed.is_error and executed.data == executed.structured_content
+                  assert executed.data["success"] and executed.data["data"] == 10 and executed.data["tool_calls"] == 0
+                  reused = await client.call_tool("run_cached_code", {
+                      "cache_id": executed.data["cache_id"], "params": {"values": [10, 20]}})
+                  assert not reused.is_error and reused.data["success"] and reused.data["data"] == 30
+                  assert reused.data["tool_calls"] == 0
+              assert list((root / "state").glob("*/compiled/offline/manifest.json"))
+              assert not (root / ".env").exists()
+
+          asyncio.run(smoke())
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pypi-distributions
+          path: ${{ runner.temp }}/release-dist/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: >-
+      needs.build.result == 'success' && github.repository == 'hypen-code/gryphon' &&
+      github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') &&
+      ((github.event_name == 'release' && github.event.action == 'published' &&
+        !github.event.release.draft && !github.event.release.prerelease) ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/gryphon-runtime/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca
+        with:
+          version: "0.12.9"
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pypi-distributions
+          path: dist
+          merge-multiple: false
+      - name: Publish checked distributions with PyPI OIDC
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          uv publish --no-config --trusted-publishing always \
+            --publish-url https://upload.pypi.org/legacy/ \
+            "dist/gryphon_runtime-${RELEASE_TAG#v}.tar.gz" \
+            "dist/gryphon_runtime-${RELEASE_TAG#v}-py3-none-any.whl"

@@ -3,8 +3,14 @@
 ## Supported code line and reporting
 
 Security work targets the **Gryphon 2.0.x** code line. Older versions do not
-receive backports. Version 2.0.0 is installed from the repository checkout; this
-policy does not imply a published PyPI distribution or an external security audit.
+receive backports. Install from a checkout or a locally built wheel until an
+actual PyPI release is verified; this policy implies neither publication nor an
+external security audit. The GitHub release workflow uses a separate protected
+`pypi` environment job and PyPI Trusted Publishing (OIDC), not committed API
+tokens. Maintainers must configure the publisher, environment reviewers and tag
+protections; see [CONTRIBUTING.md](CONTRIBUTING.md). Publishing is gated on version
+agreement, full quality checks with 90% minimum coverage, and installed-wheel
+MCP smoke tests. A green workflow is not an independent security assessment.
 
 **Do not disclose vulnerabilities in public GitHub issues.** Submit a private
 [security advisory](https://github.com/hypen-code/gryphon/security/advisories/new).
@@ -15,10 +21,13 @@ with maintainers; this document makes no guaranteed response-time commitment.
 
 ## Threat model
 
-Gryphon is an API-agent backend for a **trusted local operator**. Agent code,
-OpenAPI descriptions, skills guides, tool inputs, and upstream data are
-untrusted. The host process, its configuration, catalog storage, and credential
-vault are inside the trusted computing boundary. Protect the host accordingly.
+Gryphon is an API-agent backend with local/operator modes and **admin-managed
+hosted tenants and channels**. Agent code, uploaded OpenAPI descriptions, skills
+guides, tool inputs, and upstream data are untrusted. The host process, operator
+configuration, control database, catalog storage, and local-mode credential
+vault are trusted. Hosted tenant/channel identity is server-verified, not a claim
+from tool arguments. The administrator controls every tenant: this is not
+self-service identity federation or an independently certified SaaS boundary.
 
 The default runtime is a bounded Python subset in **pydantic-monty 0.0.18**,
 not host CPython. The only external capability is an asynchronous broker call
@@ -53,18 +62,15 @@ isolation certification. Native MCP Tasks are disabled and unadvertised.
 
 - Every call resolves an exact registered server/function and validates closed
   request arguments before encoding parameters and JSON bodies.
-- `is_read_only: true` filters write methods during compilation and is checked
-  again at dispatch. Writes otherwise require **both** `GRYPHON_ALLOW_WRITES=true`
-  and the exact `server.function` in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
-- Write permits are administrator configuration, not a model-supplied approval
-  flag. There is no interactive approval UI. Guides, descriptions, MCP
-  `readOnlyHint`, and idempotency keys cannot authorize a write.
+- `is_read_only: true` filters ordinary HTTP writes during compilation and dispatch; retained exact POST-read classifications remain compatible. `GRYPHON_ALLOW_CATALOG_POSTS` defaults **false for legacy `serve`/`run`** and **true for local `stdio`** (like hosted channels). Without it, ordinary writes require a write-enabled source, **both** `GRYPHON_ALLOW_WRITES=true` and exact `server.function` permits in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
+- **Local `stdio` and SaaS enable `allow_catalog_posts=True`. Included catalog-bound POSTs execute automatically without separate approval**, and may have side effects. This bypasses the ordinary write-permit requirement only for POST; an unclassified HTTP POST on a read-only source still fails. `allow_writes` stays `false` and write permits stay empty, so **PUT/PATCH/DELETE API operations remain denied** even if visible. No unbound or wrong-channel function becomes callable; set `GRYPHON_ALLOW_CATALOG_POSTS=false` to opt out.
+- Legacy `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults `[]`: exact canonical `server_name`, effective `base_url` (including CDN/operation overrides), literal `path`, `method:"POST"`; no templates/globs. Parser/broker checks and policy identity remain. These deployment-wide compatibility attestations are not credentials, per-tenant authorization or proof of upstream semantics, and are not needed for included hosted POSTs. Never change real operator settings automatically.
+- URL-encoded and multipart requests use closed `json_body` objects of finite non-null scalars/scalar arrays. Reject nested, open-ended and file/binary contracts; the broker owns Content-Type/boundary. Multipart accepts no caller filenames/part headers or host-file reads; strings resembling paths are literal text. Limits: **1024 parts / 2 MiB**, bounded ASCII field names, plus normal execution/request budgets.
+- The manual **POST read permissions** UI and public GET/POST route are removed (404), not replaced with automatic read attestations. Uploaded hints, descriptions, MCP `readOnlyHint`, model flags and idempotency keys never grant authority. Authority comes from the bound catalog and host policy; POST automation is explicitly **not read-only execution**.
 - Scope expiry/cancellation is checked around asynchronous credential resolution
   and request sending. Primary-origin credentials cannot be delegated to a
   different endpoint origin.
-- Read-only classification is based on HTTP method and source policy, not proof
-  of an API's semantics. An upstream GET can still have side effects if the
-  service is designed that way. Review catalogs and grant least privilege.
+- Read filtering uses HTTP/source policy, retained exact attestations and the known native MCP read-method subset, not proof of API semantics. Even GET or a known read tool can have side effects upstream. Operators and tenant catalog managers must review actual semantics and grant least privilege; disabling the filter can expose supported mutating POST/native tools for automatic execution.
 
 ### 3. Broker egress is validated and bounded
 
@@ -99,22 +105,25 @@ stale assumptions. Cache reuse reruns code; it is not response memoization.
 
 ### 5. Outputs and persistent stores are bounded and owner-scoped
 
-Execution returns strict JSON-native values and safe error categories. Raw
-prints, stderr, exception traces, and upstream error bodies are omitted; only
-print-byte summaries may appear. Oversized but permitted successful results
+Execution returns strict JSON-native values and safe error categories. `models.diagnostics.canonical_failure` selects only finite Gryphon-owned static messages; public adapters and nested receipts freshly validate diagnostics, even model instances bypassing construction, rejecting extra/forged fields instead of passing through `error` text. Missing/invalid native profiles and the exact known RPC condition produce `error_type:"upstream"` with configuration guidance and `{kind:"upstream",phase:"discovery"|"invoke",upstream_code:"invalid_profile_url"}`. Other well-formed RPC errors expose phase only; raw messages, `data.content`, `continue_url`, numeric codes and private bodies never pass through.
+AST violations remain `error_type:"security"` with `{kind:"ast",violation_type:<closed enum>,line:1..1000000}` only. No detail, source, attribute names or traces; guards are not relaxed. Raw prints, stderr, exception traces and upstream bodies are omitted; only print-byte summaries may appear. Oversized but permitted successful results
 become private, owner-scoped JSON artifacts. `read_artifact` allows at most
 **8192 bytes** per requested chunk, possibly fewer under the MCP context budget.
-Artifacts cannot bypass the full-result size cap.
+Artifacts cannot bypass the full-result size cap. Summaries expose `json_type`; objects add `top_level_keys` (at most 32 complete keys / 512 serialized bytes, fewer under smaller budgets), `key_count` and `keys_truncated`; arrays add `length`. No values are previewed.
+`transform_artifact(artifact_id,code,description,inputs?)` loads only owned, integrity-checked bounded JSON off-loop as `inputs['artifact']`, with caller parameters under `inputs['params']`. It shares AST/source/input/result/resource limits, admission, local/shared execution slots, deadline, cancellation and run-ledger ownership. Its fresh restricted Monty VM has **no external functions, broker reference or network**; `call_tool` references/aliases are blocked. Docker-configured channels reject, never silently downgrade. Projection may create another bounded artifact and retains a receipt, but **no replayable `cache_id`** that could re-enable broker authority. Normal `run_cached_code` still reruns its recipe and can refetch upstream data.
 
 Recipes, run receipts, and artifacts enforce caller ownership. Foreign handles
 do not confer access. Artifact storage uses private directories/files, bounded
 indexes, integrity checks, no-follow path handling, and owned-file-only cleanup.
 Retention is limited; these stores are not a permanent audit archive.
 
-The run ledger has exclusive single-process ownership during recovery and
-execution. Do not share a live run database between workers or assume a network
-filesystem implements the required local locking semantics. Native storage uses
-POSIX locks; use the container deployment rather than native Windows storage.
+The run ledger holds **advisory** single-process recovery ownership. Recovery only
+interrupts active receipts older than the configured stale window
+(`GRYPHON_RUN_RECOVERY_STALE_SECONDS`), so a concurrent process sharing the ledger
+never marks a live process's runs interrupted. Do not share a live run database over
+a network filesystem that cannot implement the required local locking semantics.
+Native storage uses POSIX locks; use the container deployment rather than native
+Windows storage.
 
 These files may contain source, descriptions, and returned API data. There is
 **no claim of encryption at rest or complete data-loss prevention**. If an
@@ -141,7 +150,172 @@ The HTTP listener defaults to loopback. Before public exposure, require a
 network, and operational controls. Do not mistake bearer authentication for
 transport encryption or a complete public hosting security model.
 
-### 7. Optional Docker is offline computation only
+### 7. Hosted administration and channels
+
+`gryphon saas` uses independent `GRYPHON_SAAS_ADMIN_TOKEN` (at least 32 random
+characters), `GRYPHON_SAAS_DATABASE_URL`, and `GRYPHON_SAAS_PUBLIC_ORIGIN` settings.
+Like `gryphon stdio`, it reads no ambient dotenv; `--env-file` must be explicit.
+Stdio derives private source-scoped paths below an optional absolute
+`GRYPHON_STATE_DIR`, or the XDG/home state directory, without package writes.
+Protect explicit storage overrides and stop competing processes using a ledger.
+
+Hosted `/api/login` exchanges either the recovery bootstrap token or a named
+user's username/password for a bounded in-memory session. Cookies are Secure,
+HttpOnly, SameSite=Strict; mutations require the session-bound CSRF token.
+Sessions expire and are lost on restart. Each named account has at most four
+sessions; tenant logins leave one platform slot free when the total limit exceeds
+one. Account changes proactively discard older sessions while retaining any
+concurrently authenticated newer revision. Canonical Host and browser Origin checks,
+CSP, no-store responses,
+request-size/deadline/concurrency limits, and bounded login/request rate limits
+complement authentication; they are not comprehensive public-service DDoS defense.
+Plain HTTP requires **both** a loopback canonical origin and explicit
+`GRYPHON_SAAS_ALLOW_INSECURE_HTTP=true`; that development exception removes Secure
+cookies. Never use it for public traffic. Public deployments need manual TLS
+termination preserving canonical Host; forwarded proxy headers are not trusted.
+
+Each `/mcp/{channelUUID}` request authenticates a channel key against the control
+database and verifies tenant/channel status. Keys are shown once when generated,
+stored only as hashes, and cannot access the administrator API. Rotate lost keys;
+revocation, tenant disable, and policy revision invalidate runtime authority.
+Multiple clients with the same channel key share that channel's ownership.
+The bootstrap operator and named **`platform_admin`** accounts can manage all
+tenants. Named **`tenant_user`** accounts are immutably bound to exactly one tenant
+and require both account and tenant to be enabled. Server-side checks restrict
+specs, channels, keys, usage, analytics and audit to that tenant, independent of UI visibility.
+Tenant users cannot create tenants, list/create/manage users, change their role
+or membership, or access foreign-tenant resources. Only platform administrators
+can create accounts, edit display names, change status or reset another password.
+There is no self-signup, invitation flow, SSO or custom/multi-tenant account role.
+
+Passwords are salted **PBKDF2-HMAC-SHA256 with 600,000 iterations** and fresh
+32-byte cryptographic salts; password/hash material is not returned in API
+profiles or audits. Passwords must be 12–128 characters, at most 512 UTF-8 bytes.
+Hashing runs off the event loop with bounded admission and cancellation-safe
+cleanup. Rejected/unknown identities still perform fixed-cost hash verification.
+Named users can change their own password only with their current password.
+Account profile/status changes and password reset/change advance the revision;
+every authenticated API request rechecks revision, account status and tenant
+status. Tenant status changes advance bound users' revisions too. Old cookies
+remain invalid after re-enable; self-service password change signs the user out.
+Bootstrap-token recovery remains independent and cannot be reset in the user UI.
+
+**User deletion, disable and reset do not revoke independently issued shared channel keys.** Deletion removes only the browser account/password hash and revokes its sessions; shared channels/specifications remain. Offboarding must also rotate/revoke exposed channel keys, and user-deletion UI warnings must state that those keys remain valid. A browser/platform login grants no MCP access without a valid channel key; channel keys grant no browser API authority. Keep bootstrap credentials, passwords and session cookies out of MCP clients.
+Tenant **Suspend / Resume** (`PATCH /api/tenants/{tenant_id}`, strict boolean `{enabled:false|true}`) is reversible: data/keys remain, disabled tenant access is blocked and user revisions invalidate old cookies. Resuming permits enabled channels' existing valid keys again, not old browser sessions. After a fresh platform check, `finish_cleanup` owns the status mutation/session cleanup and gathers every channel invalidation at `before_revision=current_channel.revision`; all attempts finish before success even if one fails, preserving newer committed authority.
+Confirmed **tenant deletion removes the entire workspace**, including all assigned tenant users/password hashes, channels/key hashes/bindings, ALL specification versions and scoped usage/analytics. Every workspace endpoint/key becomes unusable; platform accounts and other tenants remain. Confirmed **channel deletion removes only that scoped channel/key/bindings/usage/analytics and dependent control rows**, preserving specifications/users/other channels. Confirmed **user deletion** protects self and the last enabled platform administrator with 409, even for bootstrap; create/enable another administrator first.
+Browser resources `/api/tenants/{tenant_id}`, `/api/tenants/{tenant_id}/channels/{channel_id}` and `/api/users/{user_id}` expose `GET <resource>/deletion` as `{kind,id,name,label,confirmation_token,impact}`; tenant previews also include child IDs. `impact` counts users/channels/spec versions. User `name` is the username and `label` the display name. `DELETE <resource>` accepts only `{confirm_name,confirmation_token}`: exact tenant/channel name or username, no trim/case folding/coercion. Serialized SQL checks current public-state consent before mutation; tokens contain no credentials and grant no authority.
+Changed public revisions/configuration/bindings or tenant children invalidate the token (409): require fresh preview/token and blank retyping, never automatic retry. Malformed/wrong-name consent is 400; missing/foreign scoped resources 404; forbidden platform actions/CSRF 403; invalid sessions 401, following existing auth checks. Tenant/user deletion requires fresh platform authority. Channel deletion allows enabled own-tenant members or platform admins/bootstrap, including platform cleanup of disabled tenants. Server-side authorization and CSRF remain mandatory regardless of UI exact-match/stale-context guards.
+Control-row deletion and audit preservation commit atomically, freeing applicable quotas. Owned `finish_cleanup` revokes deleted users' sessions at `user.revision + 1` and gathers channel invalidations using deleted snapshots with `before_revision=deleted.revision + 1`, covering all revisions through deletion, including cold snapshots—not unconditional `None`. All attempts finish before 200, even if one fails; failure is not success. The production factory injects `store.is_current_channel`: under the runtime-manager lock, exact enabled database authority is checked before cached/new acquisition and again after startup; deleted/noncurrent snapshots reject with owned failed-start cleanup. Completed hosted watermarks are removed under that lock, avoiding unbounded deleted-ID retention. Standalone managers without a validator keep legacy watermark semantics. This never replaces fresh gateway key checks. Commit database mutations before requesting the manager lock; never hold a database transaction while waiting for it (no reverse lock order). Reused usernames receive new UUIDs; historical actor IDs never resolve by username.
+Tenant/channel deletion does not automatically purge local sandbox/cache/recipes, receipts or artifacts: they remain private and inaccessible through removed endpoints. This is not secure erasure, backup deletion, reversal of upstream effects or HA; operators must separately protect retained local data/backups. Development and schema verification use disposable databases only, never real production/operator stores.
+Lifecycle verification: `uv run --frozen --extra saas pytest tests/integration/test_admin_lifecycle.py tests/integration/test_saas_user_delete_http.py tests/unit/test_saas_resource_delete.py tests/unit/test_saas_resource_delete_audit.py tests/unit/test_saas_user_delete.py tests/unit/test_saas_audit_archive.py tests/unit/test_saas_runtime_validation.py tests/unit/test_saas_lifecycle_cleanup.py`; `node --test tests/unit/lifecycle_ui.test.js`. Opt-in `GRYPHON_TEST_POSTGRES=1 uv run --frozen --extra saas pytest tests/integration/test_saas_postgres.py` exercises user/channel/tenant deletion and archives on disposable PostgreSQL 17.6. Use the optional disposable browser fixture/full gates in AGENTS; commands do not claim browser checks or pending gates passed.
+Resource and user-deletion events retain saved public `actor` snapshots: `id`, `username`, `name`, `kind` (`user/bootstrap/system/unknown`) and `display_source` (`snapshot/current/unknown`), never credentials. Missing legacy attribution stays **unknown**, not inferred bootstrap. Legacy account events retain `actor_id` and resolve current public names by ID only, marked `current` and displayed as **Current account name**, or unknown after account deletion—never invented historic names or a replacement account with the same username. The subject is not the actor; only authorized events expose actors, without tenant-wide user-directory access. Additive `saas_audit_archive` preserves affected history without rebuilding tables or changing existing live foreign keys/event CHECK constraints. **Combined live + archive retention is 10,000 events per category** (resource/user), never a separate unlimited archive.
+The HTTP guard sets the audit `ContextVar` only after authentication/authorization and resets it in `finally`, including failure/cancellation. Owned `finish_cleanup` tasks inherit metadata so delayed transaction events retain the initiating actor. This context is **audit metadata only, never authorization or execution authority**; request bodies/headers cannot supply it. Audit retention remains bounded, not a permanent or complete activity archive.
+
+File/OpenAPI URL/UCP URL snapshots are immutable and tenant-bound. Ordinary OpenAPI external refs, environment interpolation and caller-selected host paths/auth are rejected. `read_only_filter` defaults true: it controls ordinary OpenAPI source filtering and the native MCP known-read subset. False includes supported POST/native non-read tools for **automatic catalog-bound execution**, not a read-semantics attestation. Hosted channels retain `allow_writes=False` and `allowed_write_operations=[]`, denying PUT/PATCH/DELETE while SaaS enables catalog POSTs. All normal method/schema/scope/network/budget checks remain. Hosted upstream access is **public-API-only**, without host credential/header inheritance or a tenant secret manager.
+Channel `include_function_summaries` defaults false; channel create/PATCH accepts an optional strict boolean and omission on PATCH preserves the previous value. The channel setting overrides the operator base config, never an MCP caller choice. When enabled, `list_servers` includes all function names/descriptions when they fit, with explicit bounded continuation for larger collections and marked text truncation. This is discovery metadata, not execution approval; descriptions remain untrusted. Follow both continuation positions and restart on fingerprint drift.
+UI notifications have a close button and expire after 10 seconds; replacements restart the timer. Closing/expiry clears only the banner, not inline dialog errors; quiet sign-out clears pending notifications. Notifications are not a durable audit record.
+URL import accepts at most 2048 characters, without query, userinfo or fragments; UCP requires HTTPS and root URLs resolve to `/.well-known/ucp`. The DNS-pinned bounded network client supplies no host auth, redirects, environment proxies or interpolation. Remote OpenAPI relative server URLs become absolute in the saved self-contained snapshot. Import admits one active request, **no queued imports**, under a **25-second** deadline; cancellation waits for owned cleanup.
+`POST /api/tenants/{tenant_id}/specs` accepts optional strict boolean `read_only_filter` (default true). `/specs/{spec_id}/refresh` takes URL `{}` or file `{content}` and an optional strict boolean filter (omission preserves the previous choice). `/specs/{spec_id}/filter` requires `{read_only_filter}` and revalidates existing saved bytes without replacement upload or remote fetch, preserving provenance. Both updates accept optional strict boolean `update_channels` (API default false, UI checkbox initially true); the row filter icon requires confirmation.
+Changed document or **any import metadata** creates an immutable successor with `parent_id` (201), including filter, diagnostics/warnings, legacy grants, `mcp_bindings` and resolved provenance. Raw native schema/endpoint drift counts even when normalized document SHA-256 is unchanged. Opted-in exact bindings/revisions commit atomically, then runtimes drain; old versions and other channel settings remain. Unchanged returns 200 without revisions; superseded updates return 409. Scope/status is rechecked after validation. Legacy payloads default to file, filtering on and empty grants; no spec schema migration is needed.
+The UI groups parent-linked versions into **one compact entry**, with ellipsized name/source, short version labels and count badges. Accessible SVG actions have tooltips, labels and keyboard focus. Details shows full IDs, provenance, diagnostics/warnings and bindings for latest and historical versions, including middle versions via read-only History/source/downloads. History has no individual-version delete; the main trash action targets the whole lineage. Channel selection distinguishes latest from pinned older bindings. Equal names do not merge unrelated roots. Grouping never deletes snapshots or creates a stable version ID; updates never overwrite old documents/policies in place.
+**Explicit confirmed lineage or entire-tenant deletion overrides snapshot retention**, not upstream DELETE policy. Browser-authenticated `GET /api/tenants/{tenant_id}/specs/{spec_id}/deletion` returns `{name,specification_id,spec_id,version_ids,version_count,channels:[{id,name,revision}],confirmation_token}` (root `specification_id`, requested `spec_id`). `DELETE /api/tenants/{tenant_id}/specs/{spec_id}` accepts only `{confirm_name,confirmation_token}`, requires CSRF and freshly rechecked `AccessControl`: named tenant users only in their own enabled tenant, platform admins/bootstrap also for disabled-tenant cleanup as with revocation. Channel keys, actor metadata and the preview token grant no authority. Nonexistent/foreign resources return 404; malformed consent or a name differing in any case/space returns 400, with no trimming/coercion.
+The token hashes tenant/root/requested identity, all lineage version IDs and affected channel configurations/revisions. Exact name and current compare-and-swap fingerprint are validated **before mutation within one serialized SQL transaction**. A new version, changed binding or affected channel revision/configuration makes consent stale (409); the UI requires reopening for a fresh preview and retyping from blank, never auto-retrying, and guards stale tenant/session/dialog context. All parent-linked versions and exact older/latest bindings are removed atomically, with one revision increment/audit per affected channel and a verified-actor `spec_deleted` audit identifying the root in optional `AdminAudit.spec_id` (legacy default `None`). Existing audits are not cascade-deleted; **normal bounded audit retention still applies**, without a pruning bypass.
+Owned `finish_cleanup` drains invalidated runtimes before 200 `{deleted:true,specification_id,deleted_spec_ids,updated_channel_ids}`. Channels, IDs, keys, unrelated bindings/configuration and same-name roots, usage, receipts and artifacts are preserved; stale recipes fail catalog drift, not a host-file/cache purge. Retained data remains subject to its normal quotas/retention: deletion is not secure erasure or undo of upstream effects. No migration or operator-data deletion is needed for development; deletion unit/HTTP tests and the browser fixture use temporary stores only.
+**GET and POST `/api/tenants/{tenant_id}/specs/{spec_id}/post-reads` now return 404.** The approval UI/route are removed. Legacy `approved_post_reads` metadata/helpers remain for payload compatibility; removing the approval workflow does not delete historical `post_reads_updated` audits or immutable snapshots. Audits retain their normal bounded retention; snapshots are removed only by explicit confirmed whole-lineage or entire-tenant deletion. Identical canonical documents retain old grants; document changes clear them, without a new approval workflow. Only validated tenant-bound selected-spec compatibility grants can merge into scoped config; they do not leak authority from unrelated tenants.
+Diagnostics distinguish total, discovery-available, filtered and unsupported operations. Ordinary OpenAPI unsupported request/schema semantics reject import. Native MCP tools with unsupported schemas are **omitted with explicit warnings**, not exposed under weakened validation; availability never implies every HTTP method is executable.
+
+**UCP supports bounded REST and native MCP, not full commerce, identity provisioning or arbitrary discovery.** Published January 11/23, April 8 and August 25 2026 profile shapes are recognized. Roots and explicit `/mcp` routes first probe same-origin `/.well-known/ucp`; a matching advertised REST binding is preferred, otherwise MCP; malformed advertised contracts fail closed. Explicit endpoints alone may fall back directly when the profile is unavailable. No arbitrary redirects/HTML links are followed. Public profile-advertised endpoint delegations pass exact-domain and pinned DNS/TLS checks at each step; no host auth/secrets are inherited.
+REST preserves only advertised matching shopping GETs: checkout and (April/August) cart/order, using schema-defined paths. Required `UCP-Agent`/`Request-Id` remain caller-supplied; no platform identity is generated. Required auth/signing, including canonical January signing, rejects. Optional protected headers are omitted, never credential authority. Unsupported REST response validation is omitted with warnings, not falsely validated; no broad REST writes or extension composition is added.
+Native discovery performs initialize, notifications/initialized and bounded paginated tools/list, **never business tools/call**. Filtering on allows only known read methods `get_checkout`, `get_cart`, `get_order`, `search_catalog`, `lookup_catalog`, `get_product` (catalog.lookup); unknown/non-read methods stay hidden. Filtering off includes supported native non-read tools for automatic POST execution, potentially mutating. Patterns/combinators/refs and other unsupported native input/output constraints omit the entire tool. Required native inputs, including `meta.ucp-agent.profile`, remain in `json_body`; no generated real platform identity or schema relaxation.
+Optional `GRYPHON_UCP_AGENT_PROFILE` defaults to `None` and is excluded from settings repr. Operators must provide a **real fetchable public HTTPS platform profile**, never fabricate one or default to the merchant's profile. Structural validation (2048-character cap; no userinfo/query/fragment, quotes/control/unsafe escapes, interpolation or prohibited IP/metadata destinations) and current exact-domain policy apply at initialization/use. Every DNS answer must be public at use even with private networks enabled. Gryphon does not fetch the identity document or establish its availability/authenticity; merchant acceptance remains separate. Do not edit real operator environments during development.
+Only trusted bound native MCP tools whose **entire metadata path is required by schema** receive omitted profile/container defaults. Explicit invalid/empty values are never overwritten; a valid explicit body identity wins with a matching fixed `UCP-Agent: profile="URI"` header on native session initialization/discovery/invocation/owned cleanup as applicable. No ordinary OpenAPI injection or inherited credentials. `get_functions` exposes parent `ucp_agent_profile` requirement/configured/path/guidance metadata and a generic `json_body: inputs` example, not the configured URI or an empty-profile example. `doctor` reports only `ucp_agent_profile_configured`; policy fingerprints include the URI so recipe/receipt identity changes.
+The original `source_url` is separate from `resolved_profile_url`, `resolved_endpoint` and `source_transport`. Trusted native `mcp_bindings` retain endpoint/name/raw input/output fingerprint outside uploaded OpenAPI. Synthetic `/__mcp__/...` paths are catalog identifiers, **never actual HTTP routes**. Uploaded extension fields cannot grant native transport authority; downloading/reuploading the compiled document does not recreate its bindings.
+Every invocation initializes a fresh fixed-endpoint session and rediscovers metadata; the selected raw name/input/output fingerprint must match **before exactly one tools/call**. Drift/disappearance returns `conflict`, requiring refresh. No tool-call retries or automatic replay of side effects. JSON/SSE response IDs, session headers and notification counts are checked. Prefer structuredContent; decode one finite JSON text block; retain non-JSON/multimodal blocks without fetching resources. Known SDK handshakes (2025-11-25 proposal, compatible 2025-03-26 selection) are not full modern server discovery, auth-platform support or MCP Tasks.
+MCP discovery is bounded to **1000 tools / 100 pages / 5 MiB**, with aggregate bytes including initialization/listing and prior profile bytes, within configured/hosted spec caps and **min(HTTP timeout, 30 seconds)** under the outer **25-second** import limit. Invocation initialize/list/call share the caller deadline and response-byte cap. A verified owned session may receive a fixed-endpoint cleanup DELETE, separately bounded to **2 seconds / 1 KiB**, nonfatal; cancellation awaits owned local cleanup. This is not general DELETE capability. REST limits remain **32 schema documents**, aggregate profile/schema caps and approved same-origin refs (profile origin, `https://ucp.dev`, or operator-approved); cycles, rebasing, dynamic/anchor refs and excessive expansion fail closed.
+The reported Coolbudget `/api/ucp/mcp` GET redirects to a WWW HTML 404, but its same-origin JSON profile delegates to Shopify MCP. Metadata-only import succeeds with initialized ACK `200 {}` compatibility: 13 tools discovered, six known reads, two supported cancel tools hidden by default and five unsupported schemas omitted. No live business/payment calls or full-commerce guarantee. UCP discovery failures surface HTTP **400 `ucp_discovery`** diagnostics; normal validation remains separate. Search/identity/projection acceptance tests use synthetic peers, not a live successful merchant search verified this cycle. A user-reported fetchable profile working does not establish the merchant profile as our configured platform identity.
+Base AST, execution, egress, output, and ownership restrictions still apply.
+A manager-owned execution budget is shared across channels, including background
+runs and result serialization; independent bounded channel queues remain in place.
+Channel state directories are created private (0700) before opening SQLite;
+existing non-private or foreign-owned channel directories are rejected.
+Docker channel settings can only narrow the approved preinstalled import list;
+restricted mode permits no imports. No arbitrary pip installation is supported.
+
+Exactly **one hosted worker per database** is enforced by an automatic exclusive
+lease; no installer is needed. PostgreSQL uses a **session-level advisory lock**,
+requiring a direct connection or session pooling, never transaction pooling.
+SQLite and local run ledgers use POSIX locks. The hosted worker lease stays
+exclusive; a local run-ledger lease is advisory, so a leftover owner cannot block a
+new process and recovery stays stale-scoped. **Never delete `.lock` files** to
+release a live process or repair live jobs. The OS/connection lifecycle releases
+ownership on shutdown, and a stdio server reaps a host that abandons a connection.
+For native SQLite, create a dedicated private parent directory before startup;
+SQLite cannot create its parent and `umask 077` does not fix existing permissions.
+Normal startup adds account/audit, analytics and audit-archive tables without rebuilding live tables,
+relaxing foreign keys/CHECK constraints or replacing tenants, uploads, channels or keys. Stop/back up before upgrading;
+verify upgrades only with disposable test databases, never operator stores.
+Retain the bootstrap admin token across restarts in a password manager or private
+operator environment; show it only in a private terminal, never shared logs/chat.
+PostgreSQL holds tenant/channel metadata, immutable specs, hashed keys, aggregate
+usage/analytics and audit events. Recipe source, run receipts, and artifacts remain in
+private per-channel local storage, not PostgreSQL. Both stores may contain
+sensitive information; hashed keys do not imply encryption at rest. Do not scale
+replicas or replace the local volume with an unreviewed network filesystem.
+`/health` checks database readiness only—not all channels, TLS, or API reachability.
+
+### Tenant analytics and activity privacy
+
+`GET /api/tenants/{tenant_id}/analytics` uses the existing browser-session and
+revision/status checks. Platform administrators can select tenants; tenant users
+are restricted server-side to their one enabled tenant. Optional `channel_id`
+requires exact tenant membership even for empty windows. Channel bearer keys
+cannot read reports. JSON downloads contain methodology and explicit
+`window.tenant_id` / `window.channel_id` (null means all channels); protect them
+as tenant activity metadata, not anonymous public statistics.
+
+Analytics persist numeric counts, byte sizes, timings and fixed tool/status/error/
+origin/sandbox dimensions, not source, inputs, result bodies or credentials.
+Tenant/channel identifiers and first-observation metadata remain scoped control
+metadata; run/request identifiers become SHA-256 deduplication digests. Reports
+also include existing channel names. Hashing does not make activity anonymous:
+size, timing, reuse and volume can reveal workload patterns. Normal execution
+stores still contain source/results under their separate retention policies.
+The traffic observer temporarily buffers a bounded response for structured-payload
+measurement, then clears it; it does not persist those contents in analytics.
+Measurement/observer failures log static events, not payloads or exception text.
+Response bytes measure SDK-produced bodies, not proven client reception or model
+consumption. For the fixed 13 allowlisted `tools/call` names (eleven core/two optional), request metrics and
+legacy usage each attempt persistence before the final ASGI body handoff, once per
+request; early SDK termination triggers an incomplete fallback observation.
+Each writer has a two-second timeout; failures remain static and nonfatal, not
+an unbounded persistence wait or a delivery guarantee. Response-production timing
+excludes its own observation persistence; it is not client end-to-end latency.
+Allowlisted names can count as errors even when unsupported by the current SDK.
+
+Daily aggregates use fixed, bounded JSON and a 90-UTC-day reporting/retention
+window, pruned on recording. Report building admits one active build and one
+queued request per shared analytics store, with bounded waiting; cancellation
+drains an in-progress off-loop build before releasing its slot. These bounds are
+not a general DDoS guarantee. The **100,000-receipt cap is per tenant**, so another
+tenant's activity cannot evict still-in-retention receipts. A tenant's own volume
+can shorten its deduplication window; deduplication applies only while receipts
+remain. Total receipt storage is bounded by that cap times the hosted tenant quota
+(currently 100 tenants), not a single shared 100,000-receipt pool.
+First-observation metadata is retained; old lifetime usage is not backfilled.
+The terminal observer runs after receipt persistence, including background work;
+crashes/timeouts/observer failures can miss observations. Retained duplicate
+idempotency requests do not start another run, but this is **not** a complete
+billing audit or exactly-once event/effect guarantee. Incomplete request traffic
+is explicit; requests minus runs must never be treated as saved round trips.
+
+Only paired successful eligible runs compare accepted, validated canonical API
+JSON to full final JSON, including artifact content. This is not raw HTTP bytes,
+all model context, or a no-framework counterfactual. Signed reduction may be
+negative; no API baseline yields null/N/A. Artifact projection is execute-origin pure compute, not replay or a new API-backed reduction baseline. Heuristic `ceil(UTF-8 bytes / 4)` token
+equivalents do not observe model context, generation, reasoning or billing, which
+remain null/N/A. No dollar, CPU, elapsed-time or round-trip savings are guaranteed.
+
+### 8. Optional Docker is offline computation only
 
 Docker is not required for normal restricted execution. If selected explicitly,
 it requires a reachable daemon, existing image, and the configured runtime
@@ -157,9 +331,12 @@ Each run creates its own container with:
 - bounded execution/output and cleanup of only the executor's own containers.
 
 AST policy remains active even with CPython libraries. This is not unrestricted
-host execution. The default Compose service instead runs the restricted profile,
-uses named storage volumes and a non-root host process, and mounts no Docker
-socket. Its TCP health check is not authenticated protocol readiness.
+host execution. Both shipped Compose modes use restricted execution, named
+storage volumes, non-root application processes, and no Docker socket. Legacy
+HTTP's TCP check is not authenticated readiness; hosted `/health` checks the DB.
+Hosted Docker additionally requires operator `GRYPHON_SAAS_DOCKER_ENABLED=true`
+and separately provisioned daemon access/image/runsc; the UI does not provision
+infrastructure or install arbitrary libraries.
 
 ## Persistence, cancellation, and external effects
 
@@ -179,10 +356,20 @@ upstream idempotency, and operator reconciliation remain separate concerns.
 
 ## Operator checklist
 
-- Run one process per run database under a dedicated, least-privileged OS user.
+- Run one process per run database and one hosted worker per control database
+  under dedicated least-privileged OS/database users. The included PostgreSQL
+  container is a dedicated instance; restrict its credentials/network access.
+- Back up hosted PostgreSQL **and** the local channel-state volume together while
+  the worker is stopped. Protect backups and test restoring both to one worker;
+  a database-only backup loses recipes/receipts/artifacts. Backup scheduling,
+  encryption, TLS termination, certificate renewal, and incident response are
+  manual operator responsibilities, not automatic platform features.
+- Keep the database password explicit and URL-safe in the hosted Compose profile.
+  It has no external DB port. Changing an env value does not rotate an initialized
+  PostgreSQL role's password; coordinate DB and application credential changes.
 - Review trusted catalogs and auth configuration; keep secrets in private env
   files or the operator environment, never committed YAML or client examples.
-- Leave private-network access and writes disabled unless deliberately required.
+- Leave private-network access and local/operator writes disabled unless required. Hosted catalog POSTs are automatic: review catalog scope and keep the read filter on unless supported non-read tools are intended. A larger catalog, operation name or mocked success does not prove side-effect-free behavior. CSE verification uses parsing and real Monty with synthetic/mocked HTTP, not live CSE calls or universal endpoint proof. UCP merchant evidence is metadata-only; do not perform business/payment calls for verification.
 - Use exact allowlists, HTTPS upstreams, strong random HTTP tokens, and TLS before
   public exposure. Do not expose the Docker daemon or mount its socket in Compose.
 - Keep `pyproject.toml`/`uv.lock`, images, host, and isolation runtime current.
@@ -192,8 +379,7 @@ upstream idempotency, and operator reconciliation remain separate concerns.
   compiled output and closed recipe caches; it retains runs/artifacts and rejects
   unsafe paths, links, unknown content, and active SQLite sidecars. It is not
   secure erasure, and archives may still contain private data.
-- Review `doctor` output before sharing: it omits secrets but includes paths and
-  configuration metadata. It does not probe daemon health or validate API access.
+- Review `doctor` output before sharing: it omits secrets but includes paths and configuration metadata. Profile status is only boolean `ucp_agent_profile_configured`, never its URI; it does not prove fetchability, probe daemon health or validate API access.
 
 ## In-scope reports and limitations
 
@@ -207,5 +393,7 @@ A compromised host/operator, malicious behavior inside an already authorized
 upstream service, and deployment outside the documented trust model cannot be
 made safe by tool annotations or AST filtering. Third-party vulnerabilities that
 affect Gryphon should be coordinated with both maintainers and upstream. No
-claim is made of multi-tenant cloud readiness, formal isolation verification,
-exactly-once effects, or protection against all side channels.
+claim is made of complete SaaS certification, zero vulnerabilities, formal
+isolation verification, exactly-once effects, or protection against all side
+channels. Admin-managed tenancy is implemented, but HA/horizontal scaling,
+billing, SSO, user invitations, and tenant upstream secret management are not.

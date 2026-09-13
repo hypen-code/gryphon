@@ -95,6 +95,59 @@ class ArtifactStore:
             raise InputValidationError("Invalid artifact read bounds")
         return await self._io(self._read, artifact_id, self._owner_hash(owner), offset, limit)
 
+    async def load_json(self, artifact_id: str, owner: str, max_bytes: int) -> Any:
+        """Load bounded indexed JSON for trusted execution, never an arbitrary path.
+
+        Args:
+            artifact_id: Owner-scoped SHA256 handle returned by put.
+            owner: Verified server-side ownership namespace.
+            max_bytes: Current response cap, no larger than the 16 MiB storage cap.
+
+        Returns:
+            Parsed JSON after ownership, no-follow file, size, and digest checks.
+
+        Raises:
+            InputValidationError: Invalid identifier or bounds.
+            CacheError: Missing, foreign, unsafe, oversized, or corrupt artifact.
+        """
+        self.validate_id(artifact_id)
+        if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_BYTES:
+            raise InputValidationError("Invalid artifact load bounds")
+        return await self._io(self._load_json, artifact_id, self._owner_hash(owner), max_bytes)
+
+    @staticmethod
+    def validate_id(artifact_id: str) -> None:
+        """Validate a handle before admission without performing filesystem I/O."""
+        if not isinstance(artifact_id, str) or not _HEX.fullmatch(artifact_id):
+            raise InputValidationError("Invalid artifact identifier")
+
+    def _load_json(self, artifact_id: str, owner_hash: str, max_bytes: int) -> Any:
+        """Read and hash the same bounded bytes under the owned directory lock."""
+        with self._directory(owner_hash, create=False) as directory:
+            index = self._load_index(directory)
+            if artifact_id not in index:
+                raise CacheError("Artifact not found")
+            digest, size = index[artifact_id]
+            if hashlib.sha256(f"{owner_hash}:{digest}".encode()).hexdigest() != artifact_id:
+                raise CacheError("Artifact integrity check failed")
+            if size > max_bytes:
+                raise CacheError("Artifact exceeds execution input limit")
+            with self._file(directory, f"{artifact_id}.json") as file:
+                if os.fstat(file).st_size != size:
+                    raise CacheError("Artifact integrity check failed")
+                payload = bytearray()
+                while len(payload) <= size:
+                    chunk = os.read(file, min(65536, size + 1 - len(payload)))
+                    if not chunk:
+                        break
+                    payload.extend(chunk)
+                if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
+                    raise CacheError("Artifact integrity check failed")
+            value = json.loads(payload)
+            # Recheck finite JSON and structural limits even for a forged private index.
+            self._serialize(value)
+            return value
+
     async def _io(self, function: Callable[..., _T], *args: Any) -> _T:
         """Offload all I/O and retain the lock until a cancelled worker finishes."""
         async with self._lock:

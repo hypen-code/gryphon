@@ -24,6 +24,7 @@ def gryphon_config(tmp_path: Path) -> GryphonConfig:
         run_db_path=str(tmp_path / "data" / "runs.db"),
         artifact_dir=str(tmp_path / "data" / "artifacts"),
         compile_on_startup=False,
+        ucp_agent_profile=None,
         cache_enabled=True,
         cache_ttl_seconds=3600,
         execution_timeout_seconds=10,

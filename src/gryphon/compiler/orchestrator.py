@@ -23,6 +23,8 @@ from gryphon.models import EndpointManifest, ServerManifest, ServerSpec, Swagger
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from gryphon.config import GryphonConfig
 
 logger = get_logger(__name__)
@@ -54,6 +56,8 @@ class Orchestrator(ClientConfigSupport):
 
     def load_swagger_sources(self) -> list[SwaggerSource]:
         """Load sources, rejecting malformed or normalization-colliding names without exposing auth."""
+        if self._config.swaggers is not None:
+            return self._validate_sources(self._config.swaggers)
         path = Path(self._config.swagger_config_file)
         if not path.exists():
             logger.warning("swagger_config_not_found")
@@ -66,9 +70,14 @@ class Orchestrator(ClientConfigSupport):
             return []
         if not isinstance(raw, dict) or not isinstance(raw.get("servers", []), list):
             raise CompileError("Swagger config must contain a servers list")
+        return self._validate_sources(raw.get("servers", []))
+
+    @staticmethod
+    def _validate_sources(entries: Sequence[object]) -> list[SwaggerSource]:
+        """Apply identical source and name validation to environment and YAML inputs."""
         sources: list[SwaggerSource] = []
         names: set[str] = set()
-        for entry in raw.get("servers", []):
+        for entry in entries:
             try:
                 source = SwaggerSource.model_validate(entry)
                 name = module_name(source.name)
@@ -236,6 +245,7 @@ class Orchestrator(ClientConfigSupport):
             EndpointManifest(
                 function_name=ep.operation_id,
                 summary=ep.summary,
+                description=ep.description,
                 method=ep.method,
                 path=ep.path,
                 parameters_summary=", ".join(
@@ -246,6 +256,8 @@ class Orchestrator(ClientConfigSupport):
                 parameters=ep.parameters,
                 response_fields=ep.response_schema,
                 request_body_schema=ep.request_body_schema,
+                request_body_media_type=ep.request_body_media_type,
+                read_only_post=ep.read_only_post,
                 base_url=ep.base_url or spec.base_url,
                 input_schema=input_schema(ep),
                 output_schema=ep.response_json_schema,

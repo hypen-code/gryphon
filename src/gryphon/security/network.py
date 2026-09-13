@@ -8,12 +8,14 @@ import json
 import logging
 import math
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from gryphon.errors import ExecutionError, SecurityViolationError
+from gryphon.runtime.execution_cleanup import finish_cleanup
+from gryphon.security.mcp_protocol import consume_sse
 from gryphon.security.policies import check_address_allowed, check_domain_allowed, check_metadata_host, validated_url
 
 if TYPE_CHECKING:
@@ -150,9 +152,11 @@ class NetworkClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         json_body_present: bool = False,
-        data: dict[str, str] | None = None,
+        data: Mapping[str, str | list[str]] | None = None,
+        content: bytes | None = None,
         timeout: float | None = None,
         max_bytes: int | None = None,
+        rpc_response_id: str | None = None,
     ) -> httpx.Response:
         """Send once and consume a hard-bounded, uncompressed response.
 
@@ -162,12 +166,15 @@ class NetworkClient:
             headers: Host-owned request headers.
             json_body: Validated JSON payload.
             json_body_present: Preserve an explicit JSON null rather than omit the body.
-            data: Authentication form payload.
+            data: Validated URL-encoded form payload with scalar or repeated scalar values.
+            content: Broker-encoded bounded multipart bytes, never a file or stream.
             timeout: Optional remaining scope budget.
             max_bytes: Optional response size limit, including compiler document limits.
+            rpc_response_id: Opt-in owned MCP response identity for bounded SSE consumption.
 
         Returns:
-            Fully read response; error bodies are never returned.
+            Fully read response; non-MCP error bodies are never returned. Native MCP
+            non-2xx bodies stay internal to the protocol layer for classification.
         """
         if self._client.is_closed:
             raise ExecutionError("Upstream network authority has been closed")
@@ -178,8 +185,10 @@ class NetworkClient:
         )
         if not math.isfinite(duration) or duration <= 0 or limit < 0:
             raise ExecutionError("Upstream request budget is invalid")
-        request = self._build_request(method, checked, headers or {}, json_body, data, duration, json_body_present)
-        return await self._send(request, duration, limit)
+        request = self._build_request(
+            method, checked, headers or {}, json_body, data, duration, json_body_present, content
+        )
+        return await self._send(request, duration, limit, rpc_response_id)
 
     def _build_request(
         self,
@@ -187,19 +196,23 @@ class NetworkClient:
         url: httpx.URL,
         headers: dict[str, str],
         json_body: Any,
-        data: dict[str, str] | None,
+        data: Mapping[str, str | list[str]] | None,
         duration: float,
         json_body_present: bool,
+        content: bytes | None = None,
     ) -> httpx.Request:
         """Preserve explicit null bodies and case-insensitive cookies without ambient state."""
         try:
-            if len({name.lower() for name in headers}) != len(headers) or (json_body_present and data is not None):
+            encodings = (json_body_present or json_body is not None, data is not None, content is not None)
+            if len({name.lower() for name in headers}) != len(headers) or sum(encodings) > 1:
                 raise ValueError("Ambiguous request encoding")
+            if content is not None and not isinstance(content, bytes):
+                raise ValueError("Raw request content must be broker-encoded bytes")
             explicit = httpx.Headers(headers)
             request_headers = httpx.Headers({"Accept": "application/json", "Accept-Encoding": "identity"})
             request_headers.update(explicit)
-            content = b"null" if json_body_present and json_body is None else None
-            if content is not None:
+            if json_body_present and json_body is None:
+                content = b"null"
                 request_headers["Content-Type"] = "application/json"
             request = self._client.build_request(
                 method,
@@ -217,28 +230,43 @@ class NetworkClient:
         except (httpx.HTTPError, ValueError, TypeError):
             raise ExecutionError("Upstream request could not be encoded safely") from None
 
-    async def _send(self, request: httpx.Request, duration: float, limit: int) -> httpx.Response:
+    async def _send(
+        self, request: httpx.Request, duration: float, limit: int, rpc_response_id: str | None = None
+    ) -> httpx.Response:
         """Apply a total deadline, bounded read and sanitized network failures."""
         try:
             async with asyncio.timeout(duration):
                 response = await self._client.send(request, stream=True)
                 try:
-                    return await self._consume(response, limit)
+                    return await self._consume(response, limit, rpc_response_id)
                 finally:
-                    await response.aclose()
+                    if rpc_response_id is not None:
+                        await finish_cleanup(response.aclose())
+                    else:
+                        await response.aclose()
                     self._client.cookies.clear()
         except (httpx.HTTPError, OSError, TimeoutError, ValueError):
             raise ExecutionError("Upstream request failed") from None
 
-    async def _consume(self, response: httpx.Response, limit: int) -> httpx.Response:
-        """Reject HTTP failures, compression and size overflows without body disclosure."""
-        if not 200 <= response.status_code < 300:
+    async def _consume(
+        self, response: httpx.Response, limit: int, rpc_response_id: str | None = None
+    ) -> httpx.Response:
+        """Reject HTTP failures, compression and size overflows without body disclosure.
+
+        Native MCP responses keep their bounded non-2xx body so the protocol layer can
+        classify a JSON-RPC error record instead of discarding it as a generic transport
+        failure. The body is never returned to the sandbox, only reclassified upstream.
+        """
+        if rpc_response_id is None and not 200 <= response.status_code < 300:
             raise ExecutionError(f"Upstream returned HTTP {response.status_code}")
         if response.headers.get("content-encoding", "identity").lower() != "identity":
             raise ExecutionError("Upstream compressed responses are not supported")
         length = response.headers.get("content-length")
         if length is not None and (not length.isdecimal() or int(length) > limit):
             raise ExecutionError("Upstream response exceeds size limit")
+        media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if rpc_response_id is not None and media_type == "text/event-stream":
+            return await consume_sse(response, limit, rpc_response_id)
         content = bytearray()
         if response.is_stream_consumed:
             if len(response.content) > limit:

@@ -299,6 +299,8 @@ class CodeGenerator:
             "params": _signature_parts(endpoint),
             "params_dict": _build_params_dict(endpoint),
             "has_body": endpoint.request_body_schema is not None,
+            "form_body": endpoint.request_body_media_type == "application/x-www-form-urlencoded",
+            "multipart_body": endpoint.request_body_media_type == "multipart/form-data",
             "docstring": _function_docstring(endpoint),
             "has_query_params": any(param.location == "query" for param in endpoint.parameters),
             "header_params": {p.name: _safe_name(p.name) for p in endpoint.parameters if p.location == "header"},

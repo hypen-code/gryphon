@@ -6,6 +6,27 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from gryphon.models.analytics import RunMetrics as RunMetrics
+from gryphon.models.artifacts import artifact_shape as artifact_shape
+from gryphon.models.audit import AdminAudit as AdminAudit
+from gryphon.models.audit import AuditActor as AuditActor
+from gryphon.models.audit import AuditEvent as AuditEvent
+from gryphon.models.diagnostics import ASTViolationType as ASTViolationType
+from gryphon.models.diagnostics import DiagnosticPhase as DiagnosticPhase
+from gryphon.models.diagnostics import ExecutionDiagnostic as ExecutionDiagnostic
+from gryphon.models.mcp import MCPBinding as MCPBinding
+from gryphon.models.operation_policy import ReadOnlyPostOperation as ReadOnlyPostOperation
+from gryphon.models.specifications import SaaSSpec as SaaSSpec
+from gryphon.models.specifications import SpecDeletionChannel as SpecDeletionChannel
+from gryphon.models.specifications import SpecDeletionPreview as SpecDeletionPreview
+from gryphon.models.specifications import SpecDiagnostics as SpecDiagnostics
+from gryphon.models.specifications import SpecImport as SpecImport
+from gryphon.models.users import UserAccount as UserAccount
+from gryphon.models.users import UserAudit as UserAudit
+from gryphon.models.users import UserRole as UserRole
+
+type RequestBodyMediaType = Literal["application/json", "application/x-www-form-urlencoded", "multipart/form-data"]
+
 # ---------------------------------------------------------------------------
 # Swagger / OpenAPI models (swagger.py namespace)
 # ---------------------------------------------------------------------------
@@ -44,6 +65,8 @@ class EndpointSpec(BaseModel):
     description: str = ""
     parameters: list[ParamSchema] = Field(default_factory=list)
     request_body_schema: dict[str, Any] | None = None
+    request_body_media_type: RequestBodyMediaType = "application/json"
+    read_only_post: bool = False
     response_schema: list[ResponseField] = Field(default_factory=list)
     response_json_schema: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
@@ -221,9 +244,13 @@ class ExecutionResult(BaseModel):
     cache_id: str | None = None
     run_id: str | None = None
     error_type: str | None = None
+    diagnostic: ExecutionDiagnostic | None = None
     artifact_id: str | None = None
     truncated: bool = False
     tool_calls: int = 0
+
+
+ExecutionResult.model_rebuild(_types_namespace={"ExecutionDiagnostic": ExecutionDiagnostic})
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +294,7 @@ class EndpointManifest(BaseModel):
 
     function_name: str
     summary: str
+    description: str = ""
     method: str
     path: str
     parameters_summary: str
@@ -275,9 +303,15 @@ class EndpointManifest(BaseModel):
     parameters: list[ParamSchema] = Field(default_factory=list)
     response_fields: list[ResponseField] = Field(default_factory=list)
     request_body_schema: dict[str, Any] | None = None
+    request_body_media_type: RequestBodyMediaType = "application/json"
+    read_only_post: bool = False
     base_url: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
+    mcp_binding: MCPBinding | None = None
+
+
+EndpointManifest.model_rebuild(_types_namespace={"MCPBinding": MCPBinding})
 
 
 class ServerManifest(BaseModel):
@@ -325,3 +359,38 @@ class ArtifactRecord(BaseModel):
     size_bytes: int
     sha256: str
     media_type: str = "application/json"
+
+
+class Tenant(BaseModel):
+    """Administrative tenant identity; disabled tenants cannot authenticate."""
+
+    id: str
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    created_at: float
+
+
+class Channel(BaseModel):
+    """Server-owned execution namespace and revisioned channel configuration."""
+
+    id: str
+    tenant_id: str
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    spec_ids: list[str] = Field(default_factory=list, max_length=100)
+    sandbox_mode: Literal["restricted", "docker"] = "restricted"
+    allowed_imports: list[str] = Field(default_factory=list, max_length=100)
+    include_function_summaries: bool = Field(default=False, strict=True)
+    revision: int = 1
+    key_active: bool = False
+    created_at: float
+
+
+class ChannelUsage(BaseModel):
+    """Aggregate counters with no request, code, result, or credential content."""
+
+    channel_id: str
+    tool: str
+    status: Literal["success", "error"]
+    calls: int
+    latency_ms: float

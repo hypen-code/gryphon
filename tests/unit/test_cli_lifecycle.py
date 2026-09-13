@@ -98,6 +98,7 @@ async def test_serve_passes_started_dependencies_by_identity(
         registry=services["registry"],
         cache=services["cache"],
         executor=services["executor"],
+        activity=None,
     )
 
 
@@ -353,7 +354,7 @@ async def test_cli_local_weather_compile_stdio_discovery_and_replay(
     )
     async with Client(transport, timeout=_SMOKE_TIMEOUT, init_timeout=_SMOKE_TIMEOUT) as client:
         names = {tool.name for tool in await client.list_tools()}
-        assert len(names) == 10 and "get_forecast" not in names
+        assert len(names) == 11 and "transform_artifact" in names and "get_forecast" not in names
         servers = await client.call_tool("list_servers", {})
         assert not servers.is_error and servers.data == servers.structured_content
         assert servers.data["servers"][0]["name"] == "weather"

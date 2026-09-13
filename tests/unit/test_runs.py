@@ -130,6 +130,14 @@ async def test_run_recovery_marks_queued_running_only_without_replay(runs: RunSt
     assert not new and fetched.id == queued.id and fetched.status == "interrupted"
 
 
+async def test_run_recovery_scopes_to_stale_receipts(runs: RunStore) -> None:
+    """A concurrent peer's stale-scoped recovery never clobbers a live active receipt."""
+    queued, _ = await runs.create("alice", "queued", "queued")
+    assert await runs.recover_interrupted(stale_seconds=600) == 0
+    fetched = await runs.get(queued.id, "alice")
+    assert fetched is not None and fetched.status == "queued"
+
+
 async def test_run_capacity_never_evicts_active_receipts(runs: RunStore) -> None:
     """A full ledger rejects admission instead of releasing active claims."""
     for index in range(3):

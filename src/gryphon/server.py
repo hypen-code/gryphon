@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
+from fastmcp.server.auth import StaticTokenVerifier, TokenVerifier
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 from gryphon.errors import InputValidationError
 from gryphon.runtime.context import (
@@ -21,6 +23,9 @@ from gryphon.runtime.context import (
     trusted_owner,
     validate_page,
 )
+from gryphon.runtime.discovery import list_servers_description, list_servers_page
+from gryphon.security.ucp_identity import invocation_metadata
+from gryphon.server_artifacts import ArtifactTools
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -43,12 +48,38 @@ _CORE_TOOLS = (
     "cancel_run",
     "list_recipes",
     "read_artifact",
+    "transform_artifact",
 )
-_EXECUTION_TOOLS = frozenset({"execute_code", "run_cached_code"})
+_EXECUTION_TOOLS = frozenset({"execute_code", "run_cached_code", "transform_artifact"})
 _STATEFUL_TOOLS = _EXECUTION_TOOLS | {"submit_code", "cancel_run"}
 
 
-class _Tools:
+class ActivityClock:
+    """Track the last inbound MCP message so a stdio host that abandons a connection is reaped."""
+
+    def __init__(self) -> None:
+        """Start the clock at construction so an unconnected process is also bounded."""
+        self.last = time.monotonic()
+
+    def touch(self) -> None:
+        """Record an inbound message."""
+        self.last = time.monotonic()
+
+
+class _ActivityMiddleware(Middleware):
+    """Record inbound activity without changing request behavior."""
+
+    def __init__(self, clock: ActivityClock) -> None:
+        """Retain the shared clock owned by the caller."""
+        self._clock = clock
+
+    async def on_message(self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]) -> Any:
+        """Touch the clock, then continue the normal middleware chain."""
+        self._clock.touch()
+        return await call_next(context)
+
+
+class _Tools(ArtifactTools):
     """Thin tool adapters; the executor and broker remain the only execution authority."""
 
     def __init__(self, config: GryphonConfig, deps: ServerDependencies) -> None:
@@ -61,23 +92,18 @@ class _Tools:
         kwargs["limit"] = min(kwargs.get("limit", self.config.discovery_limit), self.config.discovery_limit)
         return bounded_page(field, items, self.registry.fingerprint(), self.budget, **kwargs)
 
-    async def list_servers(self, cursor: int = 0, limit: int = 10) -> dict[str, Any]:
-        """Discover a compact page of servers, without dumping all function names.
+    async def list_servers(self, cursor: int = 0, limit: int = 10, function_cursor: int = 0) -> dict[str, Any]:
+        """Discover servers in the operator-configured compact or function-summary mode.
 
         Args:
-            cursor: Nonnegative position from the previous next_cursor.
-            limit: Requested summaries, 1–100; capped by configured discovery_limit.
+            cursor: Nonnegative server position from next_cursor.
+            limit: Requested servers, 1–100; capped by discovery_limit, not a function cap.
+            function_cursor: Position from next_function_cursor; zero in compact mode.
 
         Returns:
-            Server metadata, registry fingerprint, truncation, and next cursor.
+            Bounded metadata, fingerprint, truncation, and paired continuation positions.
         """
-        validate_page(cursor, limit)
-        servers = sorted(self.registry.list_servers(), key=lambda server: server.name)
-        items = [
-            {"name": server.name, "description": server.description, "function_count": len(server.functions)}
-            for server in servers[cursor : cursor + limit]
-        ]
-        return self._page("servers", items, cursor=cursor, total=len(servers), limit=limit)
+        return list_servers_page(self.registry, self.config, cursor, limit, function_cursor)
 
     async def search_functions(self, query: str, limit: int = 10) -> dict[str, Any]:
         """Search the compiled registry before requesting full function schemas.
@@ -125,6 +151,8 @@ class _Tools:
                         "arguments": "schema-validated object",
                     },
                 )
+                if endpoint.mcp_binding is not None:
+                    data.update(invocation_metadata(f"{fn.server_name}.{fn.function_name}", endpoint, self.config))
                 results.append(data)
             except Exception as exc:
                 results.append(safe_error(exc))
@@ -350,17 +378,16 @@ def create_server(
     registry: Registry | None = None,
     cache: CacheStore | None = None,
     executor: CodeExecutor | None = None,
+    *,
+    auth: TokenVerifier | None = None,
+    activity: ActivityClock | None = None,
 ) -> FastMCP:
-    """Create the server without importing generated host code or initializing supplied objects.
+    """Create structured MCP tools without importing generated code or restarting supplied objects.
 
-    Args:
-        config: Validated settings; HTTP transport requires a configured bearer token.
-        registry: Preloaded CLI-owned registry, or None for lifespan-owned loading.
-        cache: Initialized CLI-owned cache, or None for lifespan-owned initialization/close.
-        executor: Started CLI-owned engine, or None for lifespan-owned startup/shutdown.
-
-    Returns:
-        FastMCP server using SDK protocol negotiation and native structured tool results.
+    Supplied registry/cache/executor dependencies remain CLI-owned; missing ones are
+    initialized and closed by the lifespan. Validated config controls discovery and
+    execution; explicit trusted auth overrides the configured static operator token.
+    A supplied activity clock records inbound messages for stdio idle reaping.
     """
     # Registry and cache ownership are tracked explicitly by ServerDependencies.
     # Pre-flight initialization uses these same instances, never duplicate stores.
@@ -374,12 +401,14 @@ def create_server(
     mcp = FastMCP(
         name="Gryphon",
         instructions=_BASE_INSTRUCTIONS,
-        auth=_token_verifier(config),
+        auth=auth if auth is not None else _token_verifier(config),
         lifespan=deps.lifespan,
         tasks=False,
         mask_error_details=True,
         strict_input_validation=True,
     )
+    if activity is not None:
+        mcp.add_middleware(_ActivityMiddleware(activity))
     # Inject skills-tool availability into discovery only when additional tools are enabled.
     names = (*_CORE_TOOLS, "list_skills", "get_server_skills") if config.enable_additional_tools else _CORE_TOOLS
     # No direct-tools section bypasses discovery and inspection;
@@ -387,9 +416,11 @@ def create_server(
     for name in names:
         # Group tool registration by side-effect and context-budget contract.
         budget = min(config.max_output_size_bytes, MAX_EXECUTION_BYTES) if name in _EXECUTION_TOOLS else tools.budget
-        mcp.tool(name=name, annotations={"readOnlyHint": name not in _STATEFUL_TOOLS})(
-            guard_tool(getattr(tools, name), budget)
-        )
+        mcp.tool(
+            name=name,
+            annotations={"readOnlyHint": name not in _STATEFUL_TOOLS},
+            description=list_servers_description(config) if name == "list_servers" else None,
+        )(guard_tool(getattr(tools, name), budget))
     # Register core tools as first-class FastMCP tools, never compiled host functions.
     # Each callable above is an async adapter around validated models or the execution broker.
     # Its explicit name becomes the MCP tool name; its docstring the description.

@@ -7,6 +7,7 @@ import json
 from typing import TYPE_CHECKING
 
 from gryphon.errors import (
+    ASTViolationError,
     CacheError,
     CapacityError,
     ConflictError,
@@ -15,11 +16,15 @@ from gryphon.errors import (
     ExecutionTimeoutError,
     FunctionNotFoundError,
     InputValidationError,
+    LintError,
     SecurityViolationError,
     ServerNotFoundError,
+    UpstreamDiagnosticError,
 )
 from gryphon.models import ExecutionResult
-from gryphon.runtime.execution_validation import json_bytes
+from gryphon.models.artifacts import artifact_shape
+from gryphon.models.diagnostics import canonical_failure
+from gryphon.runtime.execution_validation import effective_imports, json_bytes
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -50,8 +55,10 @@ def fingerprint(config: GryphonConfig, registry: Registry) -> str:
             "docker_runtime",
             "docker_image",
             "allowed_domains",
+            "ucp_agent_profile",
             "allow_private_networks",
             "allow_writes",
+            "allow_catalog_posts",
             "allowed_write_operations",
             "max_tool_calls",
             "sandbox_memory_bytes",
@@ -61,7 +68,11 @@ def fingerprint(config: GryphonConfig, registry: Registry) -> str:
             "container_memory_limit",
         )
     }
+    policy["allowed_read_only_post_operations"] = sorted(
+        {permit.model_dump_json() for permit in config.allowed_read_only_post_operations}
+    )
     policy["allowed_write_operations"] = sorted(set(config.allowed_write_operations))
+    policy["sandbox_allowed_imports"] = sorted(effective_imports(config))
     return hashlib.sha256(json.dumps([catalog, policy], sort_keys=True).encode()).hexdigest()
 
 
@@ -92,7 +103,11 @@ async def bound_result(
         if not result.success:
             raise CapacityError("Execution result envelope exceeds output limit")
         artifact = await artifacts.put(result.data, owner)
-        result.data = {"summary": "Result stored as a JSON artifact", "size_bytes": artifact.size_bytes}
+        result.data = {
+            "summary": "Result stored as a JSON artifact",
+            "size_bytes": artifact.size_bytes,
+            **artifact_shape(result.data, key_budget=config.max_output_size_bytes // 8),
+        }
         result.artifact_id, result.truncated = artifact.id, True
         envelope.update(data=result.data, artifact_id=result.artifact_id, truncated=True)
     json_bytes(envelope, config.max_output_size_bytes)
@@ -109,22 +124,22 @@ def failure(exc: Exception, run_id: str | None = None) -> ExecutionResult:
     Returns:
         Safe public failure with a deterministic machine-readable category.
     """
-    kinds: list[tuple[type[Exception], str, str]] = [
-        (CapacityError, "capacity", "Execution capacity or resource budget exceeded"),
-        (ExecutionTimeoutError, "timeout", "Execution timed out"),
-        (TimeoutError, "timeout", "Execution timed out"),
-        (SecurityViolationError, "security", "Execution blocked by security policy"),
-        (InputValidationError, "validation", "Invalid source, inputs, schema, or JSON result"),
-        (ConflictError, "conflict", "Request identity conflicts or cached catalog/profile is stale"),
-        (CacheError, "cache", "Execution storage is unavailable or the owned record was not found"),
-        (DockerUnavailableError, "sandbox_unavailable", "Configured Docker sandbox is unavailable"),
-        (FunctionNotFoundError, "not_found", "Broker capability not found"),
-        (ServerNotFoundError, "not_found", "Broker capability not found"),
-        (ExecutionError, "execution", "Sandbox execution failed"),
+    kinds: list[tuple[type[Exception], str]] = [
+        (CapacityError, "capacity"),
+        (ExecutionTimeoutError, "timeout"),
+        (TimeoutError, "timeout"),
+        (SecurityViolationError, "security"),
+        (InputValidationError, "validation"),
+        (ConflictError, "conflict"),
+        (CacheError, "cache"),
+        (DockerUnavailableError, "sandbox_unavailable"),
+        (FunctionNotFoundError, "not_found"),
+        (ServerNotFoundError, "not_found"),
+        (LintError, "lint"),
+        (UpstreamDiagnosticError, "upstream"),
+        (ExecutionError, "execution"),
     ]
-    kind, message = next(
-        ((kind, message) for cls, kind, message in kinds if isinstance(exc, cls)),
-        ("internal", "Execution failed safely"),
-    )
+    kind = next((kind for cls, kind in kinds if isinstance(exc, cls)), "internal")
+    diagnostic = exc.diagnostic if isinstance(exc, ASTViolationError | UpstreamDiagnosticError) else None
     logger.warning("execution_failed", error_type=kind)
-    return ExecutionResult(success=False, error=message, error_type=kind, run_id=run_id)
+    return ExecutionResult.model_validate({**canonical_failure(kind, diagnostic), "run_id": run_id})

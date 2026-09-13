@@ -40,7 +40,7 @@ _HARD_DEADLINE_SECONDS = 30
 class RestrictedSandbox:
     """Execute isolated Monty programs with one revocable broker capability."""
 
-    def __init__(self, config: GryphonConfig, registry: Registry, broker: ToolBroker) -> None:
+    def __init__(self, config: GryphonConfig, registry: Registry, broker: ToolBroker | None) -> None:
         """Retain only server-owned policy and broker state; never reuse a VM."""
         self._config = config
         self._registry = registry
@@ -76,7 +76,7 @@ class RestrictedSandbox:
         vm = asyncio.ensure_future(
             runner.run_async(
                 inputs={"inputs": inputs},
-                external_functions={"call_tool": invoke},
+                external_functions={"call_tool": invoke} if self._broker is not None else {},
                 print_callback=self._printer(scope, state),
                 limits={
                     "max_duration_secs": max(0.001, scope.deadline - time.monotonic()),
@@ -149,6 +149,8 @@ class RestrictedSandbox:
             if task is not None:
                 callbacks.add(task)
             try:
+                if self._broker is None:
+                    raise SecurityViolationError("Artifact projection has no broker capability")
                 if scope.cancelled or time.monotonic() >= scope.deadline:
                     raise ExecutionTimeoutError("Execution scope expired")
                 state["calls"] += 1

@@ -30,6 +30,21 @@ class RecoveryLease:
         """
         if self._fd is not None:
             return
+        if not self._claim():
+            raise CacheError("Run ledger recovery is already owned or unavailable")
+
+    def try_acquire(self) -> bool:
+        """Attempt nonblocking ownership, returning False only for live contention.
+
+        Unsafe or unreadable lock files still raise, so a degraded filesystem never
+        silently downgrades the advisory lock into no ownership at all.
+        """
+        if self._fd is not None:
+            return True
+        return self._claim()
+
+    def _claim(self) -> bool:
+        """Open and exclusively lock the private lock file, returning False only on contention."""
         fd: int | None = None
         try:
             path = self._path.resolve()
@@ -45,7 +60,11 @@ class RecoveryLease:
                 or info.st_nlink != 1
             ):
                 raise CacheError("Run ledger recovery lock is not a private regular file")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                return False
             current = lock.lstat()
             if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
                 raise CacheError("Run ledger recovery lock changed during acquisition")
@@ -58,6 +77,7 @@ class RecoveryLease:
                 os.close(fd)
             raise
         self._fd = fd
+        return True
 
     def close(self) -> None:
         """Release owned authority idempotently without unlinking any lock file."""

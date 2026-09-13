@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Gryphon · Control plane</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314212c'/%3E%3Cpath d='M23 10a10 10 0 1 0 0 12v-7h-8v4h4v1a6 6 0 1 1 0-8z' fill='%23e5c584'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/admin.css">
+  <script src="/static/analytics.js" defer></script>
+  <script src="/static/specifications.js" defer></script>
+  <script src="/static/lifecycle.js" defer></script>
+  <script src="/static/admin.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div id="notice" class="notice" hidden><span id="notice-text" role="status" aria-live="polite" aria-atomic="true"></span><button id="dismiss-notice" class="notice-close" type="button" aria-label="Dismiss notification" title="Dismiss notification"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+  <section id="login" class="login-screen">
+    <div class="login-story">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">G</span> gryphon<span class="brand-label">CONTROL PLANE</span></div>
+      <div><p class="eyebrow">CAPABILITY, WITH BOUNDARIES</p><h1>One place to manage<br>every connection.</h1><p class="story-copy">Connect API catalogs to isolated channels. Define execution policy. Keep access in your hands.</p></div>
+      <p class="muted">Purpose-built for operator-managed agent infrastructure.</p>
+    </div>
+    <main class="login-panel">
+      <div class="login-card">
+        <p class="eyebrow">WORKSPACE ACCESS</p><h2>Welcome to Gryphon</h2>
+        <p class="muted">Sign in with the account provided by your administrator.</p>
+        <form method="post" id="account-login-form">
+          <label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required minlength="3" maxlength="128" spellcheck="false" autocapitalize="none">
+          <label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          <button class="primary full" type="submit">Sign in</button>
+        </form>
+        <details class="bootstrap-login"><summary>Bootstrap administrator token</summary>
+          <form method="post" id="login-form">
+            <p class="hint">Alternative access for first setup or recovery. Create named accounts from Users after signing in.</p>
+            <label for="login-token">Administrator token</label><input id="login-token" name="token" type="password" autocomplete="off" required spellcheck="false" aria-describedby="login-hint">
+            <p id="login-hint" class="hint">Your token is exchanged for a secure session. It is not saved in browser storage.</p>
+            <button class="secondary full" type="submit">Sign in with token</button>
+          </form>
+        </details>
+        <p class="login-footnote">Private access · Use HTTPS for remote connections</p>
+      </div>
+    </main>
+  </section>
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">G</span> gryphon</a>
+      <p class="sidebar-caption">CONTROL PLANE</p>
+      <nav aria-label="Main navigation">
+        <a href="#overview" data-page="overview" aria-current="page"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> Overview</a>
+        <a href="#analytics" data-page="analytics"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 3v18h18M7 16v-5m5 5V6m5 10v-8"/></svg> Analytics</a>
+        <a href="#channels" data-page="channels"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7h18l-4-4m4 14H3l4 4M21 7l-4 4M3 17l4-4"/></svg> Channels <span id="nav-channel-count" class="nav-count">0</span></a>
+        <a href="#specs" data-page="specs"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h8"/></svg> API specifications</a>
+        <a href="#audit" data-page="audit"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> Audit trail</a>
+        <a id="nav-users" href="#users" data-page="users" hidden><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="9" cy="8" r="3"/><path d="M3 21v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 4v2"/></svg> Users</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="identity-badge"><strong id="identity-name"></strong><small id="identity-role"></small><button id="change-password" class="text-button" hidden>Change password</button></div><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out">↗</button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="workspace-label">Workspace <span aria-hidden="true">/</span> <strong id="tenant-heading">Select a tenant</strong></div><div class="tenant-tools"><label class="sr-only" for="tenant-select">Current tenant</label><select id="tenant-select"><option value="">Loading tenants…</option></select><span id="assigned-tenant" class="badge neutral" hidden></span><button id="new-tenant" class="secondary" hidden>New tenant</button></div></header>
+      <main id="main" tabindex="-1">
+        <div class="page-heading"><div><p class="eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</p><h1 id="page-title">Overview</h1><p id="page-description" class="muted">A clear view of your channels, capabilities, and activity.</p></div><button id="refresh" class="secondary">Refresh data</button></div>
+        <div id="tenant-banner" class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><div class="tenant-actions"><button id="toggle-tenant" class="text-button" type="button" hidden disabled>Suspend tenant</button><button id="delete-tenant" class="text-button danger-text" type="button" hidden disabled>Delete tenant</button></div></div>
+        <p id="loading" class="loading-state" role="status" hidden>Loading workspace data…</p>
+        <div id="tenant-empty" class="empty-state" hidden><span class="empty-symbol" aria-hidden="true">◈</span><h2>Your first workspace starts here</h2><p>Create a tenant, upload an API specification, then bind it to a channel.</p><button id="empty-new-tenant" class="primary">Create a tenant</button></div>
+        <div id="tenant-content">
+          <section id="page-overview" class="page-section" aria-label="Overview">
+            <div class="metrics"><article class="metric"><p>Total calls</p><strong id="metric-calls">—</strong><small>Recorded tool invocations</small></article><article class="metric"><p>Successful calls</p><strong id="metric-success">—</strong><small id="metric-success-detail">Across all channels</small></article><article class="metric"><p>Average latency</p><strong id="metric-latency">—</strong><small>Weighted by call count</small></article><article class="metric"><p>Enabled channels</p><strong id="metric-channels">—</strong><small id="metric-channel-detail">Ready for connection</small></article></div>
+            <div class="overview-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">TRAFFIC DISTRIBUTION</p><h2>Calls by channel</h2></div><span class="badge neutral">Recorded totals</span></div><div id="usage-chart" class="chart-list"></div></article><article class="panel policy-panel"><p class="eyebrow">ISOLATION BY DESIGN</p><h2>The right boundaries.<br>For every channel.</h2><p>Restricted execution exposes bound APIs through the broker, with no imports.</p><p>Docker is offline computation: no network or API access. Only operator-approved, preinstalled libraries are available.</p><a href="#channels" class="text-link">Manage execution policies <span aria-hidden="true">→</span></a></article></div>
+            <article class="panel"><div class="panel-heading"><div><p class="eyebrow">EXECUTION INSIGHTS</p><h2>Tool activity</h2></div><span class="subtle">Aggregate usage · not a time series</span></div><div class="table-wrap"><table><caption class="sr-only">Recorded tool usage by channel and status</caption><thead><tr><th>Channel / tool</th><th>Status</th><th>Calls</th><th>Average latency</th></tr></thead><tbody id="usage-rows"></tbody></table></div></article>
+          </section>
+          <section id="page-analytics" class="page-section" aria-label="Analytics" hidden>
+            <div class="section-toolbar analytics-toolbar"><div class="analytics-filters"><div><label for="analytics-days">UTC reporting window</label><select id="analytics-days"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></div><div><label for="analytics-channel">Channel</label><select id="analytics-channel"><option value="">All channels</option></select></div></div><button id="analytics-download" class="secondary" disabled>Download raw JSON</button></div>
+            <p id="analytics-status" class="loading-state" role="status" aria-live="polite">Select a tenant to view recorded analytics.</p>
+            <div id="analytics-report" hidden>
+              <p id="analytics-window" class="hint"></p>
+              <div id="analytics-kpis" class="metrics"></div>
+              <div class="analytics-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OBSERVED BYTES</p><h2>Full API payload vs final output</h2></div><span class="badge neutral">Comparable successful runs</span></div><div id="analytics-bytes" class="chart-list"></div><p class="analytics-note">Full final JSON includes artifact content, not just its small preview. Negative reduction means code expanded the data.</p></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">ESTIMATED · NOT MODEL TOKENS</p><h2>Payload token equivalents</h2></div></div><div id="analytics-tokens" class="chart-list"></div><p class="analytics-note">ceil(UTF-8 bytes / 4) is a heuristic, not a model tokenizer or a measurement of LLM context.</p></article></div>
+              <article class="panel analytics-unobservable"><div><p class="eyebrow">ACTUAL MODEL TOKENS &amp; BILLING</p><h2>Not observable</h2></div><p>MCP cannot measure the host model's context, generation, or billing. Token equivalents and reused code do not establish actual generation avoided, cost savings, or time saved.</p></article>
+              <div class="analytics-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">EXECUTION &amp; REUSE</p><h2>Fresh work and recipe replay</h2></div></div><dl id="analytics-reuse" class="analytics-facts"></dl></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">ALL RECORDED OUTCOMES</p><h2>Workload and backend timing</h2></div></div><dl id="analytics-workload" class="analytics-facts"></dl><p class="analytics-note">Backend wall, queue, and API wait durations are not CPU time or time saved. Failed and cancelled runs remain included.</p></article></div>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">DAILY · UTC</p><h2>Recorded activity over time</h2></div></div><div id="analytics-daily-chart" class="analytics-daily-chart"></div><div class="table-wrap"><table><caption class="sr-only">Daily recorded traffic and execution outcomes in UTC</caption><thead><tr><th>UTC day</th><th>MCP calls</th><th>Runs</th><th>Succeeded</th><th>Failed</th><th>Cancelled</th><th>Payload reduction</th></tr></thead><tbody id="analytics-daily-rows"></tbody></table></div></article>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">CHANNEL COMPARISON</p><h2>Same window, same methodology</h2></div></div><div class="table-wrap"><table><caption class="sr-only">Per-channel observed activity in the selected window</caption><thead><tr><th>Channel</th><th>MCP calls</th><th>Runs</th><th>Success rate</th><th>Code reuse</th><th>Payload reduction</th></tr></thead><tbody id="analytics-channel-rows"></tbody></table></div></article>
+              <article class="panel analytics-section"><div class="panel-heading"><div><p class="eyebrow">TRAFFIC IS NOT EXECUTIONS</p><h2>MCP request accounting</h2></div></div><dl id="analytics-traffic" class="analytics-facts"></dl><p class="analytics-note">An async submission is counted as a run when it completes, not each time a client polls for its result.</p></article>
+              <article class="panel analytics-methodology"><h2>Methodology &amp; recording coverage</h2><p id="analytics-recording"></p><ul id="analytics-methodology"></ul><p class="hint">The JSON download includes the server's methodology and exact reporting window. It is a local export only; nothing is automatically published or sent to an external metrics service.</p></article>
+            </div>
+          </section>
+          <section id="page-channels" class="page-section" aria-label="Channels" hidden><div class="section-toolbar"><p class="muted">Dedicated MCP endpoints with explicit capabilities and policy.</p><button id="new-channel" class="primary">Create channel</button></div><div id="channel-list" class="channel-grid"></div></section>
+          <section id="page-specs" class="page-section" aria-label="API specifications" hidden>
+            <div class="section-toolbar"><p class="muted">One row per specification, with actions for its latest version. Update the saved source; earlier immutable snapshots and channel bindings remain in History.</p><button id="new-spec" class="primary">Add specification</button></div>
+            <p class="security-note" id="spec-filter-policy">The read-only filter selects read operations (normally GET, HEAD, and OPTIONS for OpenAPI). Uncheck to include POST operations. Included POST operations in bound catalogs execute automatically and may have side effects; POST does not mean read-only. PUT, PATCH, and DELETE remain subject to hosted execution restrictions. UCP supports compatible REST and MCP bindings; unsupported tools, transports, and contracts are reported explicitly.</p>
+            <article class="panel"><div class="table-wrap"><table><caption class="sr-only">Saved API specifications and operation availability</caption><thead><tr><th>Specification / source</th><th>Version / operations</th><th>Actions</th></tr></thead><tbody id="spec-rows"></tbody></table></div></article>
+          </section>
+        </div>
+        <section id="page-audit" class="page-section" aria-label="Audit trail" hidden><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OPERATOR VISIBILITY</p><h2>Recent administrative activity</h2></div><span id="audit-scope" class="badge neutral">Your workspace</span></div><div class="table-wrap"><table><caption class="sr-only">Recent administrative events across tenants</caption><thead><tr><th>Event / account subject</th><th>Actor</th><th>Tenant</th><th>Channel</th><th>Recorded at</th></tr></thead><tbody id="audit-rows"></tbody></table></div></article></section>
+        <section id="page-users" class="page-section" aria-label="Users" hidden>
+          <div class="section-toolbar"><p class="muted">Named accounts with a fixed role and, for tenant users, exactly one tenant.</p><button id="new-user" class="primary">Create user</button></div>
+          <p class="security-note">Suspending or deleting a user revokes their sessions, not separately issued shared channel keys. When offboarding someone with exposed keys, administrators must rotate those channel keys too.</p>
+          <article class="panel"><div class="table-wrap"><table><caption class="sr-only">Hosted user accounts</caption><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Tenant</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div><div class="pagination"><button id="users-previous" class="secondary" disabled>Previous</button><span id="users-page" role="status"></span><button id="users-next" class="secondary" disabled>Next</button></div></article>
+        </section>
+        <footer class="workspace-footer"><span>Gryphon control plane</span><span>Explicit capabilities. Bounded execution.</span></footer>
+      </main>
+    </div>
+  </div>
+  <dialog id="tenant-dialog" aria-labelledby="tenant-dialog-title"><form method="post" id="tenant-form"><div class="dialog-heading"><h2 id="tenant-dialog-title">Create a tenant</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p class="muted">A separate workspace for specifications, channels, and usage.</p><label for="tenant-name">Tenant name</label><input id="tenant-name" required maxlength="120" autocomplete="off"><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Create tenant</button></div></form></dialog>
+  <dialog id="spec-dialog" aria-labelledby="spec-dialog-title"><form method="post" id="spec-form">
+    <div class="dialog-heading"><h2 id="spec-dialog-title">Add specification</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <p class="muted">Upload an OpenAPI or Swagger document, or import a public URL. Each import creates an immutable compiled snapshot.</p>
+    <label for="spec-name">Specification name</label><input id="spec-name" required maxlength="120" autocomplete="off" aria-describedby="spec-name-help">
+    <p id="spec-name-help" class="hint">Use letters, digits, spaces, underscores, or hyphens. Bind only one version of each API name to a channel.</p>
+    <label class="check-label"><input id="spec-read-only-filter" type="checkbox" checked aria-describedby="spec-import-filter-help"> Read-only filter</label>
+    <p id="spec-import-filter-help" class="hint">Checked: select read operations (normally GET, HEAD, OPTIONS for OpenAPI). Uncheck to include POST operations. Included POST operations execute automatically and may have side effects. PUT, PATCH, and DELETE remain restricted by hosted policy; unsupported UCP tools and contracts are reported explicitly.</p>
+    <label for="spec-kind">Source</label><select id="spec-kind"><option value="file">Upload JSON or YAML file</option><option value="openapi">Swagger / OpenAPI URL</option><option value="ucp">UCP URL</option></select>
+    <div id="spec-file-fields"><label for="spec-file">JSON or YAML file</label><input id="spec-file" type="file" accept=".json,.yaml,.yml" required aria-describedby="file-limit"><p id="file-limit" class="hint"></p></div>
+    <div id="spec-url-fields" hidden><label for="spec-url">Public specification URL</label><input id="spec-url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" disabled aria-describedby="spec-url-help"><p id="spec-url-help" class="hint">Use a direct Swagger/OpenAPI document URL, not a Swagger UI page. For UCP, use a public HTTPS website root, /.well-known/ucp profile, or MCP endpoint (for example https://coolbudget.lk/api/ucp/mcp). The server discovers the origin profile and its canonical REST or MCP binding, which may use a delegated domain. All fetching is server-side under operator network policy: no credentials, query strings, fragments, redirects, or browser-side fetches. Inspect callable inputs before use: MCP tool arguments use the existing call_tool json_body wrapper; required meta caller-profile data must be supplied by the caller, never fabricated by Gryphon.</p></div>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Import specification</button></div>
+  </form></dialog>
+  <dialog id="spec-refresh-dialog" aria-labelledby="spec-refresh-title"><form method="post" id="spec-refresh-form">
+    <div class="dialog-heading"><h2 id="spec-refresh-title">Update / refresh specification</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <p id="spec-refresh-source" class="source-location"></p><p id="spec-refresh-help" class="hint"></p>
+    <div id="spec-replacement-fields"><label for="spec-replacement">Replacement JSON or YAML file</label><input id="spec-replacement" type="file" accept=".json,.yaml,.yml" aria-describedby="spec-replacement-limit"><p id="spec-replacement-limit" class="hint"></p></div>
+    <label class="check-label"><input id="spec-refresh-read-only-filter" type="checkbox" checked aria-describedby="spec-refresh-filter-help"> Read-only filter</label>
+    <p id="spec-refresh-filter-help" class="hint">Checked: select read operations (normally GET, HEAD, OPTIONS for OpenAPI). Uncheck to include POST operations. Included POST operations execute automatically and may have side effects. PUT, PATCH, and DELETE remain restricted by hosted policy; unsupported UCP tools and contracts are reported explicitly.</p>
+    <label class="check-label"><input id="spec-update-channels" type="checkbox" checked aria-describedby="spec-binding-warning"> Update channels bound to this exact version</label>
+    <p id="spec-binding-warning" class="security-note">Confirm replacing bindings on every channel currently using this exact old version. Old snapshots are retained. Updating bindings invalidates running work and cached recipes may fail on catalog drift. Uncheck to create only a snapshot and leave all channel bindings unchanged.</p>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="spec-refresh-submit" class="primary" type="submit">Confirm update / refresh</button></div>
+  </form></dialog>
+  <dialog id="spec-details-dialog" class="wide-dialog" aria-labelledby="spec-details-title">
+    <div class="dialog-heading"><h2 id="spec-details-title">Version details</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="spec-details-content" class="source-location"></div><p class="dialog-message" role="status"></p>
+  </dialog>
+  <dialog id="spec-delete-dialog" aria-labelledby="spec-delete-title"><form method="post" id="spec-delete-form" autocomplete="off">
+    <div class="dialog-heading"><h2 id="spec-delete-title">Delete specification</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="spec-delete-impact" class="source-location"></div>
+    <p id="spec-delete-warning" class="security-note">This is irreversible: every saved version and its history will be gone. All channel bindings to these versions are detached. Affected running work is invalidated; cached recipes may be stale. Channels, their keys, and other APIs are not deleted.</p>
+    <label for="spec-delete-name">Exact specification name</label><input id="spec-delete-name" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="spec-delete-warning" autofocus>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="spec-delete-submit" class="danger" type="submit" disabled>Delete all versions</button></div>
+  </form></dialog>
+  <dialog id="lifecycle-delete-dialog" aria-labelledby="lifecycle-delete-title"><form method="post" id="lifecycle-delete-form" autocomplete="off">
+    <div class="dialog-heading"><h2 id="lifecycle-delete-title">Delete resource</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="lifecycle-delete-impact" class="source-location"></div><p id="lifecycle-delete-warning" class="security-note"></p>
+    <label id="lifecycle-delete-label" for="lifecycle-delete-name">Exact name</label><input id="lifecycle-delete-name" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="lifecycle-delete-warning" autofocus>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="lifecycle-delete-submit" class="danger" type="submit" disabled>Delete resource</button></div>
+  </form></dialog>
+  <dialog id="spec-history-dialog" class="wide-dialog" aria-labelledby="spec-history-title">
+    <div class="dialog-heading"><h2 id="spec-history-title">Version history</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <p class="hint">Retained immutable snapshots, newest first. Viewing or downloading a version never changes channel bindings. Update and filter actions use the latest version in the main list.</p>
+    <div class="table-wrap"><table><thead><tr><th>Version / operations</th><th>Channel bindings</th><th>Source</th></tr></thead><tbody id="spec-history-rows"></tbody></table></div><p class="dialog-message" role="status"></p>
+  </dialog>
+  <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><form method="post" id="channel-form"><div class="dialog-heading"><h2 id="channel-dialog-title">Create channel</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><label for="channel-name">Channel name</label><input id="channel-name" required maxlength="120" autocomplete="off"><fieldset><legend>Bound specifications</legend><p class="hint">One option per specification defaults to its latest version. Existing older bindings stay pinned when editing; use “Use latest” explicitly to upgrade. Viewing History never rebinds a channel.</p><div id="spec-options" class="check-list"></div></fieldset><label for="sandbox-mode">Execution sandbox</label><select id="sandbox-mode" aria-describedby="sandbox-help"><option value="restricted">Restricted Python · broker API access</option><option value="docker">Docker · offline computation</option></select><p id="sandbox-help" class="hint"></p><fieldset id="library-fieldset"><legend>Library allowlist</legend><p class="hint">Only operator-approved, preinstalled libraries. No package installation.</p><div id="library-options" class="check-list"></div></fieldset>
+    <label class="check-label"><input id="channel-function-summaries" type="checkbox" aria-describedby="channel-summaries-help"> Include function names and descriptions in list_servers</label><p id="channel-summaries-help" class="hint">Off by default: compact server summaries. When checked, list_servers also lists function names and descriptions within response budgets; follow bounded continuation for more. This changes discovery detail, not execution permissions.</p><label class="check-label" id="channel-enabled-label"><input id="channel-enabled" type="checkbox" checked> Channel enabled</label><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save channel</button></div></form></dialog>
+  <dialog id="source-dialog" class="wide-dialog" aria-labelledby="source-title"><div class="dialog-heading"><h2 id="source-title">Specification source</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p class="hint">Compiled self-contained JSON document. Original formatting and remote source pages are not retained.</p><p id="source-metadata" class="source-location hint"></p><pre id="source-content" tabindex="0"></pre><p class="dialog-message" role="status"></p><div class="dialog-actions"><button id="download-source" class="primary">Download JSON</button></div></dialog>
+  <dialog id="connect-dialog" class="wide-dialog" aria-labelledby="connect-title"><div class="dialog-heading"><h2 id="connect-title">Connect your MCP client</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><label for="endpoint">Channel endpoint</label><div class="copy-row"><input id="endpoint" readonly><button id="copy-endpoint" class="secondary">Copy endpoint</button></div><h3>Client configuration</h3><pre id="client-config" tabindex="0"></pre><p class="hint">Replace <code>&lt;YOUR_CHANNEL_TOKEN&gt;</code> with the channel key shown once when you rotated it, keeping it in your client's secure credential store instead of a shared file. The placeholder is not a real secret, and the key must never be added to the URL.</p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button id="copy-config" class="primary">Copy configuration</button></div></dialog>
+  <dialog id="key-dialog" aria-labelledby="key-title"><div class="dialog-heading"><h2 id="key-title">Your new channel key</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><div class="security-note"><strong>Copy it now. It is shown only once.</strong><p>The previous key is invalid. Store this key securely; it cannot be retrieved after closing this dialog.</p></div><label for="channel-token">Channel token</label><input id="channel-token" type="password" readonly autocomplete="off" spellcheck="false"><div class="key-actions"><button id="reveal-key" class="secondary" aria-pressed="false">Reveal key</button><button id="copy-key" class="primary">Copy key</button></div><p class="dialog-message" role="status"></p><div class="dialog-actions"><button class="secondary" data-close>Done, clear key</button></div></dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form method="post" id="confirm-form"><div class="dialog-heading"><h2 id="confirm-title">Confirm action</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div><p id="confirm-description" class="muted"></p><p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close autofocus>Cancel</button><button id="confirm-submit" class="danger" type="submit">Confirm</button></div></form></dialog>
+  <dialog id="user-dialog" aria-labelledby="user-title"><form method="post" id="user-form">
+    <div class="dialog-heading"><h2 id="user-title">Create user</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <label for="user-name">Name</label><input id="user-name" required maxlength="128" autocomplete="off">
+    <fieldset id="user-create-fields"><label for="user-username">Username</label><input id="user-username" required minlength="3" maxlength="128" autocomplete="off" spellcheck="false" autocapitalize="none" aria-describedby="username-hint">
+      <p id="username-hint" class="hint">3–128 ASCII letters, digits, periods, underscores, @, + or hyphens. Usernames are case-insensitive.</p>
+      <label for="user-password">Password</label><input id="user-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" aria-describedby="user-password-hint">
+      <label for="user-confirm">Confirm password</label><input id="user-confirm" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
+      <p id="user-password-hint" class="hint">Use 12–128 characters. A generated passphrase is recommended. Passwords are never returned by the API.</p>
+      <label for="user-role">Role</label><select id="user-role"><option value="tenant_user">Tenant user</option><option value="platform_admin">Platform administrator</option></select>
+      <div id="user-tenant-field"><label for="user-tenant">Assigned tenant</label><select id="user-tenant" required></select></div>
+    </fieldset>
+    <p class="hint">Roles and tenant assignments cannot be changed after creation. Use the status action in the user list to enable or disable an account.</p>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save user</button></div>
+  </form></dialog>
+  <dialog id="password-dialog" aria-labelledby="password-title"><form method="post" id="password-form">
+    <div class="dialog-heading"><h2 id="password-title">Change password</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <p id="password-subject" class="muted"></p><div id="current-password-field"><label for="current-password">Current password</label><input id="current-password" type="password" required maxlength="256" autocomplete="current-password"></div>
+    <label for="new-password">New password</label><input id="new-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" aria-describedby="password-hint">
+    <label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
+    <p id="password-hint" class="hint">Use 12–128 characters; a generated passphrase is recommended. Existing sessions are revoked. Changing your own password signs you out.</p>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button class="primary" type="submit">Save password</button></div>
+  </form></dialog>
+  <noscript><p class="noscript">JavaScript is required for the Gryphon control plane. Enable it for this origin to continue.</p></noscript>
+</body>
+</html>

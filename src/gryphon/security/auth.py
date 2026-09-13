@@ -35,9 +35,10 @@ _MAX_AUTH_HEADERS = 128
 class AsyncVault:
     """Resolve all supported auth types using one broker's validated network client."""
 
-    def __init__(self, network: NetworkClient) -> None:
-        """Create a private credential cache and serialize concurrent refreshes."""
+    def __init__(self, network: NetworkClient, *, allow_environment: bool = True) -> None:
+        """Create private credentials; hosted callers disable all environment authority."""
         self._network = network
+        self._allow_environment = allow_environment
         self._cache: dict[str, tuple[dict[str, str], float]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -55,8 +56,14 @@ class AsyncVault:
         if self._closed:
             raise ConfigurationError("Authentication authority has been closed")
         if auth is None:
-            return _checked_headers(resolve_broker_env_headers(server_name))
-        extras = _checked_headers(resolve_broker_env_headers(server_name, include_credentials=False))
+            return _checked_headers(resolve_broker_env_headers(server_name)) if self._allow_environment else {}
+        if not self._allow_environment and "${" in auth.model_dump_json():
+            raise ConfigurationError("Hosted authentication cannot reference environment variables")
+        extras = (
+            _checked_headers(resolve_broker_env_headers(server_name, include_credentials=False))
+            if self._allow_environment
+            else {}
+        )
         if isinstance(auth, StaticAuthConfig | JwtAuthConfig | BasicAuthConfig):
             return _checked_headers({**extras, "Authorization": resolve_auth_config(server_name, auth)})
         key = hashlib.sha256((server_name + auth.model_dump_json()).encode()).hexdigest()

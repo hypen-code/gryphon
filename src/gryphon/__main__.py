@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import os
+import signal
 import sys
-from contextlib import AsyncExitStack
+import time
+from contextlib import AsyncExitStack, suppress
 from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
@@ -13,7 +17,10 @@ from pydantic import SecretStr
 
 from gryphon import __version__
 from gryphon.config import _ENV_FILE, GryphonConfig, load_config
+from gryphon.errors import CacheError
 from gryphon.utils.logging import get_logger, setup_logging
+
+_PR_SET_PDEATHSIG = 1
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -21,6 +28,7 @@ if TYPE_CHECKING:
     from gryphon.models import AuthConfig
     from gryphon.runtime.registry import Registry
     from gryphon.security.broker import ToolBroker
+    from gryphon.server import ActivityClock
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,7 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Compile once, then start the MCP server")
     _transport_options(run_parser)
     doctor_parser = subparsers.add_parser("doctor", help="Read-only JSON diagnostics; never starts services")
-    for subparser in (clean_parser, compile_parser, serve_parser, run_parser, doctor_parser):
+    stdio_parser = subparsers.add_parser("stdio", help="Compile environment sources and serve using private user state")
+    saas_parser = subparsers.add_parser("saas", help="Start hosted administration and tenant/channel HTTP endpoints")
+    for subparser in (clean_parser, compile_parser, serve_parser, run_parser, doctor_parser, stdio_parser, saas_parser):
         subparser.add_argument("--env-file", default=argparse.SUPPRESS, metavar="PATH", help="Use a custom .env file")
     return parser
 
@@ -68,9 +78,15 @@ def _transport_options(parser: argparse.ArgumentParser) -> None:
 
 def _config_for(args: argparse.Namespace) -> GryphonConfig:
     """Reuse one validated settings instance across composed commands."""
+    from gryphon.cli_setup import load_stdio_config
+
     config = getattr(args, "_config", None)
     if not isinstance(config, GryphonConfig):
-        config = load_config(getattr(args, "env_file", None))
+        loader = load_stdio_config if getattr(args, "command", None) == "stdio" else load_config
+        if getattr(args, "command", None) == "saas":
+            config = load_config(getattr(args, "env_file", None), discover_env=False)
+        else:
+            config = loader(getattr(args, "env_file", None))
         args._config = config
     return config
 
@@ -130,6 +146,20 @@ def _prepare_transport(args: argparse.Namespace, config: GryphonConfig) -> bool:
     return True
 
 
+def _die_with_parent() -> None:
+    """Best-effort Linux parent-death signal so an abandoned stdio server cannot linger.
+
+    An MCP host that dies without closing the child's stdin would otherwise leave a
+    process holding the exclusive run-ledger lease, blocking every later launch.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    except (OSError, AttributeError):
+        return
+
+
 async def _cmd_serve(config_args: argparse.Namespace, *, compiled: bool = False) -> int:
     """Compile when configured, then own every partially started dependency."""
     from gryphon.errors import DockerUnavailableError  # noqa: PLC0415
@@ -165,7 +195,7 @@ async def _serve_started(args: argparse.Namespace, config: GryphonConfig) -> int
     from gryphon.runtime.cache import CacheStore  # noqa: PLC0415
     from gryphon.runtime.executor import CodeExecutor  # noqa: PLC0415
     from gryphon.runtime.registry import Registry  # noqa: PLC0415
-    from gryphon.server import create_server  # noqa: PLC0415
+    from gryphon.server import ActivityClock, create_server  # noqa: PLC0415
 
     async with AsyncExitStack() as stack:
         # Initialize cache
@@ -184,27 +214,79 @@ async def _serve_started(args: argparse.Namespace, config: GryphonConfig) -> int
         executor = CodeExecutor(config, cache, registry, broker=broker)
         # Executor may only partially start; always shut down its partial state.
         stack.push_async_callback(executor.shutdown)
-        await executor.startup()
+        try:
+            await executor.startup()
+        except CacheError:
+            get_logger(__name__).error(
+                "run_ledger_unavailable",
+                action=(
+                    "Run ledger lock is unsafe or unavailable; check permissions or set a distinct GRYPHON_STATE_DIR"
+                ),
+            )
+            raise
         # Normal path — executor is fully started; ensure shutdown runs even on error
         # so no execution resources are left orphaned after serving.
-        mcp = create_server(config, registry=registry, cache=cache, executor=executor)
         transport = getattr(args, "transport", "stdio")
+        reap = transport == "stdio" and getattr(args, "command", None) == "stdio"
+        activity = ActivityClock() if reap else None
+        mcp = create_server(config, registry=registry, cache=cache, executor=executor, activity=activity)
         get_logger(__name__).info(
             "gryphon_starting", version=__version__, transport=transport, profile=config.sandbox_mode
         )
         if transport == "stdio":
-            await mcp.run_stdio_async(show_banner=False)
+            if activity is not None:
+                await _serve_stdio(mcp, activity, config.stdio_idle_timeout_seconds)
+            else:
+                await mcp.run_stdio_async(show_banner=False)
         else:
             await mcp.run_http_async(host=config.host, port=config.port, show_banner=False)
         # Stop execution, close broker connections and cache in reverse startup order.
     return 0
 
 
+async def _serve_stdio(mcp: Any, activity: ActivityClock, timeout_seconds: int) -> None:
+    """Serve stdio and exit once an abandoned host stops sending messages.
+
+    A host that drops a connection without closing the child's stdin leaves a process
+    waiting forever; reaping it releases the run ledger and its resources. Cancellation
+    cannot unwind the SDK's blocked reader, so reaping exits the process directly.
+    """
+    server = asyncio.create_task(mcp.run_stdio_async(show_banner=False))
+    if timeout_seconds <= 0:
+        await server
+        return
+
+    async def watchdog() -> None:
+        """Return when no inbound MCP message has arrived within the configured window."""
+        interval = min(60.0, float(timeout_seconds))
+        while True:
+            await asyncio.sleep(interval)
+            if time.monotonic() - activity.last >= timeout_seconds:
+                return
+
+    watch = asyncio.create_task(watchdog())
+    done, _ = await asyncio.wait({server, watch}, return_when=asyncio.FIRST_COMPLETED)
+    if server in done:
+        watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch
+        server.result()
+        return
+    get_logger(__name__).warning(
+        "stdio_idle_reaped", action="No MCP client activity; exiting to release the run ledger"
+    )
+    os._exit(0)
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     """Compile exactly once and serve using the same validated settings."""
+    from gryphon.cli_setup import prepare_stdio_state
+
     config = _config_for(args)
     if not _prepare_transport(args, config):
         return 1
+    if args.command == "stdio":
+        await asyncio.to_thread(prepare_stdio_state, config)
     if await _cmd_compile(args):
         return 1
     return await _cmd_serve(args, compiled=True)
@@ -218,6 +300,15 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_saas(args: argparse.Namespace) -> int:
+    """Start the hosted application with explicit environment-only operator settings."""
+    from gryphon.saas import serve
+    from gryphon.saas_config import SaaSConfig
+
+    options: dict[str, Any] = {"_env_file": getattr(args, "env_file", None)}
+    return await serve(SaaSConfig(**options), _config_for(args))
+
+
 def main() -> None:
     """Run the Gryphon CLI with JSON command output on stdout and safe diagnostics on stderr.
 
@@ -229,12 +320,15 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(0)
+    if args.command == "stdio":
+        _die_with_parent()
     setup_logging("INFO")
     try:
         # Load .env into os.environ early so vault.py can read server credentials.
         # override=False means explicit env vars always win over .env values.
-        env_file_path = args.env_file if args.env_file else str(_ENV_FILE)
-        load_dotenv(env_file_path, override=False)
+        env_file_path = args.env_file if args.env_file is not None else str(_ENV_FILE)
+        if args.command not in {"stdio", "saas"} or args.env_file is not None:
+            load_dotenv(env_file_path, override=False)
         # Load config early for log level
         config = _config_for(args)
         setup_logging(config.log_level)
@@ -243,6 +337,8 @@ def main() -> None:
             "compile": _cmd_compile,
             "serve": _cmd_serve,
             "run": _cmd_run,
+            "stdio": _cmd_run,
+            "saas": _cmd_saas,
             "doctor": _cmd_doctor,
         }
         exit_code = asyncio.run(command_map[args.command](args))

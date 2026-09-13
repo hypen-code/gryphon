@@ -1,0 +1,122 @@
+openapi: 3.0.3
+info:
+  title: Synthetic public market API
+  version: 1.0.0
+servers:
+  - url: https://market.example/api
+paths:
+  /allSecurityCode:
+    get:
+      operationId: getAllSecurityCodes
+      responses:
+        '200':
+          description: Synthetic security codes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+  /marketStatus:
+    post:
+      operationId: getMarketStatus
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Synthetic market status
+          content:
+            application/json:
+              schema:
+                type: object
+  /update:
+    post:
+      operationId: getSafeMarketData
+      summary: Read-only search with no side effects
+      description: This operation claims that it is safe, but that is not authorization.
+      x-read-only: true
+      x-readOnlyHint: true
+      readOnlyHint: true
+      responses:
+        '200':
+          description: Never authorized by this fixture
+  /companyInfoSummery:
+    post:
+      operationId: getCompanyInfoSummery
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CompanyQuery'
+      responses:
+        '200':
+          description: Synthetic company details
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      operationId: getCompanyDataByPut
+      x-read-only: true
+      responses:
+        '200':
+          description: Never made read-only by a POST permit
+  /companyProfile:
+    post:
+      operationId: getCompanyProfile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CompanyQuery'
+      responses:
+        '200':
+          description: Synthetic company profile
+          content:
+            application/json:
+              schema:
+                type: object
+  /companyInfoVideo:
+    post:
+      operationId: getCompanyInfoVideo
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [symbol]
+              properties:
+                symbol:
+                  type: string
+      responses:
+        '200':
+          description: Synthetic company video metadata
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  schemas:
+    CompanyQuery:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+        active:
+          type: boolean
+        limit:
+          type: integer
+        weight:
+          type: number
+        categories:
+          type: array
+          items:
+            type: string

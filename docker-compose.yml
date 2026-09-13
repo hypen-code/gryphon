@@ -5,10 +5,11 @@ services:
       dockerfile: Dockerfile
     image: gryphon:2.0.0
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       GRYPHON_HOST: 0.0.0.0
-      GRYPHON_HTTP_AUTH_TOKEN: ${GRYPHON_HTTP_AUTH_TOKEN:?Set a random token of at least 32 characters}
+      GRYPHON_HTTP_AUTH_TOKEN: ${GRYPHON_HTTP_AUTH_TOKEN:-}
       GRYPHON_SANDBOX_MODE: restricted
       GRYPHON_NETWORK_MODE: none
       GRYPHON_COMPILED_OUTPUT_DIR: /app/compiled
@@ -41,6 +42,105 @@ services:
       timeout: 5s
       retries: 3
 
+  gryphon-hosted:
+    profiles: [hosted]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gryphon:2.0.0
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        : "$${GRYPHON_SAAS_ADMIN_TOKEN:?Set a random administrator token of at least 32 characters}"
+        : "$${GRYPHON_SAAS_PUBLIC_ORIGIN:?Set the canonical HTTPS browser origin}"
+        : "$${GRYPHON_POSTGRES_PASSWORD:?Set an explicit URL-safe PostgreSQL password}"
+        export GRYPHON_SAAS_DATABASE_URL="postgresql://gryphon:$${GRYPHON_POSTGRES_PASSWORD}@postgres:5432/gryphon"
+        exec gryphon saas
+    environment:
+      GRYPHON_SAAS_ADMIN_TOKEN: ${GRYPHON_SAAS_ADMIN_TOKEN:-}
+      GRYPHON_SAAS_PUBLIC_ORIGIN: ${GRYPHON_SAAS_PUBLIC_ORIGIN:-}
+      GRYPHON_POSTGRES_PASSWORD: ${GRYPHON_POSTGRES_PASSWORD:-}
+      GRYPHON_SAAS_HOST: 0.0.0.0
+      GRYPHON_SAAS_PORT: 8000
+      GRYPHON_SAAS_STATE_DIR: /app/data/saas
+      GRYPHON_SAAS_ALLOW_INSECURE_HTTP: ${GRYPHON_SAAS_ALLOW_INSECURE_HTTP:-false}
+      GRYPHON_SAAS_DOCKER_ENABLED: "false"
+      GRYPHON_SANDBOX_MODE: restricted
+      GRYPHON_NETWORK_MODE: none
+      GRYPHON_ALLOW_WRITES: "false"
+      GRYPHON_ALLOW_PRIVATE_NETWORKS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - gryphon_hosted_data:/app/data
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    ports:
+      - "127.0.0.1:8001:8000"
+    networks:
+      - default
+      - hosted_database
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request, urllib.parse; origin = os.environ['GRYPHON_SAAS_PUBLIC_ORIGIN']; request = urllib.request.Request('http://127.0.0.1:8000/health', headers={'Host': urllib.parse.urlsplit(origin).netloc}); opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); response = opener.open(request, timeout=3); assert response.status == 200"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    profiles: [hosted]
+    image: postgres:17.6
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        export POSTGRES_PASSWORD="$${GRYPHON_POSTGRES_PASSWORD:?Set an explicit PostgreSQL password}"
+        exec docker-entrypoint.sh postgres
+    environment:
+      GRYPHON_POSTGRES_PASSWORD: ${GRYPHON_POSTGRES_PASSWORD:-}
+      POSTGRES_USER: gryphon
+      POSTGRES_DB: gryphon
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - gryphon_postgres_data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777,noexec,nosuid,nodev
+      - /var/run/postgresql:size=16m,mode=3775,uid=999,gid=999
+    user: "999:999"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    networks:
+      - hosted_database
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gryphon -d gryphon -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+networks:
+  hosted_database:
+    internal: true
+
 volumes:
   gryphon_compiled:
   gryphon_data:
+  gryphon_hosted_data:
+  gryphon_postgres_data:

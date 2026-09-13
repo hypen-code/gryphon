@@ -8,12 +8,15 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from gryphon.errors import CapacityError, ExecutionTimeoutError, SecurityViolationError
+from gryphon.errors import CapacityError, ExecutionTimeoutError, InputValidationError, SecurityViolationError
+from gryphon.runtime.execution_metrics import broker_measurements
 from gryphon.security.auth import AsyncVault
 from gryphon.security.encoding import encode_request, validate_arguments
+from gryphon.security.mcp_client import invoke_tool
 from gryphon.security.network import NetworkClient, decode_json
 from gryphon.security.policies import check_domain_allowed, enforce_read_only, validated_url
 from gryphon.security.response import validate_response
+from gryphon.security.ucp_identity import effective_profile, prepare_arguments
 
 if TYPE_CHECKING:
     from gryphon.config import GryphonConfig
@@ -33,6 +36,8 @@ class ToolBroker:
         config: GryphonConfig,
         registry: Registry,
         auth_configs: dict[str, AuthConfig] | None = None,
+        *,
+        allow_environment: bool = True,
     ) -> None:
         """Create the broker-local verified connection pool and credential cache.
 
@@ -40,12 +45,13 @@ class ToolBroker:
             config: Trusted administrator network/write/resource policy.
             registry: Loaded v2 manifest registry.
             auth_configs: Host-only authentication configuration by server.
+            allow_environment: False forbids environment fallback and interpolation for hosted channels.
         """
         self._config = config
         self._registry = registry
         self._auth_configs = dict(auth_configs or {})
         self._network = NetworkClient(config)
-        self._vault = AsyncVault(self._network)
+        self._vault = AsyncVault(self._network, allow_environment=allow_environment)
         self._closed = False
 
     async def invoke(
@@ -75,12 +81,35 @@ class ToolBroker:
         manifest = self._registry.get_manifest(server_name)
         endpoint = self._registry.get_endpoint(server_name, function_name)
         self._authorize(manifest, endpoint, server_name, function_name)
-        normalized = validate_arguments(endpoint, arguments)
-        url, headers, body = encode_request(endpoint, endpoint.base_url or manifest.base_url, normalized)
+        normalized = validate_arguments(endpoint, prepare_arguments(endpoint, arguments, self._config))
+        headers: dict[str, str]
+        if endpoint.mcp_binding is not None:
+            url, headers, body = endpoint.mcp_binding.endpoint, {}, normalized.get("json_body", {})
+        else:
+            url, headers, body = encode_request(endpoint, endpoint.base_url or manifest.base_url, normalized)
         check_domain_allowed(url, self._config.allowed_domains)
+        return await self._dispatch(
+            server_name, manifest, endpoint, url, headers, body, scope, body_present="json_body" in normalized
+        )
+
+    async def _dispatch(
+        self,
+        server_name: str,
+        manifest: ServerManifest,
+        endpoint: EndpointManifest,
+        url: str,
+        headers: dict[str, str],
+        body: Any,
+        scope: ExecutionScope,
+        *,
+        body_present: bool,
+    ) -> Any:
+        """Bound broker wall wait and optionally count only fully accepted JSON returns."""
+        state = broker_measurements(scope)
+        started = time.monotonic() if state is not None else 0
         try:
             async with asyncio.timeout(scope.deadline - time.monotonic()):
-                return await self._send(
+                result = await self._send(
                     server_name,
                     manifest,
                     endpoint,
@@ -88,10 +117,16 @@ class ToolBroker:
                     headers,
                     body,
                     scope,
-                    body_present="json_body" in normalized,
+                    body_present=body_present,
                 )
         except TimeoutError:
             raise ExecutionTimeoutError("Execution deadline exceeded during capability call") from None
+        finally:
+            if state is not None:
+                state.broker_ms += max(0, (time.monotonic() - started) * 1000)
+        if state is not None:
+            state.accept_response(result, self._config.max_response_size_bytes)
+        return result
 
     async def _send(
         self,
@@ -106,17 +141,25 @@ class ToolBroker:
         body_present: bool,
     ) -> Any:
         """Resolve host credentials and recheck authority before and after network I/O."""
+        if endpoint.mcp_binding is not None:
+            self._authorize(manifest, endpoint, server_name, endpoint.function_name)
+            return await self._send_mcp(endpoint, body, scope)
         credentials = await self._vault.resolve(server_name, self._auth_configs.get(server_name))
         self._check_credential_origin(manifest.base_url, url, credentials)
         if {key.lower() for key in headers} & {key.lower() for key in credentials}:
             raise SecurityViolationError("Request header override is not permitted")
         self._check_scope(scope)
+        self._authorize(manifest, endpoint, server_name, endpoint.function_name)
+        form = endpoint.request_body_media_type != "application/json"
+        multipart = endpoint.request_body_media_type == "multipart/form-data"
         response = await self._network.request(
             endpoint.method,
             url,
             headers={**headers, **credentials},
-            json_body=body,
-            json_body_present=body_present,
+            json_body=None if form else body,
+            json_body_present=body_present and not form,
+            data=body if form and not multipart else None,
+            content=body if multipart else None,
             timeout=scope.deadline - time.monotonic(),
         )
         self._check_scope(scope)
@@ -125,6 +168,26 @@ class ToolBroker:
         result = validate_response(decode_json(response), endpoint.output_schema, credentials)
         self._check_scope(scope)
         return result
+
+    async def _send_mcp(self, endpoint: EndpointManifest, body: Any, scope: ExecutionScope) -> Any:
+        """Invoke a fixed, fingerprinted native MCP tool without forwarding host credentials."""
+        binding = endpoint.mcp_binding
+        if binding is None or not isinstance(body, dict):
+            raise InputValidationError("MCP tool arguments must be an object")
+        self._check_scope(scope)
+        result = await invoke_tool(
+            self._config,
+            binding.endpoint,
+            binding.tool_name,
+            body,
+            expected_fingerprint=binding.tool_fingerprint,
+            ucp_agent_profile=effective_profile(endpoint, body, self._config),
+            check_active=lambda: self._check_scope(scope),
+            timeout=scope.deadline - time.monotonic(),
+            max_bytes=self._config.max_response_size_bytes,
+        )
+        self._check_scope(scope)
+        return validate_response(result, endpoint.output_schema, {})
 
     def _authorize(
         self,
@@ -136,6 +199,18 @@ class ToolBroker:
         """Enforce source read-only policy plus exact administrator write grants."""
         if endpoint.method not in _READ_METHODS | _WRITE_METHODS:
             raise SecurityViolationError("Unsupported upstream HTTP method")
+        if endpoint.method == "POST" and self._config.allow_catalog_posts:
+            if manifest.is_read_only and not endpoint.read_only_post:
+                enforce_read_only(endpoint.method, server_name)
+            return
+        if endpoint.read_only_post:
+            base = endpoint.base_url or manifest.base_url
+            if endpoint.method != "POST" or not any(
+                permit.matches(server_name, endpoint.method, base, endpoint.path)
+                for permit in self._config.allowed_read_only_post_operations
+            ):
+                raise SecurityViolationError("Read-only POST is not authorized by administrator policy")
+            return
         if manifest.is_read_only:
             enforce_read_only(endpoint.method, server_name)
         if endpoint.method in _WRITE_METHODS:
@@ -158,8 +233,12 @@ class ToolBroker:
         if credentials and (base.scheme, base.host, base.port) != (target.scheme, target.host, target.port):
             raise SecurityViolationError("Credentials cannot be delegated to a different upstream origin")
 
-    async def close(self) -> None:
-        """Revoke future calls, erase cached credentials and close all connections."""
+    def revoke(self) -> None:
+        """Immediately revoke hosted authority before waiting for in-flight requests to drain."""
         self._closed = True
         self._vault.close()
+
+    async def close(self) -> None:
+        """Revoke future calls, erase cached credentials and close all connections."""
+        self.revoke()
         await self._network.close()

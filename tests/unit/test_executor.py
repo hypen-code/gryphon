@@ -390,3 +390,40 @@ def test_lease_reuses_private_inode_and_releases_idempotently(tmp_path: Path) ->
     second.acquire()
     second.close()
     assert lock.stat().st_ino == inode
+
+
+def test_lease_try_acquire_reports_contention_without_raising(tmp_path: Path) -> None:
+    """Advisory acquisition distinguishes live contention from an unsafe lock file."""
+    first = RecoveryLease(str(tmp_path / "runs.db"))
+    second = RecoveryLease(str(tmp_path / "runs.db"))
+    assert first.try_acquire() is True and first.try_acquire() is True
+    assert second.try_acquire() is False
+    first.close()
+    assert second.try_acquire() is True
+    second.close()
+
+
+def test_lease_try_acquire_still_rejects_unsafe_files(tmp_path: Path) -> None:
+    """A degraded filesystem never downgrades into silently serving without ownership."""
+    target = tmp_path / "target"
+    target.write_text("untouched")
+    target.chmod(0o600)
+    (tmp_path / "runs.db.lock").symlink_to(target)
+    with pytest.raises(CacheError):
+        RecoveryLease(str(tmp_path / "runs.db")).try_acquire()
+
+
+async def test_executor_starts_when_another_process_owns_recovery(tmp_path: Path) -> None:
+    """A held ledger is advisory: startup proceeds and recovery stays stale-scoped."""
+    holder = RecoveryLease(str(tmp_path / "runs.db"))
+    holder.acquire()
+    try:
+        executor = _make_executor(tmp_path)
+        await executor.startup()
+        assert executor._owns_recovery is False
+        recover = cast("AsyncMock", executor._runs.recover_interrupted)
+        recover.assert_awaited_once()
+        assert recover.await_args is not None and recover.await_args.args[0] > 0
+        await executor.shutdown()
+    finally:
+        holder.close()

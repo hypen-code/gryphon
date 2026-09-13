@@ -46,6 +46,7 @@ _CORE_TOOLS = (
     "cancel_run",
     "list_recipes",
     "read_artifact",
+    "transform_artifact",
 )
 
 
@@ -71,6 +72,7 @@ def _configuration(config: GryphonConfig, env_file: str | None) -> dict[str, Any
         "paths": paths,
         "compile_on_startup": config.compile_on_startup,
         "http_auth_configured": config.http_auth_token is not None,
+        "ucp_agent_profile_configured": config.ucp_agent_profile is not None,
         "http_auth_required": True,
         "port": config.port,
         "allow_writes": config.allow_writes,

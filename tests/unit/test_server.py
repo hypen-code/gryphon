@@ -96,7 +96,7 @@ async def test_create_server_supplied_dependencies_are_never_initialized(compone
     """The CLI retains complete lifecycle ownership of injected dependencies."""
     mcp, registry, cache, executor = components
     async with Client(mcp):
-        assert len(await mcp.list_tools()) == 10
+        assert len(await mcp.list_tools()) == 11
     registry.load.assert_not_called()
     cache.initialize.assert_not_awaited()
     cache.close.assert_not_awaited()

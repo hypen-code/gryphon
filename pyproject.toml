@@ -46,6 +46,11 @@ dev = [
     "types-jsonschema>=4.26.0.20260518",
     "pre-commit>=4.6.2",
 ]
+saas = [
+    "psycopg==3.2.9",
+    "starlette==1.6.0",
+    "uvicorn==0.52.4",
+]
 
 [project.scripts]
 gryphon = "gryphon.__main__:main"

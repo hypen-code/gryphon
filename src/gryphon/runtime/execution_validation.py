@@ -13,6 +13,7 @@ from jsonschema import validators
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from gryphon.errors import InputValidationError, SecurityViolationError
+from gryphon.security.ast_guard import configured_imports
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -200,6 +201,24 @@ def _check_schema_directives(schema: dict[str, Any]) -> None:
                 pending.extend(child.values())
             elif name in _SCHEMA_CHILDREN:
                 pending.extend(child if isinstance(child, list) else [child])
+
+
+def effective_imports(config: GryphonConfig) -> frozenset[str]:
+    """Resolve current import authority without ever granting restricted VM imports.
+
+    Args:
+        config: Trusted settings, revalidated even after in-memory mutation.
+
+    Returns:
+        The configured Docker subset or the empty restricted import profile.
+
+    Raises:
+        SecurityViolationError: An import setting or sandbox profile is invalid.
+    """
+    selected = configured_imports(config.sandbox_allowed_imports)
+    if config.sandbox_mode not in ("restricted", "docker"):
+        raise SecurityViolationError("Unknown execution profile")
+    return selected if config.sandbox_mode == "docker" else frozenset()
 
 
 def prepare_source(code: str, profile: str) -> str:

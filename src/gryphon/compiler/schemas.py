@@ -14,7 +14,8 @@ import json
 from typing import Any
 
 from gryphon.errors import CompileError
-from gryphon.models import ParamSchema, ResponseField
+from gryphon.models import ParamSchema, RequestBodyMediaType, ResponseField
+from gryphon.security.form_encoding import check_form_schema
 from gryphon.security.schema import check_schema as check_bounded_schema
 from gryphon.utils.logging import get_logger
 
@@ -236,18 +237,40 @@ class SchemaParser:
         if not item_types <= _SCALAR_TYPES:
             raise CompileError("Query arrays must declare scalar item types")
 
+    @staticmethod
+    def _request_body_media_type(
+        body: dict[str, Any],
+    ) -> RequestBodyMediaType:
+        """Prefer JSON, otherwise select supported form media without trusting extension hints."""
+        content = body.get("content", {})
+        if not body or "application/json" in content:
+            return "application/json"
+        if "application/x-www-form-urlencoded" in content:
+            return "application/x-www-form-urlencoded"
+        if "multipart/form-data" in content:
+            return "multipart/form-data"
+        raise CompileError("Unsupported request media type; use application/json or a supported scalar form")
+
     def _parse_request_body(self, body: dict[str, Any]) -> dict[str, Any] | None:
-        """Return an application/json body schema, rejecting encodings the broker cannot send."""
+        """Normalize JSON or a closed scalar form body, rejecting unsupported serialization."""
         if not body:
             return None
         if "$ref" in body:
             body = self._resolve_ref(body["$ref"]) or {}
-        media: dict[str, Any] = body.get("content", {}).get("application/json", {})
+        media_type = self._request_body_media_type(body)
+        media: dict[str, Any] = body.get("content", {}).get(media_type, {})
         schema = media.get("schema")
-        if not isinstance(schema, dict):
-            raise CompileError("Unsupported request media type or missing application/json schema")
+        if not isinstance(schema, dict) or ("encoding" in media and media["encoding"] != {}):
+            raise CompileError("Unsupported request schema or explicit body encoding")
         # Check complexity — reject unsupported request validation semantics.
-        return self._normalize_schema(schema)
+        normalized = self._normalize_schema(schema)
+        if media_type != "application/json":
+            normalized.setdefault("additionalProperties", False)
+            try:
+                check_form_schema(normalized, multipart=media_type == "multipart/form-data")
+            except ValueError:
+                raise CompileError("Unsupported form body schema") from None
+        return normalized
 
     @staticmethod
     def _media_schema(content: dict[str, Any]) -> dict[str, Any]:
