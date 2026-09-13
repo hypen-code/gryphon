@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import StaticTokenVerifier, TokenVerifier
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 from gryphon.errors import InputValidationError
 from gryphon.runtime.context import (
@@ -50,6 +52,31 @@ _CORE_TOOLS = (
 )
 _EXECUTION_TOOLS = frozenset({"execute_code", "run_cached_code", "transform_artifact"})
 _STATEFUL_TOOLS = _EXECUTION_TOOLS | {"submit_code", "cancel_run"}
+
+
+class ActivityClock:
+    """Track the last inbound MCP message so a stdio host that abandons a connection is reaped."""
+
+    def __init__(self) -> None:
+        """Start the clock at construction so an unconnected process is also bounded."""
+        self.last = time.monotonic()
+
+    def touch(self) -> None:
+        """Record an inbound message."""
+        self.last = time.monotonic()
+
+
+class _ActivityMiddleware(Middleware):
+    """Record inbound activity without changing request behavior."""
+
+    def __init__(self, clock: ActivityClock) -> None:
+        """Retain the shared clock owned by the caller."""
+        self._clock = clock
+
+    async def on_message(self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]) -> Any:
+        """Touch the clock, then continue the normal middleware chain."""
+        self._clock.touch()
+        return await call_next(context)
 
 
 class _Tools(ArtifactTools):
@@ -353,12 +380,14 @@ def create_server(
     executor: CodeExecutor | None = None,
     *,
     auth: TokenVerifier | None = None,
+    activity: ActivityClock | None = None,
 ) -> FastMCP:
     """Create structured MCP tools without importing generated code or restarting supplied objects.
 
     Supplied registry/cache/executor dependencies remain CLI-owned; missing ones are
     initialized and closed by the lifespan. Validated config controls discovery and
     execution; explicit trusted auth overrides the configured static operator token.
+    A supplied activity clock records inbound messages for stdio idle reaping.
     """
     # Registry and cache ownership are tracked explicitly by ServerDependencies.
     # Pre-flight initialization uses these same instances, never duplicate stores.
@@ -378,6 +407,8 @@ def create_server(
         mask_error_details=True,
         strict_input_validation=True,
     )
+    if activity is not None:
+        mcp.add_middleware(_ActivityMiddleware(activity))
     # Inject skills-tool availability into discovery only when additional tools are enabled.
     names = (*_CORE_TOOLS, "list_skills", "get_server_skills") if config.enable_additional_tools else _CORE_TOOLS
     # No direct-tools section bypasses discovery and inspection;

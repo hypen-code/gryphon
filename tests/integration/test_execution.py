@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gryphon.config import GryphonConfig
-from gryphon.errors import CacheError, CapacityError, ExecutionError
+from gryphon.errors import CapacityError, ExecutionError
 from gryphon.runtime.cache import CacheStore
 from gryphon.runtime.executor import CodeExecutor
 from gryphon.runtime.registry import Registry
@@ -213,9 +214,10 @@ async def test_second_executor_cannot_interrupt_an_active_ledger(
     await entered.wait()
     second = CodeExecutor(execution._config, execution._cache, execution._registry, broker=AsyncMock())
     try:
-        with patch.object(second._runs, "initialize") as initialize, pytest.raises(CacheError):
-            await second.startup()
-        initialize.assert_not_awaited()
+        await second.startup()
+        # A concurrent executor serves without owning recovery, and stale-scoped recovery
+        # never interrupts the first process's live run.
+        assert second._owns_recovery is False
         receipt = await execution.get_run(record.id)
         assert receipt is not None and receipt.status == "running"
     finally:
@@ -307,6 +309,13 @@ async def test_startup_marks_abandoned_receipts_interrupted_without_reexecution(
     queued, _ = await runs.create("alice", "abandoned")
     await runs.start(queued.id, "alice")
     await runs.close()
+    # Age the receipt so stale-scoped recovery treats it as abandoned rather than a live peer.
+    connection = sqlite3.connect(execution._config.run_db_path)
+    try:
+        connection.execute("UPDATE runs SET updated_at = 0 WHERE id = ?", (queued.id,))
+        connection.commit()
+    finally:
+        connection.close()
     fresh = CodeExecutor(execution._config, execution._cache, execution._registry, broker=AsyncMock())
     await fresh.startup()
     try:

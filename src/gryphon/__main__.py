@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import os
+import signal
 import sys
-from contextlib import AsyncExitStack
+import time
+from contextlib import AsyncExitStack, suppress
 from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
@@ -13,7 +17,10 @@ from pydantic import SecretStr
 
 from gryphon import __version__
 from gryphon.config import _ENV_FILE, GryphonConfig, load_config
+from gryphon.errors import CacheError
 from gryphon.utils.logging import get_logger, setup_logging
+
+_PR_SET_PDEATHSIG = 1
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -21,6 +28,7 @@ if TYPE_CHECKING:
     from gryphon.models import AuthConfig
     from gryphon.runtime.registry import Registry
     from gryphon.security.broker import ToolBroker
+    from gryphon.server import ActivityClock
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -138,6 +146,20 @@ def _prepare_transport(args: argparse.Namespace, config: GryphonConfig) -> bool:
     return True
 
 
+def _die_with_parent() -> None:
+    """Best-effort Linux parent-death signal so an abandoned stdio server cannot linger.
+
+    An MCP host that dies without closing the child's stdin would otherwise leave a
+    process holding the exclusive run-ledger lease, blocking every later launch.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    except (OSError, AttributeError):
+        return
+
+
 async def _cmd_serve(config_args: argparse.Namespace, *, compiled: bool = False) -> int:
     """Compile when configured, then own every partially started dependency."""
     from gryphon.errors import DockerUnavailableError  # noqa: PLC0415
@@ -173,7 +195,7 @@ async def _serve_started(args: argparse.Namespace, config: GryphonConfig) -> int
     from gryphon.runtime.cache import CacheStore  # noqa: PLC0415
     from gryphon.runtime.executor import CodeExecutor  # noqa: PLC0415
     from gryphon.runtime.registry import Registry  # noqa: PLC0415
-    from gryphon.server import create_server  # noqa: PLC0415
+    from gryphon.server import ActivityClock, create_server  # noqa: PLC0415
 
     async with AsyncExitStack() as stack:
         # Initialize cache
@@ -192,20 +214,68 @@ async def _serve_started(args: argparse.Namespace, config: GryphonConfig) -> int
         executor = CodeExecutor(config, cache, registry, broker=broker)
         # Executor may only partially start; always shut down its partial state.
         stack.push_async_callback(executor.shutdown)
-        await executor.startup()
+        try:
+            await executor.startup()
+        except CacheError:
+            get_logger(__name__).error(
+                "run_ledger_unavailable",
+                action=(
+                    "Run ledger lock is unsafe or unavailable; check permissions or set a distinct GRYPHON_STATE_DIR"
+                ),
+            )
+            raise
         # Normal path — executor is fully started; ensure shutdown runs even on error
         # so no execution resources are left orphaned after serving.
-        mcp = create_server(config, registry=registry, cache=cache, executor=executor)
         transport = getattr(args, "transport", "stdio")
+        reap = transport == "stdio" and getattr(args, "command", None) == "stdio"
+        activity = ActivityClock() if reap else None
+        mcp = create_server(config, registry=registry, cache=cache, executor=executor, activity=activity)
         get_logger(__name__).info(
             "gryphon_starting", version=__version__, transport=transport, profile=config.sandbox_mode
         )
         if transport == "stdio":
-            await mcp.run_stdio_async(show_banner=False)
+            if activity is not None:
+                await _serve_stdio(mcp, activity, config.stdio_idle_timeout_seconds)
+            else:
+                await mcp.run_stdio_async(show_banner=False)
         else:
             await mcp.run_http_async(host=config.host, port=config.port, show_banner=False)
         # Stop execution, close broker connections and cache in reverse startup order.
     return 0
+
+
+async def _serve_stdio(mcp: Any, activity: ActivityClock, timeout_seconds: int) -> None:
+    """Serve stdio and exit once an abandoned host stops sending messages.
+
+    A host that drops a connection without closing the child's stdin leaves a process
+    waiting forever; reaping it releases the run ledger and its resources. Cancellation
+    cannot unwind the SDK's blocked reader, so reaping exits the process directly.
+    """
+    server = asyncio.create_task(mcp.run_stdio_async(show_banner=False))
+    if timeout_seconds <= 0:
+        await server
+        return
+
+    async def watchdog() -> None:
+        """Return when no inbound MCP message has arrived within the configured window."""
+        interval = min(60.0, float(timeout_seconds))
+        while True:
+            await asyncio.sleep(interval)
+            if time.monotonic() - activity.last >= timeout_seconds:
+                return
+
+    watch = asyncio.create_task(watchdog())
+    done, _ = await asyncio.wait({server, watch}, return_when=asyncio.FIRST_COMPLETED)
+    if server in done:
+        watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch
+        server.result()
+        return
+    get_logger(__name__).warning(
+        "stdio_idle_reaped", action="No MCP client activity; exiting to release the run ledger"
+    )
+    os._exit(0)
 
 
 async def _cmd_run(args: argparse.Namespace) -> int:
@@ -250,6 +320,8 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(0)
+    if args.command == "stdio":
+        _die_with_parent()
     setup_logging("INFO")
     try:
         # Load .env into os.environ early so vault.py can read server credentials.

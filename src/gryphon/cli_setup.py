@@ -49,6 +49,15 @@ def load_stdio_config(env_file: str | None = None) -> GryphonConfig:
     config = load_config(env_file, discover_env=False)
     if config.swaggers is None and "swagger_config_file" not in config.model_fields_set:
         config.swaggers = []
+    if "include_function_summaries" not in config.model_fields_set:
+        # Local stdio serves a private single-client catalog, so show function names and
+        # descriptions by default. An explicit GRYPHON_INCLUDE_FUNCTION_SUMMARIES=false wins.
+        config.include_function_summaries = True
+    if "allow_catalog_posts" not in config.model_fields_set:
+        # Local stdio is an operator-launched, single-user catalog, so included POST
+        # operations execute like hosted channels. PUT/PATCH/DELETE still require
+        # GRYPHON_ALLOW_WRITES and exact permits; set GRYPHON_ALLOW_CATALOG_POSTS=false to opt out.
+        config.allow_catalog_posts = True
     root = _state_root(config)
     state = contained_path(root, _source_namespace(config))
     config.state_dir = str(root)

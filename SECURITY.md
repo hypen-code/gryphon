@@ -62,8 +62,8 @@ isolation certification. Native MCP Tasks are disabled and unadvertised.
 
 - Every call resolves an exact registered server/function and validates closed
   request arguments before encoding parameters and JSON bodies.
-- `is_read_only: true` filters ordinary HTTP writes during compilation and dispatch; retained exact POST-read classifications remain compatible. `GRYPHON_ALLOW_CATALOG_POSTS` defaults **false for local/operator mode**. Without it, ordinary writes require a write-enabled source, **both** `GRYPHON_ALLOW_WRITES=true` and exact `server.function` permits in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
-- **SaaS enables `allow_catalog_posts=True` on a private copy of base configuration. Included catalog-bound POSTs execute automatically without separate approval**, and may have side effects. This bypasses the ordinary write-permit requirement only for POST; an unclassified HTTP POST on a read-only source still fails. Channels force `allow_writes=False` and empty write permits, so **PUT/PATCH/DELETE API operations remain denied** even if visible. No unbound or wrong-channel function becomes callable.
+- `is_read_only: true` filters ordinary HTTP writes during compilation and dispatch; retained exact POST-read classifications remain compatible. `GRYPHON_ALLOW_CATALOG_POSTS` defaults **false for legacy `serve`/`run`** and **true for local `stdio`** (like hosted channels). Without it, ordinary writes require a write-enabled source, **both** `GRYPHON_ALLOW_WRITES=true` and exact `server.function` permits in `GRYPHON_ALLOWED_WRITE_OPERATIONS`.
+- **Local `stdio` and SaaS enable `allow_catalog_posts=True`. Included catalog-bound POSTs execute automatically without separate approval**, and may have side effects. This bypasses the ordinary write-permit requirement only for POST; an unclassified HTTP POST on a read-only source still fails. `allow_writes` stays `false` and write permits stay empty, so **PUT/PATCH/DELETE API operations remain denied** even if visible. No unbound or wrong-channel function becomes callable; set `GRYPHON_ALLOW_CATALOG_POSTS=false` to opt out.
 - Legacy `GRYPHON_ALLOWED_READ_ONLY_POST_OPERATIONS` defaults `[]`: exact canonical `server_name`, effective `base_url` (including CDN/operation overrides), literal `path`, `method:"POST"`; no templates/globs. Parser/broker checks and policy identity remain. These deployment-wide compatibility attestations are not credentials, per-tenant authorization or proof of upstream semantics, and are not needed for included hosted POSTs. Never change real operator settings automatically.
 - URL-encoded and multipart requests use closed `json_body` objects of finite non-null scalars/scalar arrays. Reject nested, open-ended and file/binary contracts; the broker owns Content-Type/boundary. Multipart accepts no caller filenames/part headers or host-file reads; strings resembling paths are literal text. Limits: **1024 parts / 2 MiB**, bounded ASCII field names, plus normal execution/request budgets.
 - The manual **POST read permissions** UI and public GET/POST route are removed (404), not replaced with automatic read attestations. Uploaded hints, descriptions, MCP `readOnlyHint`, model flags and idempotency keys never grant authority. Authority comes from the bound catalog and host policy; POST automation is explicitly **not read-only execution**.
@@ -117,10 +117,13 @@ do not confer access. Artifact storage uses private directories/files, bounded
 indexes, integrity checks, no-follow path handling, and owned-file-only cleanup.
 Retention is limited; these stores are not a permanent audit archive.
 
-The run ledger has exclusive single-process ownership during recovery and
-execution. Do not share a live run database between workers or assume a network
-filesystem implements the required local locking semantics. Native storage uses
-POSIX locks; use the container deployment rather than native Windows storage.
+The run ledger holds **advisory** single-process recovery ownership. Recovery only
+interrupts active receipts older than the configured stale window
+(`GRYPHON_RUN_RECOVERY_STALE_SECONDS`), so a concurrent process sharing the ledger
+never marks a live process's runs interrupted. Do not share a live run database over
+a network filesystem that cannot implement the required local locking semantics.
+Native storage uses POSIX locks; use the container deployment rather than native
+Windows storage.
 
 These files may contain source, descriptions, and returned API data. There is
 **no claim of encryption at rest or complete data-loss prevention**. If an
@@ -241,9 +244,11 @@ restricted mode permits no imports. No arbitrary pip installation is supported.
 Exactly **one hosted worker per database** is enforced by an automatic exclusive
 lease; no installer is needed. PostgreSQL uses a **session-level advisory lock**,
 requiring a direct connection or session pooling, never transaction pooling.
-SQLite and local run ledgers use POSIX locks. Stop the existing worker before
-starting another; **never delete `.lock` files** to release a live process or
-repair live jobs. The OS/connection lifecycle releases ownership on shutdown.
+SQLite and local run ledgers use POSIX locks. The hosted worker lease stays
+exclusive; a local run-ledger lease is advisory, so a leftover owner cannot block a
+new process and recovery stays stale-scoped. **Never delete `.lock` files** to
+release a live process or repair live jobs. The OS/connection lifecycle releases
+ownership on shutdown, and a stdio server reaps a host that abandons a connection.
 For native SQLite, create a dedicated private parent directory before startup;
 SQLite cannot create its parent and `umask 077` does not fix existing permissions.
 Normal startup adds account/audit, analytics and audit-archive tables without rebuilding live tables,

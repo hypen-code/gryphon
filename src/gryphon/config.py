@@ -76,7 +76,15 @@ class GryphonConfig(BaseSettings):
     run_db_path: str = "./data/runs.db"
     run_ttl_seconds: int = Field(default=86400, ge=60)
     run_max_entries: int = Field(default=1000, ge=1)
+    # Startup recovery only interrupts active receipts older than this, so concurrent
+    # processes sharing one run ledger keep their live runs. The effective threshold is
+    # never below the maximum possible run duration.
+    run_recovery_stale_seconds: int = Field(default=600, ge=0, le=86400)
 
+    # Stdio servers with no inbound MCP message for this long exit, releasing the advisory
+    # run-ledger lock and resources when a host abandons a connection without closing it.
+    # Zero disables reaping.
+    stdio_idle_timeout_seconds: int = Field(default=1800, ge=0, le=86400)
     # Cache
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=3600, ge=1)

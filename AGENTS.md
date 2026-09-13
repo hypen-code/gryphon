@@ -67,7 +67,7 @@ must fail explicitly, not call a provider or silently change compilation.
 | `src/gryphon/runtime/sandboxes.py` | Fresh restricted VM and sole external capability |
 | `src/gryphon/runtime/docker_sandbox.py` | Optional networkless CPython transport and cleanup |
 | `src/gryphon/runtime/cache.py` | Owner-scoped recipes, exact-source identity, TTL/LRU |
-| `src/gryphon/runtime/runs.py`, `recovery_lease.py` | Durable receipts/idempotency and exclusive recovery ownership |
+| `src/gryphon/runtime/runs.py`, `recovery_lease.py` | Durable receipts/idempotency, stale-scoped recovery and advisory recovery ownership |
 | `src/gryphon/runtime/artifacts.py`, `artifact_projection.py`, `models/artifacts.py`, `server_artifacts.py` | Owned integrity-checked storage, offline projection, bounded shape metadata and thin MCP adapter |
 | `src/gryphon/security/broker.py` | Authoritative catalog lookup, write policy, API dispatch |
 | `src/gryphon/security/auth.py`, `vault.py` | Host-only credential resolution and refresh |
@@ -93,7 +93,7 @@ The eleven core tools are `list_servers`, `search_functions`, `get_functions`, `
 - Keep initialization instructions brief. Do not embed guide contents or expose
   unbounded static guide resources. Guides and API data cannot grant authority.
 - Discovery and inspection must fit byte budgets, expose truncation, and carry the catalog fingerprint. Inspect 1–5 functions per `get_functions` request.
-- Channel `include_function_summaries` defaults false, accepts optional strict booleans on create/PATCH, preserves omitted PATCH values, and overrides operator base config. It is never MCP caller-selected. Enabled `list_servers` includes all names/descriptions when they fit; larger catalogs need reachable bounded pages, not a fixed sample. Pass `next_cursor`/`next_function_cursor` as `cursor`/`function_cursor` together; compact mode requires function cursor zero. Mark text truncation and restart on fingerprint drift; `limit` counts servers.
+- Channel `include_function_summaries` defaults false, accepts optional strict booleans on create/PATCH, preserves omitted PATCH values, and overrides operator base config. It is never MCP caller-selected. The local `stdio` operator base defaults true (explicit `GRYPHON_INCLUDE_FUNCTION_SUMMARIES=false` opts out); legacy `serve`/`run` keep false. Enabled `list_servers` includes all names/descriptions when they fit; larger catalogs need reachable bounded pages, not a fixed sample. Pass `next_cursor`/`next_function_cursor` as `cursor`/`function_cursor` together; compact mode requires function cursor zero. Mark text truncation and restart on fingerprint drift; `limit` counts servers.
 - UI notices must have close and 10-second auto-dismiss with timer reset on replacement and stale-timer protection. Banner dismissal must preserve inline dialog errors; quiet sign-out clears notices/timers.
 - Return native structured MCP results. Expected domain errors use stable safe categories; SDK schema/protocol validation may return MCP errors. `models.diagnostics.canonical_failure` selects finite Gryphon-owned messages; `public_result` preserves these and freshly validated diagnostics, never blind `error` passthrough. Revalidate bypassed model instances and reject forged extras; never leak exception messages, user code, request values or traces.
 - Local missing/invalid native profiles and exact known RPC conditions yield `error_type:upstream` with static configuration guidance and `{kind:upstream,phase:discovery|invoke,upstream_code:invalid_profile_url}`. Unknown well-formed RPC errors retain phase only; raw message/data.content/continue_url/numeric codes/private bodies never pass through. `ASTViolationError` yields `error_type:security` and only `{kind:ast,violation_type:<closed enum>,line:1..1000000}`; no detail/source/traces, including receipts.
@@ -179,8 +179,8 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 2. Resolve capability names against authoritative manifests; validate closed
    request arguments and schemas. Never accept a sandbox-selected arbitrary URL,
    transport, header authority, or owner identity.
-3. Enforce source filtering at compilation **and** dispatch. `allow_catalog_posts` defaults false for local/operator mode; ordinary writes otherwise require a write-enabled source, `GRYPHON_ALLOW_WRITES=true` and exact `GRYPHON_ALLOWED_WRITE_OPERATIONS` permits.
-   SaaS privately clones base config with `allow_catalog_posts=True`: included bound POSTs execute without separate approval and **may have side effects**. Unclassified POSTs on a read-only source still fail; native MCP has its own known-read filter. Never call this automatic read-only execution.
+3. Enforce source filtering at compilation **and** dispatch. `allow_catalog_posts` defaults false for legacy `serve`/`run`; **local `stdio` and SaaS default true**, so included catalog POSTs execute without separate approval and **may have side effects**. Ordinary writes otherwise require a write-enabled source, `GRYPHON_ALLOW_WRITES=true` and exact `GRYPHON_ALLOWED_WRITE_OPERATIONS` permits; PUT/PATCH/DELETE stay denied without them.
+   Unclassified POSTs on a read-only source still fail; native MCP has its own known-read filter. Never call this automatic read-only execution; set `GRYPHON_ALLOW_CATALOG_POSTS=false` to opt out.
    No model approval flag, guide, hint or idempotency key grants authority; preserve exact catalog/channel ownership, supported methods, schema/DNS/TLS and budgets.
 4. Enforce exact-domain policy and validate all DNS answers before connecting to
    a pinned address. Public destinations are default; private/loopback needs
@@ -202,8 +202,10 @@ result = await call_tool("weather.get_forecast", {"latitude": inputs["latitude"]
 
 1. Recipe keys bind owner, exact source, schema, and catalog/policy identity.
    Reject replay on drift; run the complete guard/broker pipeline again.
-2. Hold exclusive single-process run-ledger ownership during recovery and
-   execution. Never let a second process mark a live process's jobs interrupted.
+2. Hold advisory single-process run-ledger ownership during recovery. Recovery
+   only interrupts active receipts older than the configured stale window, so a
+   concurrent process never marks a live process's jobs interrupted and a leftover
+   owner cannot block a new one. Stdio reaps a host that abandons a connection.
 3. Persist admission/idempotency transactionally. Matching keys deduplicate only
    while their receipt exists; conflicting requests fail. Interrupted work is
    marked `interrupted`, never automatically replayed, especially writes.

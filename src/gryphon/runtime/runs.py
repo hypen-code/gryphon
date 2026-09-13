@@ -246,18 +246,26 @@ class RunStore(_SQLiteStore):
                 row = await cursor.fetchone()
             return self._record(row) if row is not None else None
 
-    async def recover_interrupted(self) -> int:
-        """Mark all abandoned active receipts interrupted, without automatic replay.
+    async def recover_interrupted(self, stale_seconds: float = 0.0) -> int:
+        """Mark abandoned active receipts interrupted, without automatic replay.
 
-        Call exactly once at executor startup after claim_execution and before
-        admitting work; one executor owns this database's recovery lifecycle.
+        Call once at executor startup before admitting work. Recovery is scoped to
+        receipts not updated within ``stale_seconds`` so a concurrent process sharing
+        the same ledger keeps its live runs; a zero threshold recovers every active
+        receipt for single-owner startup.
+
+        Args:
+            stale_seconds: Only recover active receipts older than this many seconds.
 
         Returns:
             Number of queued or running receipts marked interrupted.
         """
+        cutoff = time.time() - max(0.0, stale_seconds)
         count = 0
         async with self._transaction("recover interrupted runs") as db:
-            async with db.execute("SELECT id FROM runs WHERE status IN ('queued', 'running')") as cursor:
+            async with db.execute(
+                "SELECT id FROM runs WHERE status IN ('queued', 'running') AND updated_at <= ?", (cutoff,)
+            ) as cursor:
                 rows = await cursor.fetchall()
             for row in rows:
                 result = ExecutionResult(

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import ctypes
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -58,6 +61,22 @@ def test_stdio_defaults_ignore_cwd_dotenv_and_yaml(tmp_path: Path) -> None:
     assert Orchestrator(config).load_swagger_sources() == []
     assert Path(config.compiled_output_dir).is_relative_to(tmp_path / ".local/state/gryphon")
     assert not Path(config.compiled_output_dir).exists()
+
+
+def test_stdio_defaults_to_function_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local stdio shows function names and descriptions unless the operator opts out."""
+    assert _stdio_config().include_function_summaries is True
+    monkeypatch.setenv("GRYPHON_INCLUDE_FUNCTION_SUMMARIES", "false")
+    assert _stdio_config().include_function_summaries is False
+
+
+def test_stdio_enables_catalog_posts_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local stdio executes included catalog POSTs unless the operator opts out."""
+    config = _stdio_config()
+    assert config.allow_catalog_posts is True
+    assert config.allow_writes is False and config.allowed_write_operations == []
+    monkeypatch.setenv("GRYPHON_ALLOW_CATALOG_POSTS", "false")
+    assert _stdio_config().allow_catalog_posts is False
 
 
 def test_stdio_explicit_dotenv_and_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,6 +204,14 @@ async def test_stdio_real_client_environment_only_computation_and_discovery(tmp_
         assert len(await client.list_tools()) == 11
         servers = await client.call_tool("list_servers", {})
         assert len(servers.data["servers"]) == int(with_sources)
+        if with_sources:
+            row = servers.data["servers"][0]
+            assert row["function_count"] == 2
+            assert [function["name"] for function in row["functions"]] == [
+                "get_current_weather",
+                "get_weather_forecast",
+            ]
+            assert row["functions"][0]["description"]
         result = await client.call_tool(
             "execute_code",
             {"code": "result = sum(inputs['values'])", "inputs": {"values": [2, 3, 5]}, "description": "offline sum"},
@@ -287,3 +314,90 @@ def test_stdio_invalid_configuration_has_safe_stderr(
 def test_stdio_config_programmatic_yaml_sentinel_roundtrips(gryphon_config: GryphonConfig) -> None:
     """Adding JSON environment sources does not break validated settings roundtrips."""
     assert GryphonConfig.model_validate(gryphon_config.model_dump()).swaggers is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
+def test_stdio_requests_parent_death_signal() -> None:
+    """A stdio server asks the kernel to terminate it when its launcher dies."""
+    from gryphon.__main__ import _die_with_parent
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        _die_with_parent()
+        value = ctypes.c_int(0)
+        assert libc.prctl(2, ctypes.byref(value), 0, 0, 0) == 0  # PR_GET_PDEATHSIG
+        assert value.value == signal.SIGTERM
+    finally:
+        libc.prctl(1, 0, 0, 0, 0)  # PR_SET_PDEATHSIG: restore for the test process
+
+
+async def test_stdio_serves_when_another_process_owns_the_ledger(tmp_path: Path) -> None:
+    """A leftover owner no longer blocks a new stdio client; recovery is stale-scoped."""
+    from gryphon.runtime.recovery_lease import RecoveryLease
+
+    run_db = tmp_path / "runs.db"
+    environment = {
+        "HOME": str(tmp_path),
+        "PATH": os.defpath,
+        "GRYPHON_STATE_DIR": str(tmp_path / "state"),
+        "GRYPHON_RUN_DB_PATH": str(run_db),
+        "GRYPHON_COMPILED_OUTPUT_DIR": str(tmp_path / "compiled"),
+        "GRYPHON_CACHE_DB_PATH": str(tmp_path / "cache.db"),
+        "GRYPHON_ARTIFACT_DIR": str(tmp_path / "artifacts"),
+        "GRYPHON_SWAGGERS": json.dumps([{"name": "weather", "swagger_url": str(_FIXTURES / "weather_api.yaml")}]),
+    }
+    holder = RecoveryLease(str(run_db))
+    holder.acquire()
+    try:
+        transport = StdioTransport(
+            command=sys.executable,
+            args=["-m", "gryphon", "stdio"],
+            env=environment,
+            cwd=str(tmp_path),
+            keep_alive=False,
+        )
+        async with Client(transport, timeout=60, init_timeout=60) as client:
+            assert len(await client.list_tools()) == 11
+            servers = await client.call_tool("list_servers", {})
+            assert servers.data["servers"][0]["name"] == "weather"
+    finally:
+        holder.close()
+
+
+async def test_stdio_reaps_an_abandoned_connection(tmp_path: Path) -> None:
+    """A host that holds stdin open but stops talking cannot wedge the server forever."""
+    environment = {
+        "HOME": str(tmp_path),
+        "PATH": os.defpath,
+        "GRYPHON_STATE_DIR": str(tmp_path / "state"),
+        "GRYPHON_STDIO_IDLE_TIMEOUT_SECONDS": "2",
+    }
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "gryphon",
+        "stdio",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=environment,
+        cwd=str(tmp_path),
+    )
+    assert process.stdin is not None and process.stdout is not None
+    request = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {"name": "p", "version": "1"},
+            },
+        }
+    )
+    process.stdin.write((request + "\n").encode())
+    await process.stdin.drain()
+    assert await asyncio.wait_for(process.stdout.readline(), 30)
+    # Hold stdin open but send nothing: only the idle watchdog can end the process.
+    assert await asyncio.wait_for(process.wait(), 30) == 0

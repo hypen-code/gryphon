@@ -98,6 +98,7 @@ async def test_serve_passes_started_dependencies_by_identity(
         registry=services["registry"],
         cache=services["cache"],
         executor=services["executor"],
+        activity=None,
     )
 
 

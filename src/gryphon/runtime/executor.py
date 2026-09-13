@@ -95,6 +95,7 @@ class CodeExecutor:
         self._keys: dict[tuple[str, str], tuple[str, str]] = {}
         self._reserved = 0
         self._started = False
+        self._owns_recovery = False
         self._shutdown_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
@@ -102,7 +103,7 @@ class CodeExecutor:
     # ------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Acquire recovery ownership, initialize once, and start the backend."""
+        """Acquire advisory recovery ownership, initialize once, and start the backend."""
         async with self._admission:
             if self._shutdown_task is not None:
                 raise ExecutionError("A stopped executor cannot be restarted")
@@ -110,9 +111,14 @@ class CodeExecutor:
                 return
             try:
                 effective_imports(self._config)
-                self._lease.acquire()
+                self._owns_recovery = self._lease.try_acquire()
+                if not self._owns_recovery:
+                    logger.warning(
+                        "run_ledger_shared",
+                        action="Another Gryphon process owns this run ledger; recovery is scoped to stale runs",
+                    )
                 await self._runs.initialize()
-                await self._runs.recover_interrupted()
+                await self._runs.recover_interrupted(self._recovery_stale_seconds())
                 await self._sandbox.startup()
             except BaseException:
                 self._shutdown_task = asyncio.create_task(self._close_services())
@@ -124,6 +130,15 @@ class CodeExecutor:
                 profile=self._config.sandbox_mode,
                 concurrency=self._config.max_concurrent_executions,
             )
+
+    def _recovery_stale_seconds(self) -> float:
+        """Recover only runs older than any possible live run, so peers are never clobbered."""
+        return float(
+            max(
+                self._config.run_recovery_stale_seconds,
+                self._config.execution_timeout_seconds + self._config.queue_timeout_seconds,
+            )
+        )
 
     async def shutdown(self) -> None:
         """Stop admission and finish cleanup despite repeated caller cancellation."""
