@@ -46,6 +46,7 @@ class SearchPeer:
     calls: int = 0
     seen: list[httpx.Request] = field(default_factory=list)
     error_code: str | None = None
+    status: int = 200
     products: list[dict[str, Any]] = field(
         default_factory=lambda: [
             {"title": f"Bedsheet {index}", "price": index, "description": "x" * 1500} for index in range(110)
@@ -79,7 +80,7 @@ class SearchPeer:
             profile = body["params"]["arguments"].get("meta", {}).get("ucp-agent", {}).get("profile")
             if self.error_code or profile != AGENT_PROFILE:
                 return httpx.Response(
-                    200,
+                    self.status,
                     json={
                         "jsonrpc": "2.0",
                         "id": body["id"],
@@ -257,6 +258,41 @@ async def test_native_rpc_diagnostics_never_echo_untrusted_error_content(
         assert "invalid_profile_url" in text
     else:
         assert code not in text
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("invalid_profile_url", {"kind": "upstream", "phase": "invoke", "upstream_code": "invalid_profile_url"}),
+        ("profile_malformed", {"kind": "upstream", "phase": "invoke"}),
+    ],
+)
+async def test_non_2xx_native_error_is_typed_upstream_without_private_content(
+    hosted: tuple[httpx.AsyncClient, Starlette],
+    search_peer: SearchPeer,
+    code: str,
+    expected: dict[str, Any],
+) -> None:
+    """A merchant rejecting the call with HTTP 4xx plus a JSON-RPC body is a structured upstream failure."""
+    http, _ = hosted
+    channel = await bound(http)
+    search_peer.status = 422
+    search_peer.error_code = code
+    async with Client(channel["url"], auth=channel["token"]) as client:
+        result = await _data(
+            client,
+            "execute_code",
+            {
+                "code": SEARCH,
+                "description": "Rejected search",
+                "inputs": {"meta": {"ucp-agent": {"profile": AGENT_PROFILE}}, "catalog": {"query": "bedsheets"}},
+            },
+        )
+    assert not result["success"] and result["error_type"] == "upstream", result
+    assert result["diagnostic"] == expected
+    text = json.dumps(result)
+    assert PRIVATE not in text and "continue_url" not in text
+    assert "Sandbox execution failed" not in text
 
 
 async def test_ast_failure_exposes_only_violation_kind_and_line(

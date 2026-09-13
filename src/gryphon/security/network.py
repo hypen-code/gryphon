@@ -173,7 +173,8 @@ class NetworkClient:
             rpc_response_id: Opt-in owned MCP response identity for bounded SSE consumption.
 
         Returns:
-            Fully read response; error bodies are never returned.
+            Fully read response; non-MCP error bodies are never returned. Native MCP
+            non-2xx bodies stay internal to the protocol layer for classification.
         """
         if self._client.is_closed:
             raise ExecutionError("Upstream network authority has been closed")
@@ -250,8 +251,13 @@ class NetworkClient:
     async def _consume(
         self, response: httpx.Response, limit: int, rpc_response_id: str | None = None
     ) -> httpx.Response:
-        """Reject HTTP failures, compression and size overflows without body disclosure."""
-        if not 200 <= response.status_code < 300:
+        """Reject HTTP failures, compression and size overflows without body disclosure.
+
+        Native MCP responses keep their bounded non-2xx body so the protocol layer can
+        classify a JSON-RPC error record instead of discarding it as a generic transport
+        failure. The body is never returned to the sandbox, only reclassified upstream.
+        """
+        if rpc_response_id is None and not 200 <= response.status_code < 300:
             raise ExecutionError(f"Upstream returned HTTP {response.status_code}")
         if response.headers.get("content-encoding", "identity").lower() != "identity":
             raise ExecutionError("Upstream compressed responses are not supported")

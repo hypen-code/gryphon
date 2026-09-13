@@ -13,7 +13,14 @@ from uuid import uuid4
 import httpx
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, LATEST_HANDSHAKE_VERSION
 
-from gryphon.errors import ConflictError, ExecutionError, SecurityViolationError, UpstreamDiagnosticError
+from gryphon.errors import (
+    ConflictError,
+    ExecutionError,
+    ExecutionTimeoutError,
+    SecurityViolationError,
+    UpstreamDiagnosticError,
+)
+from gryphon.models.diagnostics import DiagnosticPhase, ExecutionDiagnostic
 from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.security.mcp_protocol import (
     MAX_NOTIFICATIONS,
@@ -32,7 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from gryphon.config import GryphonConfig
-    from gryphon.models.diagnostics import DiagnosticPhase
 
 MAX_TOOLS = 1000
 MAX_PAGES = 100
@@ -78,6 +84,22 @@ def _validate_tool(tool: Any) -> None:
             raise ExecutionError("Remote MCP returned invalid tool metadata")
     if "description" in tool and not isinstance(tool["description"], str):
         raise ExecutionError("Remote MCP returned invalid tool metadata")
+
+
+def _http_failure(response: httpx.Response, response_id: str, phase: DiagnosticPhase) -> UpstreamDiagnosticError:
+    """Classify a bounded non-2xx native response as an upstream failure by phase.
+
+    A well-formed JSON-RPC error record retains only its explicitly known UCP code;
+    every other status, body, or identity yields phase-only metadata. Upstream text is
+    never returned or reflected.
+    """
+    try:
+        rpc_record(parse_json(response.content), response_id, phase=phase)
+    except UpstreamDiagnosticError as exc:
+        return exc
+    except ExecutionError:
+        pass
+    return UpstreamDiagnosticError(ExecutionDiagnostic(kind="upstream", phase=phase))
 
 
 class _Session:
@@ -146,6 +168,8 @@ class _Session:
             )
         except UpstreamDiagnosticError as exc:
             raise UpstreamDiagnosticError(exc.diagnostic.model_copy(update={"phase": phase})) from None
+        if not 200 <= response.status_code < 300:
+            raise _http_failure(response, response_id, phase)
         media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
             raise ExecutionError("Remote MCP returned an unsupported response type")
@@ -262,7 +286,9 @@ async def _session(
                 check_active()
             await session.initialize()
             yield session
-    except (TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError, RecursionError):
+    except TimeoutError:
+        raise ExecutionTimeoutError("Execution deadline exceeded during capability call") from None
+    except (httpx.HTTPError, OSError, ValueError, TypeError, RecursionError):
         raise ExecutionError("Remote MCP session failed") from None
     finally:
         await finish_cleanup(session.close())

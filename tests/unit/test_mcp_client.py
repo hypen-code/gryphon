@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from gryphon.errors import ConflictError, ExecutionError, SecurityViolationError
+from gryphon.errors import ConflictError, ExecutionError, SecurityViolationError, UpstreamDiagnosticError
 from gryphon.security import mcp_client
 from gryphon.security.mcp_client import discover_tools, invoke_tool, tool_fingerprint
 from gryphon.security.network import NetworkClient
@@ -47,6 +47,7 @@ class Server(httpx.MockTransport):
         self.protocol = "2025-03-26"
         self.session: str | None = "synthetic-session"
         self.status = 200
+        self.error_code: str | None = None
         self.closed = 0
         self.delay = 0.0
         self.entered = asyncio.Event()
@@ -66,7 +67,24 @@ class Server(httpx.MockTransport):
         self.entered.set()
         if self.delay:
             await asyncio.sleep(self.delay)
-        if self.status != 200:
+        if self.error_code is not None and body["method"] == "tools/call":
+            return httpx.Response(
+                self.status,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {
+                        "code": -32001,
+                        "message": "private upstream failure",
+                        "data": {
+                            "code": self.error_code,
+                            "content": "private-upstream-detail",
+                            "continue_url": "http://127.0.0.1/private",
+                        },
+                    },
+                },
+            )
+        if self.status != 200 and self.error_code is None:
             return httpx.Response(self.status, headers={"Location": "http://127.0.0.1/private"})
         headers = {"Set-Cookie": "ambient=ignored; Path=/"}
         if body["method"] == "notifications/initialized":
@@ -275,6 +293,42 @@ async def test_mcp_client_http_errors_never_retry(status: int, peer: Server, gry
     with pytest.raises(ExecutionError):
         await discover_tools(gryphon_config, ENDPOINT, 10000)
     assert len(peer.requests) == 1 and peer.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("invalid_profile_url", {"kind": "upstream", "phase": "invoke", "upstream_code": "invalid_profile_url"}),
+        ("profile_malformed", {"kind": "upstream", "phase": "invoke"}),
+        ("private-token", {"kind": "upstream", "phase": "invoke"}),
+    ],
+)
+async def test_mcp_client_non_2xx_rpc_error_is_classified_upstream(
+    code: str, expected: dict[str, Any], peer: Server, gryphon_config: GryphonConfig
+) -> None:
+    """A bounded non-2xx JSON-RPC error body is typed upstream, never a generic sandbox failure."""
+    peer.status = 422
+    peer.error_code = code
+    with pytest.raises(UpstreamDiagnosticError) as caught:
+        await _invoke(gryphon_config)
+    assert caught.value.diagnostic.model_dump(mode="json", exclude_none=True) == expected
+    assert "private" not in str(caught.value)
+    assert sum(body["method"] == "tools/call" for body in peer.requests) == 1
+    assert peer.closed == 1
+
+
+async def test_mcp_client_non_2xx_non_json_body_is_phase_only_upstream(
+    peer: Server, gryphon_config: GryphonConfig
+) -> None:
+    """A non-JSON non-2xx body still yields structured phase metadata instead of a sandbox error."""
+    peer.status = 500
+    with pytest.raises(UpstreamDiagnosticError) as caught:
+        await discover_tools(gryphon_config, ENDPOINT, 10000)
+    assert caught.value.diagnostic.model_dump(mode="json", exclude_none=True) == {
+        "kind": "upstream",
+        "phase": "discovery",
+    }
+    assert peer.closed == 1
 
 
 async def test_mcp_client_timeout_and_cleanup(peer: Server, gryphon_config: GryphonConfig) -> None:
