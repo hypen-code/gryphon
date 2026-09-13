@@ -11,18 +11,23 @@ from uuid import uuid4
 
 from gryphon.errors import SaaSDisabledError, SaaSValidationError
 from gryphon.models import (
-    AdminAudit,
-    AuditEvent,
     Channel,
     ChannelUsage,
     SaaSSpec,
     SpecDeletionPreview,
     SpecImport,
     Tenant,
+    UserAccount,
 )
-from gryphon.saas_audit import current_actor
+from gryphon.saas_audit_archive import MAX_AUDIT_ENTRIES
 from gryphon.saas_database import SaaSDatabase, SQLValue
 from gryphon.saas_records import SaaSRecords
+from gryphon.saas_resource_delete import (
+    delete_channel,
+    delete_tenant,
+    preview_channel_deletion,
+    preview_tenant_deletion,
+)
 from gryphon.saas_spec_delete import delete_spec, preview_spec_deletion
 from gryphon.saas_spec_versions import insert_spec, new_spec, refresh_spec
 
@@ -73,6 +78,8 @@ class SaaSStore(SaaSRecords):
         )
         if any(value < 1 for value in limits):
             raise SaaSValidationError("Storage limits must be positive")
+        if max_audit_entries > MAX_AUDIT_ENTRIES:
+            raise SaaSValidationError("Audit retention exceeds storage limit")
         self._db = SaaSDatabase(database_url)
         self._max_tenants, self._max_channels, self._max_specs = limits[:3]
         self._max_spec_bytes, self._max_list, self._max_audit = limits[3:]
@@ -95,33 +102,6 @@ class SaaSStore(SaaSRecords):
         if not tenant.enabled:
             raise SaaSDisabledError("Tenant is disabled")
         return tenant
-
-    async def _audit(
-        self,
-        tenant_id: str,
-        event: AuditEvent,
-        channel_id: str | None = None,
-        *,
-        spec_id: str | None = None,
-    ) -> None:
-        """Append static metadata and the verified actor snapshot in the mutation transaction."""
-        item = AdminAudit(
-            id=str(uuid4()),
-            tenant_id=tenant_id,
-            channel_id=channel_id,
-            spec_id=spec_id,
-            event=event,
-            created_at=time.time(),
-            actor=current_actor(),
-        )
-        await self._db.execute(
-            "INSERT INTO saas_audit VALUES (?,?,?,?)", (item.id, tenant_id, item.created_at, item.model_dump_json())
-        )
-        await self._db.execute(
-            "DELETE FROM saas_audit WHERE id IN (SELECT id FROM saas_audit "
-            "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?)",
-            (self._max_audit, self._max_audit),
-        )
 
     async def create_tenant(self, name: str) -> Tenant:
         """Create a server-generated tenant identity within the retained-tenant quota."""
@@ -387,12 +367,22 @@ class SaaSStore(SaaSRecords):
             )
             return [ChannelUsage.model_validate(row) for row in rows]
 
-    async def list_audit(self, tenant_id: str, limit: int = 100, offset: int = 0) -> list[AdminAudit]:
-        """Return bounded static administrative events for one tenant, newest first."""
-        self._page(limit, offset)
-        async with self._db.transaction():
-            rows = await self._db.execute(
-                "SELECT payload FROM saas_audit WHERE tenant_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
-                (tenant_id, limit, offset),
-            )
-            return [AdminAudit.model_validate_json(str(row["payload"])) for row in rows]
+    async def preview_channel_deletion(self, tenant_id: str, channel_id: str) -> dict[str, object]:
+        """Preview exact channel impact and a configuration-bound confirmation digest."""
+        return await preview_channel_deletion(self, tenant_id, channel_id)
+
+    async def delete_channel(
+        self, tenant_id: str, channel_id: str, confirm_name: object, confirmation_token: object
+    ) -> Channel:
+        """Delete confirmed channel rows atomically; caller drains its runtime after commit."""
+        return await delete_channel(self, tenant_id, channel_id, confirm_name, confirmation_token)
+
+    async def preview_tenant_deletion(self, tenant_id: str) -> dict[str, object]:
+        """Preview the complete workspace, including disabled accounts and all spec versions."""
+        return await preview_tenant_deletion(self, tenant_id)
+
+    async def delete_tenant(
+        self, tenant_id: str, confirm_name: object, confirmation_token: object, actor_id: str
+    ) -> tuple[Tenant, list[Channel], list[UserAccount]]:
+        """Delete a confirmed workspace; caller revokes sessions and drains returned runtimes."""
+        return await delete_tenant(self, tenant_id, confirm_name, confirmation_token, actor_id)

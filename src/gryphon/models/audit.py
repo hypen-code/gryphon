@@ -10,6 +10,8 @@ AuditEvent = Literal[
     "tenant_created",
     "tenant_disabled",
     "tenant_enabled",
+    "tenant_deleted",
+    "channel_deleted",
     "spec_created",
     "spec_deleted",
     "channel_created",
@@ -43,6 +45,7 @@ class AdminAudit(BaseModel):
     tenant_id: str
     channel_id: str | None = None
     spec_id: str | None = None
+    resource_name: str | None = Field(default=None, max_length=128)
     event: AuditEvent
     created_at: float
     actor: AuditActor = Field(default_factory=AuditActor)

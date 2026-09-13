@@ -13,7 +13,13 @@ from gryphon.models.audit import AuditActor
 
 UserRole = Literal["platform_admin", "tenant_user"]
 UserAuditEvent = Literal[
-    "user_created", "user_updated", "user_disabled", "user_enabled", "password_reset", "password_changed"
+    "user_created",
+    "user_updated",
+    "user_disabled",
+    "user_enabled",
+    "password_reset",
+    "password_changed",
+    "user_deleted",
 ]
 USERNAME_PATTERN = re.compile(r"[a-z0-9._@+-]{3,128}", re.ASCII)
 
@@ -77,6 +83,8 @@ class UserAudit(BaseModel):
     id: str
     actor_id: str
     subject_id: str
+    subject_name: str | None = Field(default=None, max_length=128)
+    subject_username: str | None = Field(default=None, max_length=128)
     tenant_id: str | None
     event: UserAuditEvent
     created_at: float

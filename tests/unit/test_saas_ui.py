@@ -13,6 +13,7 @@ _TEMPLATE = _ROOT / "templates" / "admin.html"
 _SCRIPT = _ROOT / "static" / "admin.js"
 _ANALYTICS = _ROOT / "static" / "analytics.js"
 _SPECIFICATIONS = _ROOT / "static" / "specifications.js"
+_LIFECYCLE = _ROOT / "static" / "lifecycle.js"
 _STYLE = _ROOT / "static" / "admin.css"
 
 
@@ -44,6 +45,7 @@ def test_admin_template_assets_same_origin_and_external() -> None:
     assert scripts == [
         {"src": "/static/analytics.js", "defer": None},
         {"src": "/static/specifications.js", "defer": None},
+        {"src": "/static/lifecycle.js", "defer": None},
         {"src": "/static/admin.js", "defer": None},
     ]
     assert styles == [{"rel": "stylesheet", "href": "/static/admin.css"}]
@@ -66,9 +68,8 @@ def test_admin_template_ids_unique_and_script_targets_present() -> None:
     """Every literal JavaScript target resolves to one shipped element."""
     identifiers = [attrs["id"] for _, attrs in _document().elements if "id" in attrs]
     assert len(identifiers) == len(set(identifiers))
-    script_targets = set(
-        re.findall(r'\$\("([a-z-]+)"\)', _SCRIPT.read_text() + _ANALYTICS.read_text() + _SPECIFICATIONS.read_text())
-    )
+    assets = "".join(p.read_text() for p in (_SCRIPT, _ANALYTICS, _SPECIFICATIONS, _LIFECYCLE))
+    script_targets = set(re.findall(r'\$\("([a-z-]+)"\)', assets))
     assert script_targets <= set(identifiers)
 
 
@@ -118,7 +119,7 @@ def test_admin_template_login_no_get_credential_submission() -> None:
 )
 def test_admin_script_unsafe_rendering_and_persistence_absent(forbidden: str) -> None:
     """Untrusted tenant/specification data and keys never use unsafe DOM or browser stores."""
-    assert forbidden not in _SCRIPT.read_text() + _ANALYTICS.read_text() + _SPECIFICATIONS.read_text()
+    assert all(forbidden not in p.read_text() for p in (_SCRIPT, _ANALYTICS, _SPECIFICATIONS, _LIFECYCLE))
 
 
 def test_admin_script_api_session_and_csrf_contract() -> None:
@@ -174,7 +175,7 @@ def test_admin_script_upload_limits_and_blob_cleanup() -> None:
     assert "URL.revokeObjectURL(url)" in script
 
 
-@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _ANALYTICS, _SPECIFICATIONS, _STYLE])
+@pytest.mark.parametrize("path", [_TEMPLATE, _SCRIPT, _ANALYTICS, _SPECIFICATIONS, _LIFECYCLE, _STYLE])
 def test_admin_assets_size_limits_respected(path: Path) -> None:
     """All shipped assets remain within the repository file-size constraint."""
     assert len(path.read_text().splitlines()) <= 400
@@ -210,7 +211,7 @@ def test_admin_script_named_login_and_verified_scope() -> None:
 
 def test_admin_script_user_management_pagination_and_fixed_membership() -> None:
     """Account creation includes fixed membership while updates cannot reassign authority."""
-    script = _SCRIPT.read_text()
+    script = _SCRIPT.read_text() + _LIFECYCLE.read_text()
     assert "api(`/api/users?offset=${offset}`)" in script
     assert "state.userNext = result.next_offset" in script
     assert "loadUsers(Math.max(0, state.userOffset - 100))" in script
@@ -219,7 +220,7 @@ def test_admin_script_user_management_pagination_and_fixed_membership() -> None:
     assert "if (!state.editingUser) {" in script
     assert 'tenant_id: $("user-role").value === "tenant_user" ? $("user-tenant").value : null' in script
     assert '$("user-create-fields").disabled = !!user' in script
-    assert "toggle.disabled = user.id === state.me?.id" in script
+    assert "toggle.disabled = remove.disabled = self || state.busy" in script
     assert "if (!isAdmin() || user.id === state.me?.id)" in script
     assert '"PATCH", { enabled: !user.enabled }' in script
     assert "rotate exposed channel keys too" in script

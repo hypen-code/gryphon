@@ -62,7 +62,11 @@ legend { padding: 0; margin-bottom: 7px; }
 .identity-badge { min-width: 0; overflow-wrap: anywhere; }
 .identity-badge .text-button { display: block; color: #e5c584; font-size: 11px; padding: 6px 0; }
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; font-size: 12px; }
-.user-actions .text-button { display: block; white-space: nowrap; }
+.user-actions { min-width: 180px; white-space: nowrap; }
+.lifecycle-action.text-button { position: relative; display: inline-grid; place-items: center; width: 32px; min-height: 32px; padding: 5px; margin: 2px; border: 1px solid var(--line); }
+.lifecycle-action::after { content: attr(data-tooltip); position: absolute; z-index: 5; bottom: 100%; right: 0; width: max-content; max-width: 200px; white-space: normal; padding: 5px 8px; border-radius: 5px; color: white; background: var(--navy); font-size: 11px; font-weight: 400; pointer-events: none; opacity: 0; }
+.lifecycle-action:hover::after, .lifecycle-action:focus-visible::after { opacity: 1; }
+.tenant-banner > .tenant-actions { flex-direction: row; gap: 4px; flex-shrink: 0; }
 #assigned-tenant { white-space: normal; overflow-wrap: anywhere; max-width: 240px; }
 .app-shell { min-height: 100vh; }
 .sidebar { width: 236px; position: fixed; inset: 0 auto 0 0; padding: 30px 20px 24px; background: var(--navy); color: #c9d3d7; display: flex; flex-direction: column; }
@@ -110,6 +114,7 @@ legend { padding: 0; margin-bottom: 7px; }
 .page-heading .muted { margin-bottom: 0; font-size: 13px; }
 .page-heading > button { flex-shrink: 0; font-size: 12px; }
 .tenant-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: #fafbf8; margin-bottom: 25px; }
+.tenant-banner[hidden] { display: none; }
 .tenant-banner > div { display: flex; align-items: center; gap: 12px; min-width: 0; }
 #tenant-context { color: var(--muted); font-size: 12px; }
 .tenant-banner button { font-size: 12px; white-space: nowrap; }
@@ -219,4 +224,5 @@ pre { background: #f3f6f0; padding: 18px; border: 1px solid #e2e8dc; border-radi
 @media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } .analytics-unobservable { display: block; } .analytics-unobservable > div { margin-bottom: 15px; } }
 @media (max-width: 640px) { .analytics-filters, .analytics-filters > div { width: 100%; max-width: none; } .analytics-note, .analytics-facts { padding-inline: 16px; } }
 @media (max-width: 640px) { #page-specs table, #spec-history-dialog table { table-layout: fixed; } #page-specs thead, #spec-history-dialog thead { display: none; } #spec-rows tr, #spec-history-rows tr { display: flex; flex-wrap: wrap; padding: 10px; border-top: 1px solid var(--line); } #spec-rows td, #spec-history-rows td { display: block; width: 100%; max-width: 100%; padding: 5px; border: 0; } .spec-actions .spec-action { width: 44px; min-height: 44px; } .spec-actions { display: flex; flex-wrap: wrap; } .spec-action::after { max-width: 150px; right: auto; left: 0; } .spec-action:nth-last-child(-n+2)::after { left: auto; right: 0; } }
+@media (max-width: 640px) { .lifecycle-action.text-button { width: 44px; min-height: 44px; } #page-users table { table-layout: fixed; } #page-users thead { display: none; } #user-rows tr { display: flex; flex-wrap: wrap; padding: 10px; border-top: 1px solid var(--line); } #user-rows td { display: block; width: 100%; max-width: 100%; padding: 5px; border: 0; } #user-rows .user-actions { display: flex; flex-wrap: wrap; } .channel-actions { gap: 4px; } .lifecycle-action::after { right: auto; left: 0; max-width: 150px; } .lifecycle-action:nth-last-child(-n+2)::after { left: auto; right: 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }

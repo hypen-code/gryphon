@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from starlette.responses import JSONResponse, Response
@@ -14,6 +15,7 @@ from gryphon.saas_access import AccessControl, account, platform_admin
 from gryphon.saas_analytics import AnalyticsStore
 from gryphon.saas_auth import COOKIE_NAME, AdminSessions, RateLimiter
 from gryphon.saas_http import admin_endpoint, failure, fields, read_object
+from gryphon.saas_resource_delete_api import ResourceDeletionAPI
 from gryphon.saas_spec_delete_api import SpecDeletionAPI
 from gryphon.saas_spec_import import SpecImporter
 from gryphon.saas_user_api import UserAPI
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from gryphon.config import GryphonConfig
-    from gryphon.models import SaaSSpec, SpecImport
+    from gryphon.models import SaaSSpec, SpecImport, Tenant
     from gryphon.saas_config import SaaSConfig
     from gryphon.saas_runtime import ChannelRuntimeManager
     from gryphon.saas_store import SaaSStore
@@ -72,6 +74,7 @@ class AdminAPI:
         self.analytics = analytics if analytics is not None else AnalyticsStore(store._db)
         self.importer = SpecImporter(base, config.max_spec_bytes)
         self.spec_deletion = SpecDeletionAPI(store, self.access, runtimes)
+        self.resource_deletion = ResourceDeletionAPI(store, self.access, self.sessions, runtimes)
 
     def routes(self) -> list[Route]:
         """Register the closed administrator API; only login is unauthenticated."""
@@ -81,14 +84,16 @@ class AdminAPI:
             ("/api/logout", self.logout, ["POST"]),
             ("/api/settings", self.settings, ["GET"]),
             ("/api/tenants", self.tenants, ["GET", "POST"]),
-            (prefix, self.tenant, ["PATCH"]),
+            (prefix, self.tenant, ["PATCH", "DELETE"]),
+            (prefix + "/deletion", self.resource_deletion.preview, ["GET"]),
             (prefix + "/specs", self.specs, ["GET", "POST"]),
             (prefix + "/specs/{spec_id}", self.spec, ["GET", "DELETE"]),
             (prefix + "/specs/{spec_id}/deletion", self.spec_deletion.preview, ["GET"]),
             (prefix + "/specs/{spec_id}/refresh", self.refresh_spec, ["POST"]),
             (prefix + "/specs/{spec_id}/filter", self.filter_spec, ["POST"]),
             (prefix + "/channels", self.channels, ["GET", "POST"]),
-            (prefix + "/channels/{channel_id}", self.channel, ["PATCH"]),
+            (prefix + "/channels/{channel_id}", self.channel, ["PATCH", "DELETE"]),
+            (prefix + "/channels/{channel_id}/deletion", self.resource_deletion.preview, ["GET"]),
             (prefix + "/channels/{channel_id}/rotate", self.rotate, ["POST"]),
             (prefix + "/channels/{channel_id}/revoke", self.revoke, ["POST"]),
             (prefix + "/usage", self.usage, ["GET"]),
@@ -173,20 +178,35 @@ class AdminAPI:
         return JSONResponse((await self.store.create_tenant(_string(data["name"]))).model_dump(), status_code=201)
 
     async def tenant(self, request: Request) -> Response:
-        """Disable tenant authentication and revoke all active channel runtimes."""
+        """Suspend or resume access, or explicitly delete the confirmed tenant workspace."""
+        if request.method == "DELETE":
+            return await self.resource_deletion.delete(request)
         if not platform_admin(request):
             return failure("forbidden", 403)
         data = await read_object(request, 4096)
         fields(data, {"enabled"})
         if type(data["enabled"]) is not bool:
             raise InputValidationError("Invalid enabled state")
-        tenant_id = request.path_params["tenant_id"]
-        item = await self.store.set_tenant_enabled(tenant_id, data["enabled"])
+        denied = await self.access.platform(request)
+        if denied is not None:
+            return denied
+        item = await finish_cleanup(self._tenant_enabled(request.path_params["tenant_id"], data["enabled"]))
+        return JSONResponse(item.model_dump())
+
+    async def _tenant_enabled(self, tenant_id: str, enabled: bool) -> Tenant:
+        """Complete revision-bound session and runtime retirement for every tenant status change."""
+        item = await self.store.set_tenant_enabled(tenant_id, enabled)
         for user in await self.users.list_users(tenant_id=tenant_id):
             self.sessions.revoke_user(user.id, before_revision=user.revision)
-        for channel in await self.store.list_channels(tenant_id):
-            await self.runtimes.invalidate(channel.id, before_revision=channel.revision)
-        return JSONResponse(item.model_dump())
+        channels = await self.store.list_channels(tenant_id)
+        outcomes = await asyncio.gather(
+            *(self.runtimes.invalidate(channel.id, before_revision=channel.revision) for channel in channels),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return item
 
     async def specs(self, request: Request) -> Response:
         """Manage immutable uploaded catalog versions without accepting filesystem paths."""
@@ -309,7 +329,9 @@ class AdminAPI:
         return JSONResponse((await self.store.create_channel(tenant_id, **data)).model_dump(), status_code=201)
 
     async def channel(self, request: Request) -> Response:
-        """Publish revised channel policy and close the old authority before returning."""
+        """Publish channel policy or delete confirmed channel authority before returning."""
+        if request.method == "DELETE":
+            return await self.resource_deletion.delete(request)
         data = await self._channel_data(request, update=True)
         tenant_id, channel_id = request.path_params["tenant_id"], request.path_params["channel_id"]
         item = await self.store.update_channel(tenant_id, channel_id, **data)
@@ -366,6 +388,8 @@ class AdminAPI:
             events.extend(item.model_dump() for item in await self.store.list_audit(tenant.id, limit=10))
         user = account(request)
         tenant_id = user.tenant_id if user is not None else None
+        if platform_admin(request):
+            events.extend(item.model_dump() for item in await self.store.list_deleted_tenant_audit())
         events.extend(item.model_dump() for item in await self.users.list_audit(tenant_id=tenant_id))
         events.sort(key=lambda item: item["created_at"], reverse=True)
         return JSONResponse({"items": events[:100]})

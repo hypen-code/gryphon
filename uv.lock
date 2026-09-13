@@ -7,9 +7,6 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
-[options]
-exclude-newer = "2026-09-03T18:30:00Z"
-
 [[package]]
 name = "aiodocker"
 version = "0.27.0"

@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/admin.css">
   <script src="/static/analytics.js" defer></script>
   <script src="/static/specifications.js" defer></script>
+  <script src="/static/lifecycle.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -59,7 +60,7 @@
       <header class="topbar"><div class="workspace-label">Workspace <span aria-hidden="true">/</span> <strong id="tenant-heading">Select a tenant</strong></div><div class="tenant-tools"><label class="sr-only" for="tenant-select">Current tenant</label><select id="tenant-select"><option value="">Loading tenants…</option></select><span id="assigned-tenant" class="badge neutral" hidden></span><button id="new-tenant" class="secondary" hidden>New tenant</button></div></header>
       <main id="main" tabindex="-1">
         <div class="page-heading"><div><p class="eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</p><h1 id="page-title">Overview</h1><p id="page-description" class="muted">A clear view of your channels, capabilities, and activity.</p></div><button id="refresh" class="secondary">Refresh data</button></div>
-        <div class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><button id="toggle-tenant" class="text-button" hidden disabled>Disable tenant</button></div>
+        <div id="tenant-banner" class="tenant-banner"><div><span id="tenant-status" class="badge neutral">No tenant selected</span><span id="tenant-context">Create a tenant to get started.</span></div><div class="tenant-actions"><button id="toggle-tenant" class="text-button" type="button" hidden disabled>Suspend tenant</button><button id="delete-tenant" class="text-button danger-text" type="button" hidden disabled>Delete tenant</button></div></div>
         <p id="loading" class="loading-state" role="status" hidden>Loading workspace data…</p>
         <div id="tenant-empty" class="empty-state" hidden><span class="empty-symbol" aria-hidden="true">◈</span><h2>Your first workspace starts here</h2><p>Create a tenant, upload an API specification, then bind it to a channel.</p><button id="empty-new-tenant" class="primary">Create a tenant</button></div>
         <div id="tenant-content">
@@ -93,7 +94,7 @@
         <section id="page-audit" class="page-section" aria-label="Audit trail" hidden><article class="panel"><div class="panel-heading"><div><p class="eyebrow">OPERATOR VISIBILITY</p><h2>Recent administrative activity</h2></div><span id="audit-scope" class="badge neutral">Your workspace</span></div><div class="table-wrap"><table><caption class="sr-only">Recent administrative events across tenants</caption><thead><tr><th>Event / account subject</th><th>Actor</th><th>Tenant</th><th>Channel</th><th>Recorded at</th></tr></thead><tbody id="audit-rows"></tbody></table></div></article></section>
         <section id="page-users" class="page-section" aria-label="Users" hidden>
           <div class="section-toolbar"><p class="muted">Named accounts with a fixed role and, for tenant users, exactly one tenant.</p><button id="new-user" class="primary">Create user</button></div>
-          <p class="security-note">Disabling a user revokes their sessions, not separately issued shared channel keys. When offboarding someone with exposed keys, administrators must rotate those channel keys too.</p>
+          <p class="security-note">Suspending or deleting a user revokes their sessions, not separately issued shared channel keys. When offboarding someone with exposed keys, administrators must rotate those channel keys too.</p>
           <article class="panel"><div class="table-wrap"><table><caption class="sr-only">Hosted user accounts</caption><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Tenant</th><th>Status</th><th>Actions</th></tr></thead><tbody id="user-rows"></tbody></table></div><div class="pagination"><button id="users-previous" class="secondary" disabled>Previous</button><span id="users-page" role="status"></span><button id="users-next" class="secondary" disabled>Next</button></div></article>
         </section>
         <footer class="workspace-footer"><span>Gryphon control plane</span><span>Explicit capabilities. Bounded execution.</span></footer>
@@ -133,6 +134,12 @@
     <p id="spec-delete-warning" class="security-note">This is irreversible: every saved version and its history will be gone. All channel bindings to these versions are detached. Affected running work is invalidated; cached recipes may be stale. Channels, their keys, and other APIs are not deleted.</p>
     <label for="spec-delete-name">Exact specification name</label><input id="spec-delete-name" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="spec-delete-warning" autofocus>
     <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="spec-delete-submit" class="danger" type="submit" disabled>Delete all versions</button></div>
+  </form></dialog>
+  <dialog id="lifecycle-delete-dialog" aria-labelledby="lifecycle-delete-title"><form method="post" id="lifecycle-delete-form" autocomplete="off">
+    <div class="dialog-heading"><h2 id="lifecycle-delete-title">Delete resource</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>
+    <div id="lifecycle-delete-impact" class="source-location"></div><p id="lifecycle-delete-warning" class="security-note"></p>
+    <label id="lifecycle-delete-label" for="lifecycle-delete-name">Exact name</label><input id="lifecycle-delete-name" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="lifecycle-delete-warning" autofocus>
+    <p class="dialog-message" role="status"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button id="lifecycle-delete-submit" class="danger" type="submit" disabled>Delete resource</button></div>
   </form></dialog>
   <dialog id="spec-history-dialog" class="wide-dialog" aria-labelledby="spec-history-title">
     <div class="dialog-heading"><h2 id="spec-history-title">Version history</h2><button type="button" class="close-button" data-close aria-label="Close">×</button></div>

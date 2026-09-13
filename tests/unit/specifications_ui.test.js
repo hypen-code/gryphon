@@ -12,7 +12,7 @@ function element(tag = "div", text = "", className = "") {
     replaceChildren(...children) { this.children = children; },
     addEventListener(name, handler) { this.events[name] = handler; },
     setAttribute(name, value) { this[name] = value; }, removeAttribute(name) { delete this[name]; },
-    classList: { toggle() {}, remove() {} }, querySelectorAll() { return []; },
+    classList: { toggle() {}, remove() {}, add() {} }, querySelectorAll() { return []; },
     querySelector() { return element(); }, showModal() { this.opened = true; }, focus() {},
     reset() {}, close() { this.opened = false; this.events.close?.(); },
   };
@@ -303,13 +303,14 @@ function adminSetup() {
   const elements = new Map(); const calls = []; const timers = new Map(); let now = 0; let next = 0;
   const $ = (id) => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); };
   const inline = element(); const sandbox = {
-    document: { getElementById: $, createElement: element, querySelector: () => inline, querySelectorAll: () => [] },
+    document: { getElementById: $, createElement: element, createElementNS: (_, tag) => element(tag), querySelector: () => inline, querySelectorAll: () => [] },
     window: { addEventListener() {} }, location: { hash: "#overview" }, analytics: { reset() {} },
     setTimeout: (fn, ms) => { timers.set(++next, { fn, due: now + ms }); return next; }, clearTimeout: (id) => timers.delete(id),
     Intl, AbortSignal, Option: function () { return element(); },
   };
   const admin = readFileSync(resolve(__dirname, "../../src/gryphon/static/admin.js"), "utf8").split("wireForms(); wireActions();")[0];
-  runInNewContext(`${admin}\nglobalThis.state = state;`, sandbox);
+  const lifecycle = readFileSync(resolve(__dirname, "../../src/gryphon/static/lifecycle.js"), "utf8");
+  runInNewContext(`${lifecycle}\n${admin}\nglobalThis.state = state;`, sandbox);
   sandbox.request = sandbox.api; sandbox.refresh = async () => {}; sandbox.api = async (path, method, payload) => { calls.push({ path, method, payload }); };
   sandbox.audit = sandbox.renderAudit;
   sandbox.specifications = { bindingChoices: () => [], resetDeletion() {} };

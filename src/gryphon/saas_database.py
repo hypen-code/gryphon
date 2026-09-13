@@ -57,6 +57,10 @@ SCHEMA = (
     "event TEXT NOT NULL CHECK(event IN ('user_created','user_updated','user_disabled','user_enabled',"
     "'password_reset','password_changed')), created_at DOUBLE PRECISION NOT NULL)",
     "CREATE INDEX IF NOT EXISTS saas_user_audit_tenant ON saas_user_audit(tenant_id,created_at)",
+    "CREATE TABLE IF NOT EXISTS saas_audit_archive (id TEXT PRIMARY KEY, "
+    "category TEXT NOT NULL CHECK(category IN ('resource','user')), tenant_id TEXT, "
+    "created_at DOUBLE PRECISION NOT NULL, payload TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS saas_audit_archive_category_time ON saas_audit_archive(category,created_at,id)",
     *ANALYTICS_SCHEMA,
 )
 
@@ -166,6 +170,17 @@ class SaaSDatabase:
                     raise
             except (aiosqlite.Error, psycopg.Error) as exc:
                 raise SaaSStoreError("Control-plane database operation failed") from exc
+
+    async def executemany(self, sql: str, params: Sequence[Sequence[SQLValue]]) -> None:
+        """Batch bound writes without owning transactions or changing rollback/error semantics."""
+        if self._sqlite is not None:
+            async with self._sqlite.executemany(sql, params):
+                return
+        if self._postgres is not None:
+            async with self._postgres.cursor() as cursor:
+                await cursor.executemany(sql.replace("?", "%s"), params)
+                return
+        raise SaaSStoreError("Control-plane database is not initialized")
 
     async def execute(self, sql: str, params: Sequence[SQLValue] = ()) -> list[SQLRow]:
         """Run internal SQL with bound parameters inside a caller-owned transaction."""

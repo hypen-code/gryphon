@@ -36,7 +36,9 @@ def create_app(config: SaaSConfig, base: GryphonConfig) -> Starlette:
     base = base.model_copy(deep=True, update={"allow_catalog_posts": True})
     store = SaaSStore(config.database_url.get_secret_value(), max_tenants=100, max_spec_bytes=config.max_spec_bytes)
     analytics = AnalyticsStore(store._db)
-    runtimes = ChannelRuntimeManager(base, config.state_dir, config.max_runtimes, analytics=analytics)
+    runtimes = ChannelRuntimeManager(
+        base, config.state_dir, config.max_runtimes, analytics=analytics, validator=store.is_current_channel
+    )
     admin = AdminAPI(config, base, store, runtimes, analytics=analytics)
 
     @asynccontextmanager

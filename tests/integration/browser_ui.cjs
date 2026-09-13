@@ -4,6 +4,7 @@ const { readFile, stat } = require("node:fs/promises");
 const { join } = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 const puppeteer = require("puppeteer");
+const lifecycleFlow = require("./browser_lifecycle.cjs");
 
 async function idle(page) { await page.waitForFunction(() => !state.busy); }
 async function submit(page, form, suffix, status = 201, method = "POST") {
@@ -23,14 +24,14 @@ async function historySource(page, latest, previous) {
 }
 async function pinnedEdit(page, channelId, older, latest) {
   await page.click('[data-page="channels"]');
-  const edit = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector("button"), channelId);
+  const edit = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector('[data-action="edit"]'), channelId);
   await edit.asElement().click();
   assert.equal(await page.$eval(`#spec-options input[value="${older}"]`, (input) => input.checked), true);
   assert.match(await page.$eval("#spec-options", (options) => options.textContent), /pinned older version/);
   assert.equal(await page.$(`#spec-options input[value="${latest}"]`), null);
   await page.click("#channel-function-summaries");
   const saved = await submit(page, "#channel-form", `/channels/${channelId}`, 200, "PATCH"); assert.deepEqual(saved.spec_ids, [older]);
-  const reopen = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector("button"), channelId);
+  const reopen = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector('[data-action="edit"]'), channelId);
   await reopen.asElement().click(); await page.click("#spec-options button"); await idle(page);
   assert.equal(await page.$eval(`#spec-options input[value="${latest}"]`, (input) => input.checked), true);
   assert.equal(await page.$(`#spec-options input[value="${older}"]`), null);
@@ -77,7 +78,7 @@ async function channel(page, spec, name) {
   await page.click('[data-page="specs"]'); return created;
 }
 async function editSummaries(page, channel) {
-  const edit = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector("button"), channel.id);
+  const edit = await page.evaluateHandle((id) => [...document.querySelectorAll(".channel-card")].find((card) => card.querySelector(".channel-id").textContent === id).querySelector('[data-action="edit"]'), channel.id);
   await edit.asElement().click();
   assert.equal(await page.$eval("#channel-function-summaries", (input) => input.checked), true);
   await page.click("#channel-function-summaries");
@@ -269,7 +270,7 @@ async function tenantIdentityAndAudit(page, password) {
   await page.click('[data-page="specs"]');
   const spec = await page.$eval("#spec-rows tr", (row) => row.dataset.specId);
   await retiredPOSTRoute(page, spec);
-  await page.click('[data-page="channels"]'); await page.click(".channel-card button");
+  await page.click('[data-page="channels"]'); await page.click('.channel-card [data-action="edit"]');
   const channelId = await page.evaluate(() => state.editing.id); await page.type("#channel-name", " edited");
   await submit(page, "#channel-form", `/channels/${channelId}`, 200, "PATCH");
   await page.click('[data-page="audit"]');
@@ -350,7 +351,7 @@ async function main(input) {
     report.push(await icons(page, 1400)); report.push(await icons(page, 390));
     await page.click('[data-page="specs"]'); await modes(page); report.push("all source modes and dialog width verified on 390px mobile");
     await page.setViewport({ width: 1400, height: 1000 }); await modes(page);
-    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page)); report.push(await ucpMCPMode(page)); await specIcons(page); report.push(await tenantIdentityAndAudit(page, input.password)); report.push(await deletionFlow(page, input.root)); report.push(await notifications(page));
+    report.push(await fileFlow(page, input.root)); report.push(await urlFlow(page)); report.push(await ucpMode(page)); report.push(await ucpMCPMode(page)); await specIcons(page); report.push(await tenantIdentityAndAudit(page, input.password)); report.push(await deletionFlow(page, input.root)); report.push(await lifecycleFlow(page, input, { idle, submit, close, dialogSizes })); report.push(await notifications(page));
     assert.deepEqual(faults, []); assert.deepEqual(external, []);
     report.push("file/URL refresh and source dialogs fit both 390px and 1400px viewports");
     report.push("zero uncaught browser exceptions; zero external browser requests; real cookies/CSRF requests used");

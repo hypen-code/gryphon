@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
@@ -11,7 +14,7 @@ from pydantic import ValidationError
 from gryphon.errors import ConflictError, SaaSDisabledError, SaaSNotFoundError, SaaSQuotaError, SaaSValidationError
 from gryphon.models import UserAccount, UserAudit, UserRole
 from gryphon.models.users import UserAuditEvent, normalize_username
-from gryphon.saas_audit import account_actor
+from gryphon.saas_audit_archive import append_user_deletion, archive_user_audit, list_user_audit, prune_audit
 from gryphon.saas_passwords import password_bytes
 
 if TYPE_CHECKING:
@@ -108,11 +111,7 @@ class UserStore:
             "INSERT INTO saas_user_audit VALUES (?,?,?,?,?,?)",
             (str(uuid4()), actor_id, item.id, item.tenant_id, event, time.time()),
         )
-        await self._db.execute(
-            "DELETE FROM saas_user_audit WHERE id IN (SELECT id FROM saas_user_audit "
-            "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?)",
-            (MAX_AUDIT_ENTRIES, MAX_AUDIT_ENTRIES),
-        )
+        await prune_audit(self._db, "user", MAX_AUDIT_ENTRIES)
 
     async def create_user(
         self,
@@ -264,17 +263,66 @@ class UserStore:
                 raise ConflictError("Account revision changed")
             return await self._save_password(latest, hashed, actor_id, "password_changed")
 
+    async def _deletion_target(self, user_id: str, actor_id: str) -> UserAccount:
+        """Protect self and the last enabled platform administrator inside the caller's transaction."""
+        item = _account(await self._require(user_id))
+        if item.id == actor_id:
+            raise ConflictError("Cannot delete the current account")
+        if item.role == "platform_admin" and item.enabled:
+            rows = await self._db.execute(
+                "SELECT COUNT(*) AS total FROM saas_users WHERE role='platform_admin' AND enabled=1"
+            )
+            if int(str(rows[0]["total"])) <= 1:
+                raise ConflictError("Cannot delete the last enabled platform administrator")
+        return item
+
+    @staticmethod
+    def _deletion_preview(item: UserAccount, actor_id: str) -> dict[str, object]:
+        """Fingerprint every public account field and actor, never a password or session secret."""
+        canonical = json.dumps(
+            {"kind": "user", "account": item.model_dump(mode="json"), "actor_id": actor_id},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return {
+            "kind": "user",
+            "id": item.id,
+            "name": item.username,
+            "label": item.name,
+            "confirmation_token": hashlib.sha256(canonical.encode()).hexdigest(),
+            "impact": {"users": 1, "channels": 0, "specs": 0},
+        }
+
+    async def preview_user_deletion(self, user_id: str, actor_id: str) -> dict[str, object]:
+        """Return bounded exact-username consent or reject protected accounts without mutation."""
+        _actor(actor_id)
+        async with self._db.transaction():
+            return self._deletion_preview(await self._deletion_target(user_id, actor_id), actor_id)
+
+    async def delete_user(self, user_id: str, confirm_name: str, confirmation_token: str, actor_id: str) -> UserAccount:
+        """Compare exact consent and current revision before preserving audits and physically deleting."""
+        _actor(actor_id)
+        if (
+            not isinstance(confirm_name, str)
+            or not 3 <= len(confirm_name) <= 128
+            or not isinstance(confirmation_token, str)
+            or re.fullmatch(r"[0-9a-f]{64}", confirmation_token) is None
+        ):
+            raise SaaSValidationError("Invalid deletion confirmation")
+        async with self._db.transaction():
+            item = await self._deletion_target(user_id, actor_id)
+            if confirm_name != item.username:
+                raise SaaSValidationError("Account confirmation must match exactly")
+            if confirmation_token != self._deletion_preview(item, actor_id)["confirmation_token"]:
+                raise ConflictError("Account revision changed; preview deletion again")
+            await archive_user_audit(self._db, [item.id])
+            await append_user_deletion(self._db, item, actor_id)
+            await self._db.execute("DELETE FROM saas_users WHERE id=?", (item.id,))
+            return item
+
     async def list_audit(self, tenant_id: str | None = None, limit: int = 100, offset: int = 0) -> list[UserAudit]:
         """List static administration events globally or within one tenant, newest first."""
         _page(limit, offset)
-        clause = "" if tenant_id is None else " WHERE tenant_id=?"
-        params: tuple[SQLValue, ...] = () if tenant_id is None else (tenant_id,)
         async with self._db.transaction():
-            rows = await self._db.execute(
-                f"SELECT * FROM saas_user_audit{clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
-                (*params, limit, offset),
-            )
-            actors = {
-                actor_id: await account_actor(self._db, actor_id) for actor_id in {str(row["actor_id"]) for row in rows}
-            }
-            return [UserAudit.model_validate(row | {"actor": actors[str(row["actor_id"])]}) for row in rows]
+            return await list_user_audit(self._db, tenant_id, limit, offset)

@@ -55,7 +55,7 @@ const isAdmin = () => state.me?.role === "platform_admin";
 function clearPasswords(root = document) { root.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; }); }
 function clearDialog(dialog) { clearPasswords(dialog); if (dialog.id === "key-dialog") clearKey(); }
 function signedOut() {
-  analytics.reset(); specifications.resetDeletion();
+  analytics.reset(); specifications.resetDeletion(); lifecycle.reset();
   state.epoch += 1; state.csrf = ""; state.tenant = ""; state.tenants = []; state.channels = []; state.specs = []; state.settings = null; state.source = null; state.confirm = null;
   state.me = null; state.users = []; state.userOffset = 0; state.userNext = null; state.editing = null; state.editingUser = null; state.passwordUser = null;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); clearKey(); clearPasswords();
@@ -70,14 +70,14 @@ function validationMessage(path) {
   return errors.validation;
 }
 async function api(path, method = "GET", body, signal) {
-  const epoch = state.epoch; const headers = { Accept: "application/json" };
+  const epoch = state.epoch; const csrf = state.csrf; const tenant = state.tenant; const headers = { Accept: "application/json" };
   if (method !== "GET") { headers["Content-Type"] = "application/json"; if (state.csrf) headers["X-CSRF-Token"] = state.csrf; }
   let response;
   try { response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
   catch { throw new Error("The server could not be reached. Check your connection, then refresh before retrying a change."); }
-  if (signal?.aborted || epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
+  if (signal?.aborted || epoch !== state.epoch || csrf !== state.csrf || tenant !== state.tenant) throw new Error("Workspace changed. Refresh to see the latest data.");
   const result = await response.json().catch(() => ({}));
-  if (signal?.aborted || epoch !== state.epoch) throw new Error("Workspace changed. Refresh to see the latest data.");
+  if (signal?.aborted || epoch !== state.epoch || csrf !== state.csrf || tenant !== state.tenant) throw new Error("Workspace changed. Refresh to see the latest data.");
   if (response.status === 401) { if (path !== "/api/login") signedOut(); throw new Error(path === "/api/login" ? "The sign-in credentials were not accepted." : "Sign in to continue. Your session may have expired."); }
   if (!response.ok) {
     if (response.status === 403) { clearPasswords(); state.users = []; state.userNext = null; renderUsers(); document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()); if (location.hash === "#users") location.hash = "#overview"; }
@@ -89,9 +89,9 @@ async function api(path, method = "GET", body, signal) {
 }
 async function run(work, trigger) {
   if (state.busy) return;
-  state.busy = true; if (trigger) trigger.disabled = true; $("tenant-select").disabled = true;
+  state.busy = true; if (trigger) trigger.disabled = true; $("tenant-select").disabled = true; lifecycle.sync();
   try { await work(); } catch (error) { notify(error.message || "Unable to complete this action.", true); }
-  finally { state.busy = false; if (trigger) trigger.disabled = false; $("tenant-select").disabled = !isAdmin() || !state.tenants.length; renderUsers(); }
+  finally { state.busy = false; if (trigger) trigger.disabled = false; $("tenant-select").disabled = !isAdmin() || !state.tenants.length; lifecycle.sync(); lifecycle.tenantControls(state.tenants.find((item) => item.id === state.tenant)); renderUsers(); }
 }
 function bind(id, work, event = "click") {
   $(id).addEventListener(event, (e) => { e.preventDefault(); run(() => work(e), event === "submit" ? e.submitter : e.currentTarget); });
@@ -102,6 +102,7 @@ function page() {
   Object.keys(pages).forEach((name) => { $(`page-${name}`).hidden = name !== key; document.querySelector(`[data-page="${name}"]`).toggleAttribute("aria-current", name === key); });
   document.querySelector(`[data-page="${key}"]`).setAttribute("aria-current", "page");
   $("page-title").textContent = pages[key][0]; $("page-description").textContent = pages[key][1];
+  $("tenant-banner").hidden = key !== "overview";
   $("tenant-empty").hidden = !!state.tenant || !isAdmin() || ["audit", "users"].includes(key); $("tenant-content").hidden = !state.tenant;
 }
 function renderTenants() {
@@ -115,7 +116,7 @@ function renderTenants() {
   $("tenant-status").textContent = tenant ? (tenant.enabled ? "Tenant enabled" : "Tenant disabled") : "No tenant selected";
   $("tenant-status").className = `badge ${tenant ? (tenant.enabled ? "" : "negative") : "neutral"}`;
   $("tenant-context").textContent = tenant ? (tenant.enabled ? "Channel access follows each channel's policy." : "All channel access is blocked until this tenant is enabled.") : "Create a tenant to get started.";
-  $("toggle-tenant").disabled = !tenant; $("toggle-tenant").textContent = tenant?.enabled ? "Disable tenant" : "Enable tenant"; page();
+  lifecycle.tenantControls(tenant); page();
 }
 async function refresh() {
   analytics.clear("Refreshing analytics…");
@@ -130,7 +131,7 @@ async function refresh() {
   finally { $("loading").hidden = true; $("main").removeAttribute("aria-busy"); }
 }
 async function loadTenant() {
-  analytics.selectTenant(state.tenant); specifications.resetDeletion(); if ($("spec-delete-dialog").open) $("spec-delete-dialog").close();
+  analytics.selectTenant(state.tenant); lifecycle.reset(); specifications.resetDeletion(); if ($("spec-delete-dialog").open) $("spec-delete-dialog").close();
   state.specs = []; state.channels = []; renderSpecs(); renderChannels(); renderUsage([]);
   if (!state.tenant) return;
   $("loading").hidden = false;
@@ -145,7 +146,7 @@ async function loadTenant() {
   } finally { $("loading").hidden = true; }
 }
 async function enter(session) {
-  state.csrf = session.csrf_token; clearPasswords(); $("login").hidden = true; $("app").hidden = false; $("main").focus(); await refresh();
+  lifecycle.reset(); state.csrf = session.csrf_token; clearPasswords(); $("login").hidden = true; $("app").hidden = false; $("main").focus(); await refresh();
 }
 function action(label, work, danger = false) {
   const button = node("button", label, `text-button${danger ? " danger-text" : ""}`); button.type = "button";
@@ -166,7 +167,8 @@ function renderChannels() {
     details.append(detail("Sandbox", channel.sandbox_mode === "docker" ? "Docker · offline" : "Restricted Python"), detail("Specifications", bindings.join(", ") || "None bound"), detail("Libraries", channel.allowed_imports.join(", ") || "No imports"), detail("Revision", String(channel.revision ?? "—")));
     details.append(detail("Discovery", channel.include_function_summaries ? "Function names and descriptions · bounded continuation" : "Compact server summaries"));
     const actions = node("div", "", "channel-actions");
-    actions.append(action("Edit channel", () => editChannel(channel)), action("Connect", () => connect(channel)), action("Rotate key", () => confirmKey(channel, true)), action("Revoke key", () => confirmKey(channel, false), true));
+    actions.append(lifecycle.icon("edit", "Edit channel", () => editChannel(channel)), lifecycle.icon("connect", "Connect", () => connect(channel)), lifecycle.icon("rotate", "Rotate key", () => confirmKey(channel, true)), lifecycle.icon("revoke", "Revoke key", () => confirmKey(channel, false), true), lifecycle.icon("delete", "Delete channel", () => lifecycle.open("channel", channel), true));
+    card.dataset.channelId = channel.id;
     card.append(header, node("p", channel.id, "channel-id"), details, actions); $("channel-list").append(card);
   });
   if (!state.channels.length) $("channel-list").append(node("p", "No channels yet. Create a channel to bind specifications and define its execution policy.", "empty-state"));
@@ -288,14 +290,7 @@ function confirmKey(channel, rotate) {
     else notify("Channel key revoked. Existing credentials can no longer authenticate.");
   });
 }
-function toggleTenant() {
-  if (!isAdmin()) throw new Error("Only platform administrators can change tenant status.");
-  const tenant = state.tenants.find((item) => item.id === state.tenant);
-  if (!tenant) return;
-  confirmAction(tenant.enabled ? "Disable tenant" : "Enable tenant", `${tenant.name}: ${tenant.enabled ? "all of this tenant's channel access will be blocked." : "enabled channels will be allowed to accept authenticated connections again."}`, async () => {
-    await api(tenantPath(), "PATCH", { enabled: !tenant.enabled }); $("confirm-dialog").close(); await refresh(); notify("Tenant status updated.");
-  });
-}
+function toggleTenant() { lifecycle.toggleTenant(); }
 function renderIdentity() {
   $("identity-name").textContent = state.me?.name || state.me?.username || ""; $("identity-role").textContent = state.me ? (isAdmin() ? "Platform administrator" : "Tenant user") : "";
   ["nav-users", "new-tenant", "empty-new-tenant", "toggle-tenant", "tenant-select"].forEach((id) => { $(id).hidden = !isAdmin(); });
@@ -307,18 +302,7 @@ async function loadUsers(offset = 0) {
   state.users = []; state.userNext = null; renderUsers();
   const result = await api(`/api/users?offset=${offset}`); state.users = result.items; state.userOffset = offset; state.userNext = result.next_offset; renderUsers();
 }
-function renderUsers() {
-  $("user-rows").replaceChildren();
-  state.users.forEach((user) => {
-    const row = node("tr"); const actions = node("td", "", "user-actions");
-    const toggle = action(user.enabled ? "Disable" : "Enable", () => toggleUser(user), user.enabled); toggle.disabled = user.id === state.me?.id;
-    actions.append(action("Edit name", () => editUser(user)), toggle, action("Reset password", () => passwordDialog(user)));
-    row.append(node("td", user.username), node("td", user.name), node("td", user.role === "platform_admin" ? "Platform administrator" : "Tenant user"), node("td", state.tenants.find((tenant) => tenant.id === user.tenant_id)?.name || user.tenant_id || "All tenants"), node("td", user.enabled ? "Enabled" : "Disabled"), actions); $("user-rows").append(row);
-  });
-  if (!state.users.length) emptyRow("user-rows", 6, "No users to display. Create an account or refresh to retry.");
-  $("users-previous").disabled = !isAdmin() || state.userOffset === 0; $("users-next").disabled = !isAdmin() || state.userNext === null;
-  $("users-page").textContent = state.users.length ? `Users ${state.userOffset + 1}–${state.userOffset + state.users.length}` : "No users loaded";
-}
+function renderUsers() { lifecycle.renderUsers(); }
 function userRole() {
   const tenant = $("user-role").value === "tenant_user"; $("user-tenant-field").hidden = !tenant; $("user-tenant").disabled = !tenant; $("user-tenant").required = tenant;
 }
@@ -346,12 +330,6 @@ async function saveUser() {
   $("user-dialog").close();
   if (user && user.id === state.me?.id) { signedOut(); notify("Profile updated. Sign in again to continue."); }
   else { await refresh(); notify("User saved."); }
-}
-function toggleUser(user) {
-  if (!isAdmin() || user.id === state.me?.id) throw new Error("You cannot change this account's status.");
-  confirmAction(user.enabled ? "Disable user" : "Enable user", `${user.username}: ${user.enabled ? "sessions will be revoked. Separately issued shared channel keys remain valid; rotate exposed channel keys too." : "the account will be allowed to sign in again."}`, async () => {
-    await api(`/api/users/${segment(user.id)}`, "PATCH", { enabled: !user.enabled }); $("confirm-dialog").close(); await refresh(); notify("User status updated.");
-  });
 }
 function passwordDialog(user = null) {
   if (user ? !isAdmin() : !state.me?.id) throw new Error("A named account is required for this action.");
@@ -386,7 +364,7 @@ function wireActions() {
   const newTenant = () => { if (!isAdmin()) throw new Error("Only platform administrators can create tenants."); $("tenant-form").reset(); showDialog("tenant-dialog"); };
   bind("new-tenant", newTenant); bind("empty-new-tenant", newTenant); bind("toggle-tenant", toggleTenant);
   bind("new-channel", () => editChannel());
-  bind("refresh", refresh); bind("logout", async () => { analytics.reset(); try { await api("/api/logout", "POST", {}); } finally { signedOut(); } notify("Signed out."); });
+  bind("refresh", refresh); bind("logout", async () => { analytics.reset(); lifecycle.reset(); try { await api("/api/logout", "POST", {}); } finally { signedOut(); } notify("Signed out."); });
   $("tenant-select").addEventListener("change", () => run(async () => { if (!isAdmin()) { renderTenants(); return; } state.epoch += 1; state.tenant = $("tenant-select").value; clearKey(); renderTenants(); await loadTenant(); notify("Tenant workspace loaded."); }));
   bind("download-source", downloadSource); bind("copy-endpoint", () => copy($("endpoint").value)); bind("copy-config", () => copy($("client-config").textContent)); bind("copy-key", () => copy($("channel-token").value));
   bind("reveal-key", () => { const reveal = $("channel-token").type === "password"; $("channel-token").type = reveal ? "text" : "password"; $("reveal-key").textContent = reveal ? "Hide key" : "Reveal key"; $("reveal-key").setAttribute("aria-pressed", String(reveal)); });
@@ -396,5 +374,5 @@ function wireActions() {
   $("source-dialog").addEventListener("close", () => { state.source = null; $("source-content").textContent = ""; $("source-metadata").textContent = ""; });
   window.addEventListener("hashchange", page); window.addEventListener("pagehide", clearKey);
 }
-wireForms(); wireActions(); wireAccounts(); specifications.wire(); analytics.wire(); page();
+wireForms(); wireActions(); wireAccounts(); specifications.wire(); lifecycle.wire(); analytics.wire(); page();
 run(async () => { try { await enter(await api("/api/session")); } catch (error) { if (state.csrf) throw error; notify(error.message, true); } });

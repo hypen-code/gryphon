@@ -26,7 +26,7 @@ from gryphon.server import create_server
 from gryphon.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from fastmcp.server.http import StarletteWithLifespan
@@ -153,21 +153,35 @@ class ChannelRuntimeManager:
 
     The enclosing app must verify the tenant/channel key in its database on every
     request, set verified_channel to that channel's ID, and reset the context in
-    a finally block. Invalidation requires a newer revision before reacquisition.
+    a finally block. Without a validator, invalidation requires a newer revision
+    before reacquisition. Hosted validation checks authoritative enabled snapshots
+    under the manager lock; store mutations must commit before requesting this lock.
     The enclosing process owns the hosted database lease; executors additionally
     hold their ordinary exclusive per-channel run-ledger leases.
     """
 
     def __init__(
-        self, base: GryphonConfig, state_dir: Path, max_runtimes: int, *, analytics: AnalyticsStore | None = None
+        self,
+        base: GryphonConfig,
+        state_dir: Path,
+        max_runtimes: int,
+        *,
+        analytics: AnalyticsStore | None = None,
+        validator: Callable[[Channel], Awaitable[bool]] | None = None,
     ) -> None:
-        """Copy operator policy without reading environment or performing filesystem I/O."""
+        """Copy operator policy without reading environment or performing filesystem I/O.
+
+        The optional validator must reject deleted, disabled, or noncurrent snapshots.
+        It runs under this manager's lock and must not acquire that lock recursively.
+        Without it, retain revision watermarks for legacy standalone callers.
+        """
         if max_runtimes < 1:
             raise ValueError("Hosted runtime capacity must be positive")
         self._base = base.model_copy(deep=True)
         self._state_dir = state_dir
         self._maximum = max_runtimes
         self._analytics = analytics
+        self._validator = validator
         self._execution_slots = asyncio.Semaphore(base.max_concurrent_executions)
         self._runtimes: dict[str, _Runtime] = {}
         self._revoked: dict[str, int] = {}
@@ -195,7 +209,8 @@ class ChannelRuntimeManager:
         """Serialize initialization/replacement so no two executors can own a channel ledger."""
         if self._closed:
             raise SecurityViolationError("Hosted runtime manager is closed")
-        if channel.revision <= self._revoked.get(channel.id, 0):
+        await self._validate_current(channel)
+        if self._closed or channel.revision <= self._revoked.get(channel.id, 0):
             raise ConflictError("Channel revision has been revoked")
         runtime = self._runtimes.get(channel.id)
         if runtime is not None:
@@ -213,13 +228,29 @@ class ChannelRuntimeManager:
         self._runtimes[channel.id] = runtime
         try:
             await runtime.start(config, specs, self._execution_slots)
+            await self._validate_current(channel)
             if self._closed or not runtime.verifier.active or channel.revision <= self._revoked.get(channel.id, 0):
                 raise ConflictError("Channel authority changed during initialization")
         except BaseException:
-            await runtime.close()
-            self._runtimes.pop(channel.id, None)
+            await finish_cleanup(self._discard_startup(channel.id, runtime))
             raise
         return runtime
+
+    async def _validate_current(self, channel: Channel) -> None:
+        """Recheck exact database authority under the manager lock, never replacing gateway key checks."""
+        if self._validator is not None and await self._validator(channel) is not True:
+            raise ConflictError("Channel authority is no longer current")
+
+    def _forget_revoked(self, channel_id: str) -> None:
+        """Drop completed watermarks under the lock only when future acquisitions revalidate live state."""
+        if self._validator is not None:
+            self._revoked.pop(channel_id, None)
+
+    async def _discard_startup(self, channel_id: str, runtime: _Runtime) -> None:
+        """Finish rollback and capacity release together despite repeated caller cancellation."""
+        await runtime.close()
+        self._runtimes.pop(channel_id, None)
+        self._forget_revoked(channel_id)
 
     async def invalidate(self, channel_id: str, before_revision: int | None = None) -> None:
         """Revoke older authority without disabling a concurrently initialized committed revision.
@@ -246,12 +277,14 @@ class ChannelRuntimeManager:
             runtime = self._runtimes.get(channel_id)
             if runtime is not None and (before_revision is None or runtime.channel.revision < before_revision):
                 await self._retire(channel_id, runtime)
+            self._forget_revoked(channel_id)
 
     async def _retire(self, channel_id: str, runtime: _Runtime) -> None:
         """Keep failed cleanup entries capacity-accounted and forbid stale resurrection."""
         self._revoked[channel_id] = max(self._revoked.get(channel_id, 0), runtime.channel.revision)
         await runtime.close()
         self._runtimes.pop(channel_id, None)
+        self._forget_revoked(channel_id)
 
     async def close(self) -> None:
         """Revoke all channels before waiting, and finish cleanup despite caller cancellation."""

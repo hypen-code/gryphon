@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from gryphon.errors import InputValidationError
+from gryphon.runtime.execution_cleanup import finish_cleanup
 from gryphon.saas_access import account, actor_id
 from gryphon.saas_auth import COOKIE_NAME
 from gryphon.saas_http import admin_endpoint, failure, fields, read_object
@@ -53,6 +54,16 @@ class UserAPI:
                 "/api/users/{user_id}",
                 admin_endpoint(self.sessions, self.update, self.access.platform),
                 methods=["PATCH"],
+            ),
+            Route(
+                "/api/users/{user_id}/deletion",
+                admin_endpoint(self.sessions, self.preview_deletion, self.access.platform),
+                methods=["GET"],
+            ),
+            Route(
+                "/api/users/{user_id}",
+                admin_endpoint(self.sessions, self.delete, self.access.platform),
+                methods=["DELETE"],
             ),
             Route(
                 "/api/users/{user_id}/password",
@@ -131,6 +142,33 @@ class UserAPI:
         user = await self.users.update_user(user_id, **data, actor_id=actor_id(request))
         self.sessions.revoke_user(user.id, before_revision=user.revision)
         return JSONResponse(user.model_dump())
+
+    async def preview_deletion(self, request: Request) -> Response:
+        """Preview exact consent, rechecking platform authority before exposing public account details."""
+        preview = await self.users.preview_user_deletion(request.path_params["user_id"], actor_id(request))
+        denied = await self.access.platform(request)
+        return denied if denied is not None else JSONResponse(preview)
+
+    async def delete(self, request: Request) -> Response:
+        """Require closed bounded consent and fresh platform authority after reading the body."""
+        data = await read_object(request, 4096)
+        fields(data, {"confirm_name", "confirmation_token"})
+        if not isinstance(data["confirm_name"], str) or not isinstance(data["confirmation_token"], str):
+            raise InputValidationError("Invalid deletion confirmation")
+        denied = await self.access.platform(request)
+        if denied is not None:
+            return denied
+        return await finish_cleanup(
+            self._delete_user(
+                request.path_params["user_id"], data["confirm_name"], data["confirmation_token"], actor_id(request)
+            )
+        )
+
+    async def _delete_user(self, user_id: str, confirm_name: str, confirmation_token: str, actor: str) -> Response:
+        """Commit physical deletion and revoke all account sessions in an owned cleanup task."""
+        user = await self.users.delete_user(user_id, confirm_name, confirmation_token, actor)
+        self.sessions.revoke_user(user.id, before_revision=user.revision + 1)
+        return JSONResponse({"deleted": True, "user_id": user.id})
 
     async def reset(self, request: Request) -> Response:
         """Reset credentials and advance session revision without returning a password or hash."""
